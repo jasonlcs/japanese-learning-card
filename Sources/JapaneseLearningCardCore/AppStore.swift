@@ -62,7 +62,12 @@ public actor AppStore {
     }
 
     public func read() -> AppSnapshot {
-        snapshot
+        do {
+            try reloadFromDisk()
+        } catch {
+            // Keep the in-memory snapshot if the backing database cannot be reloaded.
+        }
+        return snapshot
     }
 
     public func ensureAISentinelSource(extractionPrompt: String) {
@@ -90,6 +95,19 @@ public actor AppStore {
         guard sqlite3_open(databaseURL.path, &database) == SQLITE_OK else {
             throw SQLiteStoreError.openFailed(message: lastErrorMessage())
         }
+    }
+
+    private func reloadFromDisk() throws {
+        closeDatabase()
+        try open()
+        try migrate()
+        snapshot = try loadSnapshot()
+    }
+
+    private func closeDatabase() {
+        guard let database else { return }
+        sqlite3_close(database)
+        self.database = nil
     }
 
     private func migrate() throws {
@@ -315,11 +333,25 @@ public actor AppStore {
     }
 
     private static func defaultDatabaseURL() -> URL {
+        if let iCloudDatabaseURL = iCloudDriveDatabaseURL() {
+            return iCloudDatabaseURL
+        }
+
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser
         return base
             .appendingPathComponent("JapaneseLearningCard", isDirectory: true)
             .appendingPathComponent("store.sqlite")
+    }
+
+    private static func iCloudDriveDatabaseURL() -> URL? {
+        let cloudRoot = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs")
+        let appDirectory = cloudRoot.appendingPathComponent("JapaneseLearningCard", isDirectory: true)
+        guard FileManager.default.fileExists(atPath: cloudRoot.path) else {
+            return nil
+        }
+        return appDirectory.appendingPathComponent("store.sqlite")
     }
 
     private static func iso8601String(from date: Date) -> String {
