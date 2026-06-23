@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-notarize-release:
+    runs-on: macos-14
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Developer ID signing
+        run: |
+          CERT_BASE64="${{ secrets.DEVELOPER_CERTIFICATE_BASE64 }}"
+          CERT_PASSWORD="${{ secrets.CERTIFICATE_PASSWORD }}"
+
+          if [ -z "$CERT_BASE64" ]; then
+            echo "SIGNING_IDENTITY=" >> "$GITHUB_ENV"
+            echo "🔸 未設定 Developer ID 憑證，將使用 ad-hoc 簽名"
+            exit 0
+          fi
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          echo "$CERT_BASE64" | base64 -d > "$RUNNER_TEMP/certificate.p12"
+
+          security create-keychain -p "" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "" "$KEYCHAIN_PATH"
+          security import "$RUNNER_TEMP/certificate.p12" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$CERT_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | sed 's/"//g')
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" "$KEYCHAIN_PATH" >/dev/null 2>&1 || true
+
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID" | head -1 | grep -oE '[A-F0-9]{40}' || true)
+          if [ -z "$IDENTITY" ]; then
+            echo "SIGNING_IDENTITY=" >> "$GITHUB_ENV"
+            echo "⚠️ 找不到 Developer ID 憑證，將使用 ad-hoc 簽名"
+            exit 0
+          fi
+
+          echo "SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "✅ Developer ID: $IDENTITY"
+
+      - name: Build .app and DMG
+        run: |
+          chmod +x build-app.sh
+          ./build-app.sh
+
+      - name: Notarize and staple DMG
+        if: ${{ env.SIGNING_IDENTITY != '' }}
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$APPLE_ID" ] || [ -z "$APPLE_APP_PASSWORD" ] || [ -z "$APPLE_TEAM_ID" ]; then
+            echo "⚠️ 未設定公證 secrets（APPLE_ID / APPLE_APP_PASSWORD / APPLE_TEAM_ID），略過公證"
+            exit 0
+          fi
+
+          DMG=".build/app/JapaneseLearningCard.dmg"
+
+          echo "▸ 送交 Apple 公證..."
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+
+          echo "▸ staple DMG..."
+          xcrun stapler staple "$DMG"
+
+          echo "▸ 驗證 Gatekeeper..."
+          spctl --assess --type open --context context:primary-signature -v "$DMG" || true
+
+      - name: Read version from Info.plist
+        id: version
+        run: |
+          VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" Sources/JapaneseLearningCard/Info.plist)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create Release and Upload DMG
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "v${{ steps.version.outputs.version }}"
+          files: .build/app/JapaneseLearningCard.dmg
+          generate_release_notes: true
+
+      - name: Cleanup keychain
+        if: always()
+        run: |
+          if [ -n "${SIGNING_IDENTITY:-}" ]; then
+            security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" 2>/dev/null || true
+          fi
