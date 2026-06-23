@@ -30,6 +30,8 @@ public actor AppStore {
     private let databaseURL: URL
     private var database: OpaquePointer?
     private var snapshot: AppSnapshot
+    private var lastDatabaseModificationDate: Date?
+    private let stateLock = NSLock()
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
@@ -47,6 +49,9 @@ public actor AppStore {
 
         do {
             try FileManager.default.createDirectory(at: databaseURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if fileURL == nil {
+                try Self.migrateLegacyDatabaseIfNeeded(to: databaseURL)
+            }
             try open()
             try migrate()
             let loaded = try loadSnapshot()
@@ -56,16 +61,27 @@ public actor AppStore {
             } else {
                 snapshot = loaded
             }
+            lastDatabaseModificationDate = try? databaseURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
         } catch {
             snapshot = AppSnapshot()
         }
     }
 
     public func read() -> AppSnapshot {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+
         do {
-            try reloadFromDisk()
+            return try refreshFromDiskIfNeeded()
         } catch {
-            // Keep the in-memory snapshot if the backing database cannot be reloaded.
+            print("Failed to reload database from disk at \(databaseURL.path): \(error). This may be resolved by restarting the app or checking iCloud Drive connectivity.")
+            return snapshot
+        }
+    }
+
+    private func refreshFromDiskIfNeeded() throws -> AppSnapshot {
+        if hasDatabaseChangedOnDisk() {
+            try reloadFromDisk()
         }
         return snapshot
     }
@@ -97,16 +113,39 @@ public actor AppStore {
         }
     }
 
+    private func hasDatabaseChangedOnDisk() -> Bool {
+        guard FileManager.default.fileExists(atPath: databaseURL.path) else {
+            return false
+        }
+        guard let currentDate = try? databaseURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate else {
+            return false
+        }
+        guard let lastDate = lastDatabaseModificationDate else {
+            return false
+        }
+        return currentDate != lastDate
+    }
+
     private func reloadFromDisk() throws {
         closeDatabase()
-        try open()
-        try migrate()
-        snapshot = try loadSnapshot()
+        do {
+            try open()
+            try migrate()
+            snapshot = try loadSnapshot()
+            lastDatabaseModificationDate = try? databaseURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+        } catch {
+            lastDatabaseModificationDate = nil
+            throw error
+        }
     }
 
     private func closeDatabase() {
         guard let database else { return }
-        sqlite3_close(database)
+        let closeResult = sqlite3_close(database)
+        if closeResult != SQLITE_OK {
+            print("Failed to close database cleanly at \(databaseURL.path): \(closeResult) (\(lastErrorMessage())). This may require restarting the app to avoid stale state.")
+            return
+        }
         self.database = nil
     }
 
@@ -336,7 +375,10 @@ public actor AppStore {
         if let iCloudDatabaseURL = iCloudDriveDatabaseURL() {
             return iCloudDatabaseURL
         }
+        return localDatabaseURL()
+    }
 
+    private static func localDatabaseURL() -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser
         return base
@@ -344,11 +386,30 @@ public actor AppStore {
             .appendingPathComponent("store.sqlite")
     }
 
+    static func migrateLegacyDatabaseIfNeeded(to databaseURL: URL, legacyDatabaseURL: URL? = nil) throws {
+        guard !FileManager.default.fileExists(atPath: databaseURL.path) else {
+            return
+        }
+
+        let legacyURL = legacyDatabaseURL ?? localDatabaseURL()
+        guard FileManager.default.fileExists(atPath: legacyURL.path) else {
+            return
+        }
+
+        try FileManager.default.createDirectory(at: databaseURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: legacyURL, to: databaseURL)
+    }
+
     private static func iCloudDriveDatabaseURL() -> URL? {
-        let cloudRoot = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs")
-        let appDirectory = cloudRoot.appendingPathComponent("JapaneseLearningCard", isDirectory: true)
-        guard FileManager.default.fileExists(atPath: cloudRoot.path) else {
+        guard let ubiquityContainer = FileManager.default.url(forUbiquityContainerIdentifier: nil) else {
+            return nil
+        }
+
+        let appDirectory = ubiquityContainer.appendingPathComponent("Documents/JapaneseLearningCard", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: appDirectory, withIntermediateDirectories: true)
+        } catch {
+            print("Unable to create the iCloud-backed database directory at \(appDirectory.path): \(error)")
             return nil
         }
         return appDirectory.appendingPathComponent("store.sqlite")

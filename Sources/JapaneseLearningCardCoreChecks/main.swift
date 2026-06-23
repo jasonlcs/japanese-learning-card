@@ -13,6 +13,8 @@ struct CoreChecks {
         try exampleReadingDecoding()
         try await pipelineRefreshesEnabledSourcesWithMocks()
         try await storePersistsQuizQuestions()
+        try await storeMigratesLegacyDatabaseWhenNeeded()
+        try await storeReloadsFromDiskWhenDatabaseChangesExternally()
         try aiArticleRequestAndDecoding()
         try await pipelineGeneratesAIArticleAndCards()
         try await storePersistsGeneratedArticles()
@@ -178,6 +180,44 @@ struct CoreChecks {
         let snapshot = await reloaded.read()
         expect(snapshot.quizzes.count == 1, "quiz should persist in SQLite")
         expect(snapshot.quizzes[0].question == "「駅」の意味は？", "quiz question should round trip")
+    }
+
+    private static func storeMigratesLegacyDatabaseWhenNeeded() async throws {
+        let tempDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        let legacyDatabaseURL = tempDirectory.appendingPathComponent("legacy.sqlite")
+        let targetDatabaseURL = tempDirectory.appendingPathComponent("target.sqlite")
+        try Data("legacy-db".utf8).write(to: legacyDatabaseURL)
+
+        try AppStore.migrateLegacyDatabaseIfNeeded(to: targetDatabaseURL, legacyDatabaseURL: legacyDatabaseURL)
+        expect(FileManager.default.fileExists(atPath: targetDatabaseURL.path), "target database should exist")
+
+        try AppStore.migrateLegacyDatabaseIfNeeded(to: targetDatabaseURL, legacyDatabaseURL: legacyDatabaseURL)
+        expect(FileManager.default.fileExists(atPath: targetDatabaseURL.path), "migration should be idempotent")
+    }
+
+    private static func storeReloadsFromDiskWhenDatabaseChangesExternally() async throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("store.sqlite")
+        let store = await AppStore(fileURL: fileURL)
+        try await store.update { state in
+            state.settings.displayIntervalMinutes = 5
+        }
+
+        let initialModificationDate = try fileURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+
+        let externalStore = await AppStore(fileURL: fileURL)
+        try await externalStore.update { state in
+            state.settings.displayIntervalMinutes = 17
+        }
+
+        let updatedModificationDate = try fileURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+        expect(updatedModificationDate != nil, "database file should receive a new modification date")
+        expect(initialModificationDate != updatedModificationDate, "database file should change when another writer updates it")
+
+        let snapshot = await store.read()
+        expect(snapshot.settings.displayIntervalMinutes == 17, "store should reload from disk when another writer updates the database")
     }
 
     private static func aiArticleRequestAndDecoding() throws {
