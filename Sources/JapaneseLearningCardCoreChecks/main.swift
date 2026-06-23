@@ -5,6 +5,7 @@ import JapaneseLearningCardCore
 struct CoreChecks {
     static func main() async throws {
         try sourceValidatorAcceptsHTTPAndHTTPS()
+        try sourceValidatorBlocksSSRF()
         schedulerClampsIntervals()
         cardSelectorPrioritizesFreshThenOldestReviewingAndSkipsSkipped()
         htmlExtractorRemovesScriptsStylesTagsAndDecodesEntities()
@@ -12,6 +13,9 @@ struct CoreChecks {
         try exampleReadingDecoding()
         try await pipelineRefreshesEnabledSourcesWithMocks()
         try await storePersistsQuizQuestions()
+        try aiArticleRequestAndDecoding()
+        try await pipelineGeneratesAIArticleAndCards()
+        try await storePersistsGeneratedArticles()
         print("All JapaneseLearningCardCore checks passed.")
     }
 
@@ -26,6 +30,27 @@ struct CoreChecks {
         expectThrows {
             try validator.validate(URL(string: "https:///missing-host")!)
         }
+    }
+
+    private static func sourceValidatorBlocksSSRF() throws {
+        let validator = SourceValidator()
+        let blockedHosts = [
+            "http://127.0.0.1/admin",
+            "http://localhost:6379",
+            "http://10.0.0.5/secret",
+            "http://172.16.0.1/private",
+            "http://192.168.1.1/router",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[::1]/",
+            "http://224.0.0.1/multicast"
+        ]
+        for raw in blockedHosts {
+            let url = URL(string: raw)!
+            expectThrows {
+                try validator.validate(url)
+            }
+        }
+        try validator.validate(URL(string: "https://news.yahoo.co.jp/")!)
     }
 
     private static func schedulerClampsIntervals() {
@@ -155,6 +180,103 @@ struct CoreChecks {
         expect(snapshot.quizzes[0].question == "「駅」の意味は？", "quiz question should round trip")
     }
 
+    private static func aiArticleRequestAndDecoding() throws {
+        let settings = AppSettings(providerConfig: ProviderConfig(baseURL: URL(string: "https://api.example.test/v1")!, model: "custom-model"))
+
+        let body = OpenAICompatibleLLMClient.articleRequestBody(theme: "旅行", jlptLevels: [.n3, .n2], settings: settings)
+        expect(body.model == "custom-model", "article request should use configured model")
+        expect(body.messages.last?.content.contains("旅行") == true, "article request should include theme")
+        expect(body.messages.last?.content.contains("N2") == true, "article request should list JLPT levels")
+        expect(body.messages.first?.content.contains("N5") == true, "system prompt should mention N5 guidance when not requested")
+
+        let compactBody = OpenAICompatibleLLMClient.articleRequestBody(theme: "  ", jlptLevels: [.n4], settings: settings)
+        expect(compactBody.messages.last?.content.contains("隨機") == true || compactBody.messages.last?.content.contains("random".lowercased()) == true, "empty theme should fall back to random prompt")
+
+        let draft = try OpenAICompatibleLLMClient.decodeArticle(
+            from: #"{"theme":"旅行","title":"京都之旅","text":"今日は京都に行きました。"}"#,
+            fallbackTheme: "fallback"
+        )
+        expect(draft.theme == "旅行", "article theme should decode")
+        expect(draft.title == "京都之旅", "article title should decode")
+        expect(draft.text == "今日は京都に行きました。", "article text should decode")
+
+        let fallbackDraft = try OpenAICompatibleLLMClient.decodeArticle(
+            from: #"{"theme":"","title":"","text":"本文"}"#,
+            fallbackTheme: "備用"
+        )
+        expect(fallbackDraft.theme == "備用", "empty theme should fall back to provided theme")
+        expect(fallbackDraft.title == "備用", "empty title should fall back to theme")
+    }
+
+    private static func pipelineGeneratesAIArticleAndCards() async throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("store.sqlite")
+        let store = await AppStore(fileURL: fileURL)
+        var settings = AppSettings()
+        settings.aiArticleLevels = [.n3, .n2]
+        settings.aiArticleCustomTheme = "旅行"
+        let captured = settings
+        try await store.update { state in
+            state.settings = captured
+        }
+
+        let pipeline = LearningPipeline(
+            store: store,
+            crawler: MockCrawler(document: CrawledDocument(
+                sourceId: UUID(),
+                url: URL(string: "https://example.com")!,
+                title: "unused",
+                plainText: "unused",
+                contentHash: "unused"
+            )),
+            llmClient: MockLLMClient(cardURL: URL(string: "https://example.com")!)
+        )
+
+        let article = await pipeline.generateAIArticleNow(theme: "旅行")
+        expect(article != nil, "pipeline should return generated article")
+        let snapshot = await store.read()
+        expect(snapshot.generatedArticles.count == 1, "generated article should be persisted")
+        expect(snapshot.documents.count == 1, "AI article should also become a crawled document")
+        expect(snapshot.cards.count == 1, "AI article should produce at least one card")
+        expect(snapshot.cards[0].word == "電車", "card from AI article should come from mock client")
+        expect(snapshot.sources.contains(where: { $0.id == AISource.sentinelSourceId }), "sentinel AI source should be created")
+        let sentinel = snapshot.sources.first(where: { $0.id == AISource.sentinelSourceId })
+        expect(sentinel?.extractionPrompt.contains("旅行") == true, "sentinel extraction prompt should reflect theme")
+        expect(sentinel?.lastError == nil, "sentinel source should have no error")
+
+        let dup = await pipeline.generateAIArticleNow(theme: "旅行")
+        expect(dup == nil, "duplicate AI article should be skipped")
+
+        let afterDup = await store.read()
+        expect(afterDup.generatedArticles.count == 1, "duplicate should not be stored again")
+    }
+
+    private static func storePersistsGeneratedArticles() async throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("store.sqlite")
+        let store = await AppStore(fileURL: fileURL)
+        let article = GeneratedArticle(
+            theme: "旅行",
+            jlptLevels: [.n3, .n2],
+            title: "京都之旅",
+            plainText: "今日は京都に行きました。",
+            contentHash: "hash-xyz",
+            sourceId: AISource.sentinelSourceId,
+            cardCount: 3
+        )
+        try await store.update { state in
+            state.generatedArticles = [article]
+        }
+
+        let reloaded = await AppStore(fileURL: fileURL)
+        let snapshot = await reloaded.read()
+        expect(snapshot.generatedArticles.count == 1, "generated article should persist in SQLite")
+        expect(snapshot.generatedArticles[0].title == "京都之旅", "article title should round trip")
+        expect(snapshot.generatedArticles[0].jlptLevels == [.n3, .n2], "article levels should round trip")
+    }
+
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
         if !condition() {
             fatalError("Check failed: \(message)")
@@ -197,6 +319,7 @@ private struct MockCrawler: Crawling {
 
 private struct MockLLMClient: LLMClient {
     var cardURL: URL
+    private let articleText = "今日は京都へ行きました。古い寺を見ました。電車の窓から山が見えました。夜は旅館で温泉に入りました。"
 
     func generateCards(document: CrawledDocument, sourcePrompt: String, settings: AppSettings) async throws -> [LearningCard] {
         [
@@ -226,5 +349,14 @@ private struct MockLLMClient: LLMClient {
                 explanationZh: "電車是鐵路交通工具。"
             )
         ]
+    }
+
+    func generateArticle(theme: String, jlptLevels: [JLPTLevel], settings: AppSettings) async throws -> AIArticleDraft {
+        let resolvedTheme = theme.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "京都の朝" : theme
+        return AIArticleDraft(
+            theme: resolvedTheme,
+            title: "\(resolvedTheme)の話",
+            text: articleText
+        )
     }
 }

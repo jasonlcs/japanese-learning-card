@@ -7,19 +7,22 @@ public struct AppSnapshot: Codable, Equatable, Sendable {
     public var documents: [CrawledDocument]
     public var cards: [LearningCard]
     public var quizzes: [QuizQuestion]
+    public var generatedArticles: [GeneratedArticle]
 
     public init(
         settings: AppSettings = AppSettings(),
         sources: [Source] = [],
         documents: [CrawledDocument] = [],
         cards: [LearningCard] = [],
-        quizzes: [QuizQuestion] = []
+        quizzes: [QuizQuestion] = [],
+        generatedArticles: [GeneratedArticle] = []
     ) {
         self.settings = settings
         self.sources = sources
         self.documents = documents
         self.cards = cards
         self.quizzes = quizzes
+        self.generatedArticles = generatedArticles
     }
 }
 
@@ -60,6 +63,18 @@ public actor AppStore {
 
     public func read() -> AppSnapshot {
         snapshot
+    }
+
+    public func ensureAISentinelSource(extractionPrompt: String) {
+        guard !snapshot.sources.contains(where: { $0.id == AISource.sentinelSourceId }) else { return }
+        let source = Source(
+            id: AISource.sentinelSourceId,
+            url: AISource.sentinelURL,
+            isEnabled: true,
+            extractionPrompt: extractionPrompt
+        )
+        snapshot.sources.append(source)
+        try? persist()
     }
 
     public func exportableDatabaseURL() -> URL {
@@ -119,6 +134,14 @@ public actor AppStore {
             json TEXT NOT NULL
         );
         """)
+        try execute("""
+        CREATE TABLE IF NOT EXISTS generated_articles (
+            id TEXT PRIMARY KEY NOT NULL,
+            content_hash TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            json TEXT NOT NULL
+        );
+        """)
     }
 
     private func loadSnapshot() throws -> AppSnapshot {
@@ -127,7 +150,8 @@ public actor AppStore {
             sources: try loadRows(table: "sources", orderBy: "url"),
             documents: try loadRows(table: "crawled_documents", orderBy: "fetched_at DESC"),
             cards: try loadRows(table: "learning_cards", orderBy: "word"),
-            quizzes: try loadRows(table: "quiz_questions", orderBy: "created_at DESC")
+            quizzes: try loadRows(table: "quiz_questions", orderBy: "created_at DESC"),
+            generatedArticles: try loadRows(table: "generated_articles", orderBy: "generated_at DESC")
         )
     }
 
@@ -168,6 +192,14 @@ public actor AppStore {
                     quiz.status.rawValue,
                     Self.iso8601String(from: quiz.createdAt),
                     try encodeString(quiz)
+                ]
+            }
+            try replaceTable("generated_articles", values: snapshot.generatedArticles) { article in
+                [
+                    article.id.uuidString,
+                    article.contentHash,
+                    Self.iso8601String(from: article.generatedAt),
+                    try encodeString(article)
                 ]
             }
             try execute("COMMIT;")
@@ -224,6 +256,8 @@ public actor AppStore {
             placeholders = "(id, word, status, source_url, json) VALUES (?, ?, ?, ?, ?)"
         case "quiz_questions":
             placeholders = "(id, source_word, status, created_at, json) VALUES (?, ?, ?, ?, ?)"
+        case "generated_articles":
+            placeholders = "(id, content_hash, generated_at, json) VALUES (?, ?, ?, ?)"
         default:
             throw SQLiteStoreError.invalidTable(table)
         }

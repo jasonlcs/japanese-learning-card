@@ -69,6 +69,16 @@ public enum JLPTLevel: String, Codable, CaseIterable, Identifiable, Sendable {
     public var id: String { rawValue }
 }
 
+public enum AISource {
+    public static let sentinelSourceId = UUID(uuidString: "00000000-0000-0000-0000-0000000000A1")!
+    public static let sentinelURL = URL(string: "ai-article://generator")!
+    public static let sentinelExtractionPrompt = "請從這篇 AI 生成的文章中挑選適合日文學習的自然日文句子與重要單字。文章主題：%@，目標 JLPT 等級：%@。"
+
+    public static func makeExtractionPrompt(theme: String, levels: String) -> String {
+        String(format: sentinelExtractionPrompt, theme, levels)
+    }
+}
+
 public enum VerbFormType: String, Codable, CaseIterable, Identifiable, Sendable {
     case ichidan = "一段動詞"
     case godan = "五段動詞"
@@ -292,24 +302,97 @@ public struct ProviderConfig: Codable, Equatable, Sendable {
     }
 }
 
+public struct GeneratedArticle: Codable, Identifiable, Equatable, Sendable {
+    public let id: UUID
+    public var theme: String
+    public var jlptLevels: [JLPTLevel]
+    public var title: String
+    public var plainText: String
+    public var contentHash: String
+    public var sourceId: UUID
+    public var generatedAt: Date
+    public var cardCount: Int
+
+    public init(
+        id: UUID = UUID(),
+        theme: String,
+        jlptLevels: [JLPTLevel],
+        title: String,
+        plainText: String,
+        contentHash: String,
+        sourceId: UUID,
+        generatedAt: Date = Date(),
+        cardCount: Int = 0
+    ) {
+        self.id = id
+        self.theme = theme
+        self.jlptLevels = jlptLevels
+        self.title = title
+        self.plainText = plainText
+        self.contentHash = contentHash
+        self.sourceId = sourceId
+        self.generatedAt = generatedAt
+        self.cardCount = cardCount
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        self.theme = try container.decode(String.self, forKey: .theme)
+        self.jlptLevels = try container.decodeIfPresent([JLPTLevel].self, forKey: .jlptLevels) ?? []
+        self.title = try container.decode(String.self, forKey: .title)
+        self.plainText = try container.decode(String.self, forKey: .plainText)
+        self.contentHash = try container.decode(String.self, forKey: .contentHash)
+        self.sourceId = try container.decode(UUID.self, forKey: .sourceId)
+        self.generatedAt = try container.decodeIfPresent(Date.self, forKey: .generatedAt) ?? Date()
+        self.cardCount = try container.decodeIfPresent(Int.self, forKey: .cardCount) ?? 0
+    }
+}
+
 public struct AppSettings: Codable, Equatable, Sendable {
     public var displayIntervalMinutes: Int
     public var visibleDurationSeconds: Int
     public var crawlIntervalHours: Int
     public var defaultExtractionPrompt: String
     public var providerConfig: ProviderConfig
+    public var aiArticleEnabled: Bool
+    public var aiArticleIntervalHours: Int
+    public var aiArticleLevels: [JLPTLevel]
+    public var aiArticleCustomTheme: String
 
     public init(
         displayIntervalMinutes: Int = 30,
         visibleDurationSeconds: Int = 20,
         crawlIntervalHours: Int = 6,
         defaultExtractionPrompt: String = "請從網頁文字中挑選適合日文學習的自然日文句子與重要單字。",
-        providerConfig: ProviderConfig = ProviderConfig()
+        providerConfig: ProviderConfig = ProviderConfig(),
+        aiArticleEnabled: Bool = false,
+        aiArticleIntervalHours: Int = 12,
+        aiArticleLevels: [JLPTLevel] = JLPTLevel.allCases,
+        aiArticleCustomTheme: String = ""
     ) {
         self.displayIntervalMinutes = displayIntervalMinutes
         self.visibleDurationSeconds = visibleDurationSeconds
         self.crawlIntervalHours = crawlIntervalHours
         self.defaultExtractionPrompt = defaultExtractionPrompt
         self.providerConfig = providerConfig
+        self.aiArticleEnabled = aiArticleEnabled
+        self.aiArticleIntervalHours = aiArticleIntervalHours
+        self.aiArticleLevels = aiArticleLevels.isEmpty ? JLPTLevel.allCases : aiArticleLevels
+        self.aiArticleCustomTheme = aiArticleCustomTheme
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.displayIntervalMinutes = try container.decodeIfPresent(Int.self, forKey: .displayIntervalMinutes) ?? 30
+        self.visibleDurationSeconds = try container.decodeIfPresent(Int.self, forKey: .visibleDurationSeconds) ?? 20
+        self.crawlIntervalHours = try container.decodeIfPresent(Int.self, forKey: .crawlIntervalHours) ?? 6
+        self.defaultExtractionPrompt = try container.decodeIfPresent(String.self, forKey: .defaultExtractionPrompt) ?? "請從網頁文字中挑選適合日文學習的自然日文句子與重要單字。"
+        self.providerConfig = try container.decodeIfPresent(ProviderConfig.self, forKey: .providerConfig) ?? ProviderConfig()
+        self.aiArticleEnabled = try container.decodeIfPresent(Bool.self, forKey: .aiArticleEnabled) ?? false
+        self.aiArticleIntervalHours = try container.decodeIfPresent(Int.self, forKey: .aiArticleIntervalHours) ?? 12
+        let decodedLevels = try container.decodeIfPresent([JLPTLevel].self, forKey: .aiArticleLevels) ?? JLPTLevel.allCases
+        self.aiArticleLevels = decodedLevels.isEmpty ? JLPTLevel.allCases : decodedLevels
+        self.aiArticleCustomTheme = try container.decodeIfPresent(String.self, forKey: .aiArticleCustomTheme) ?? ""
     }
 }

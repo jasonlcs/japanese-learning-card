@@ -19,6 +19,8 @@ final class AppViewModel: ObservableObject {
     @Published var statusMessage = ""
     @Published var isUserInteracting = false
     @Published private(set) var isPopoverVisible = false
+    @Published var isGeneratingAIArticle = false
+    @Published var aiArticleCustomTheme = ""
 
     private let store: AppStore
     private let secretStore: SecretStore
@@ -28,6 +30,7 @@ final class AppViewModel: ObservableObject {
     private lazy var pipeline = LearningPipeline(store: store)
     private var displayTimer: Timer?
     private var crawlTimer: Timer?
+    private var aiArticleTimer: Timer?
     private var autoCloseTask: Task<Void, Never>?
     private var autoCloseGeneration = 0
     private var autoCloseRemainingSeconds: TimeInterval?
@@ -44,12 +47,15 @@ final class AppViewModel: ObservableObject {
     func start() {
         Task {
             await reload()
+            await store.ensureAISentinelSource(extractionPrompt: AISource.sentinelExtractionPrompt)
+            await reload()
             scheduleTimers()
         }
     }
 
     func reload() async {
         snapshot = await store.read()
+        aiArticleCustomTheme = snapshot.settings.aiArticleCustomTheme
         currentCard = cardSelector.nextCard(from: snapshot.cards)
         if let existingQuiz = currentQuiz,
            let updatedQuiz = snapshot.quizzes.first(where: { $0.id == existingQuiz.id }),
@@ -97,6 +103,56 @@ final class AppViewModel: ObservableObject {
             isRefreshing = false
             statusMessage = "已更新"
         }
+    }
+
+    func generateAIArticleNow(theme: String? = nil) {
+        guard !isGeneratingAIArticle else { return }
+        isGeneratingAIArticle = true
+        statusMessage = "AI 生成文章中..."
+        Task {
+            let result = await pipeline.generateAIArticleNow(theme: theme ?? aiArticleCustomTheme)
+            await MainActor.run {
+                self.isGeneratingAIArticle = false
+                if let article = result {
+                    self.statusMessage = "已產生「\(article.title)」(\(article.cardCount) 張卡)"
+                } else {
+                    self.statusMessage = "AI 文章產生失敗或內容重複"
+                }
+            }
+            await reload()
+        }
+    }
+
+    func toggleAIArticleLevel(_ level: JLPTLevel) {
+        var settings = snapshot.settings
+        if settings.aiArticleLevels.contains(level) {
+            settings.aiArticleLevels.removeAll { $0 == level }
+        } else {
+            settings.aiArticleLevels.append(level)
+        }
+        if settings.aiArticleLevels.isEmpty {
+            settings.aiArticleLevels = JLPTLevel.allCases
+        }
+        updateSettings(settings)
+    }
+
+    func setAIArticleEnabled(_ enabled: Bool) {
+        var settings = snapshot.settings
+        settings.aiArticleEnabled = enabled
+        updateSettings(settings)
+    }
+
+    func setAIArticleIntervalHours(_ hours: Int) {
+        var settings = snapshot.settings
+        settings.aiArticleIntervalHours = max(1, hours)
+        updateSettings(settings)
+    }
+
+    func setAIArticleCustomTheme(_ theme: String) {
+        aiArticleCustomTheme = theme
+        var settings = snapshot.settings
+        settings.aiArticleCustomTheme = theme
+        updateSettings(settings)
     }
 
     func addSource() {
@@ -408,6 +464,7 @@ final class AppViewModel: ObservableObject {
     private func scheduleTimers() {
         displayTimer?.invalidate()
         crawlTimer?.invalidate()
+        aiArticleTimer?.invalidate()
 
         displayTimer = Timer.scheduledTimer(withTimeInterval: schedulerPolicy.displayInterval(settings: snapshot.settings), repeats: true) { [weak self] _ in
             Task { @MainActor in self?.showNextCard() }
@@ -415,6 +472,13 @@ final class AppViewModel: ObservableObject {
 
         crawlTimer = Timer.scheduledTimer(withTimeInterval: schedulerPolicy.crawlInterval(settings: snapshot.settings), repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshNow() }
+        }
+
+        if snapshot.settings.aiArticleEnabled {
+            let interval = max(1, snapshot.settings.aiArticleIntervalHours) * 60 * 60
+            aiArticleTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(interval), repeats: true) { [weak self] _ in
+                Task { @MainActor in self?.generateAIArticleNow() }
+            }
         }
     }
 

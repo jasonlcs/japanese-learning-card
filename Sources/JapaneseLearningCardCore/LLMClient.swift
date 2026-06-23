@@ -23,15 +23,39 @@ public enum LLMClientError: LocalizedError {
 public protocol LLMClient: Sendable {
     func generateCards(document: CrawledDocument, sourcePrompt: String, settings: AppSettings) async throws -> [LearningCard]
     func generateQuiz(cards: [LearningCard], settings: AppSettings) async throws -> [QuizQuestion]
+    func generateArticle(theme: String, jlptLevels: [JLPTLevel], settings: AppSettings) async throws -> AIArticleDraft
+}
+
+public struct AIArticleDraft: Codable, Equatable, Sendable {
+    public var theme: String
+    public var title: String
+    public var text: String
+
+    public init(theme: String, title: String, text: String) {
+        self.theme = theme
+        self.title = title
+        self.text = text
+    }
 }
 
 public struct OpenAICompatibleLLMClient: LLMClient {
+    public static let userAgent = WebCrawler.userAgent
+
     private let secretStore: SecretStore
     private let session: URLSession
 
-    public init(secretStore: SecretStore = KeychainStore(), session: URLSession = .shared) {
+    public init(secretStore: SecretStore = KeychainStore(), session: URLSession = OpenAICompatibleLLMClient.makeDefaultSession()) {
         self.secretStore = secretStore
         self.session = session
+    }
+
+    public static func makeDefaultSession() -> URLSession {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 60
+        config.timeoutIntervalForResource = 120
+        config.waitsForConnectivity = false
+        config.httpAdditionalHeaders = ["User-Agent": userAgent]
+        return URLSession(configuration: config)
     }
 
     public func generateCards(document: CrawledDocument, sourcePrompt: String, settings: AppSettings) async throws -> [LearningCard] {
@@ -142,6 +166,38 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         return try Self.decodeExampleReading(from: content)
     }
 
+    public func generateArticle(theme: String, jlptLevels: [JLPTLevel], settings: AppSettings) async throws -> AIArticleDraft {
+        guard let apiKey = try secretStore.apiKey(reference: settings.providerConfig.apiKeyKeychainRef), !apiKey.isEmpty else {
+            throw LLMClientError.missingAPIKey
+        }
+
+        let body = Self.articleRequestBody(theme: theme, jlptLevels: jlptLevels, settings: settings)
+        var request = URLRequest(url: settings.providerConfig.baseURL.appendingPathComponent("chat/completions"))
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let organization = settings.providerConfig.organization, !organization.isEmpty {
+            request.setValue(organization, forHTTPHeaderField: "OpenAI-Organization")
+        }
+        if let project = settings.providerConfig.project, !project.isEmpty {
+            request.setValue(project, forHTTPHeaderField: "OpenAI-Project")
+        }
+        for (key, value) in settings.providerConfig.extraHeaders {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        request.httpBody = try JSONEncoder().encode(body)
+
+        let (data, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            throw LLMClientError.invalidResponse
+        }
+        let decoded = try JSONDecoder().decode(ChatCompletionResponse.self, from: data)
+        guard let content = decoded.choices.first?.message.content else {
+            throw LLMClientError.noContent
+        }
+        return try Self.decodeArticle(from: content, fallbackTheme: theme)
+    }
+
     public func listModels(settings: AppSettings) async throws -> [String] {
         guard let apiKey = try secretStore.apiKey(reference: settings.providerConfig.apiKeyKeychainRef), !apiKey.isEmpty else {
             throw LLMClientError.missingAPIKey
@@ -233,6 +289,41 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         )
     }
 
+    public static func articleRequestBody(theme: String, jlptLevels: [JLPTLevel], settings: AppSettings) -> ChatCompletionRequest {
+        let levelList: String
+        if jlptLevels.isEmpty {
+            levelList = JLPTLevel.allCases.map(\.rawValue).joined(separator: "、")
+        } else {
+            levelList = jlptLevels.map(\.rawValue).joined(separator: "、")
+        }
+        let isRandomTheme = theme.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let resolvedTheme = isRandomTheme ? "(請隨機挑選一個有趣、生活化的日文主題)" : theme
+        let levelGuidance = jlptLevels.contains(.n5) || jlptLevels.isEmpty
+            ? "若目標包含 N5，可使用 N5 等級的字彙與文法。"
+            : "請勿使用 JLPT N5 的單字或文法點；至少 N4 以上。"
+
+        return ChatCompletionRequest(
+            model: settings.providerConfig.model,
+            messages: [
+                .init(role: "system", content: """
+                你是日文學習文章作者。只輸出 JSON，不要 Markdown。
+                JSON schema: {"theme":"...","title":"...","text":"..."}
+                theme 是這篇文章的主題；title 是 30 字以內的標題；text 是完整的日文文章本文。
+                目標 JLPT 等級：\(levelList)。
+                \(levelGuidance)
+                全文 400~700 字，內容要自然、生活化，使用「です/ます」體。
+                文章中請刻意包含目標等級的字彙與文法點，讓學習者能從中擷取單字卡。
+                文章裡頭不要夾帶英文註解、羅馬拼音或翻譯。
+                """),
+                .init(role: "user", content: """
+                請寫一篇日文文章，主題：\(resolvedTheme)
+                目標 JLPT 等級：\(levelList)
+                """)
+            ],
+            temperature: 0.7
+        )
+    }
+
     public static func decodeCards(from content: String, sourceURL: URL) throws -> [LearningCard] {
         let cleaned = stripMarkdownFence(content)
         let data = Data(cleaned.utf8)
@@ -285,6 +376,25 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         let data = Data(cleaned.utf8)
         let payload = try JSONDecoder().decode(ExampleReadingPayload.self, from: data)
         return payload.exampleReading.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    public static func decodeArticle(from content: String, fallbackTheme: String) throws -> AIArticleDraft {
+        let cleaned = stripMarkdownFence(content)
+        let data = Data(cleaned.utf8)
+        let payload = try JSONDecoder().decode(ArticlePayload.self, from: data)
+        let theme = payload.theme.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = payload.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = payload.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            throw LLMClientError.noContent
+        }
+        let resolvedTheme = theme.isEmpty ? fallbackTheme : theme
+        let resolvedTitle = title.isEmpty ? resolvedTheme : title
+        return AIArticleDraft(
+            theme: resolvedTheme,
+            title: resolvedTitle,
+            text: text
+        )
     }
 
     private static func stripMarkdownFence(_ content: String) -> String {
@@ -358,4 +468,10 @@ private struct QuizPayload: Codable {
 
 private struct ExampleReadingPayload: Codable {
     var exampleReading: String
+}
+
+private struct ArticlePayload: Codable {
+    var theme: String
+    var title: String
+    var text: String
 }

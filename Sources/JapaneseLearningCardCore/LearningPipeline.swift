@@ -47,4 +47,71 @@ public actor LearningPipeline {
             }
         }
     }
+
+    @discardableResult
+    public func generateAIArticleNow(theme: String? = nil) async -> GeneratedArticle? {
+        let snapshot = await store.read()
+        let levels = snapshot.settings.aiArticleLevels.isEmpty ? JLPTLevel.allCases : snapshot.settings.aiArticleLevels
+        let explicitTheme = theme?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let storedTheme = snapshot.settings.aiArticleCustomTheme.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedTheme: String = !explicitTheme.isEmpty ? explicitTheme : storedTheme
+
+        do {
+            let draft = try await llmClient.generateArticle(theme: normalizedTheme, jlptLevels: levels, settings: snapshot.settings)
+            let contentHash = ContentHash.sha256(draft.text)
+            let levelLabels = levels.map(\.rawValue).joined(separator: "、")
+            let extractionPrompt = AISource.makeExtractionPrompt(theme: draft.theme, levels: levelLabels)
+
+            await store.ensureAISentinelSource(extractionPrompt: extractionPrompt)
+
+            let syntheticURL = URL(string: "ai-article://\(contentHash.prefix(12))") ?? AISource.sentinelURL
+            let document = CrawledDocument(
+                sourceId: AISource.sentinelSourceId,
+                url: syntheticURL,
+                title: draft.title,
+                plainText: draft.text,
+                contentHash: contentHash
+            )
+
+            if snapshot.documents.contains(where: { $0.contentHash == contentHash }) {
+                return nil
+            }
+
+            let cards = try await llmClient.generateCards(
+                document: document,
+                sourcePrompt: extractionPrompt,
+                settings: snapshot.settings
+            )
+
+            let article = GeneratedArticle(
+                theme: draft.theme,
+                jlptLevels: levels,
+                title: draft.title,
+                plainText: draft.text,
+                contentHash: contentHash,
+                sourceId: AISource.sentinelSourceId,
+                generatedAt: Date(),
+                cardCount: cards.count
+            )
+
+            try await store.update { state in
+                state.documents.append(document)
+                state.cards.append(contentsOf: cards)
+                state.generatedArticles.insert(article, at: 0)
+                if let index = state.sources.firstIndex(where: { $0.id == AISource.sentinelSourceId }) {
+                    state.sources[index].lastFetchedAt = Date()
+                    state.sources[index].lastError = nil
+                    state.sources[index].extractionPrompt = extractionPrompt
+                }
+            }
+            return article
+        } catch {
+            try? await store.update { state in
+                if let index = state.sources.firstIndex(where: { $0.id == AISource.sentinelSourceId }) {
+                    state.sources[index].lastError = error.localizedDescription
+                }
+            }
+            return nil
+        }
+    }
 }
