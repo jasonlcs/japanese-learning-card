@@ -64,8 +64,10 @@ public struct SourceValidator: Sendable {
             NI_NUMERICHOST
         )
         guard lookup == 0 else { return nil }
-        let trimmed = nodeBuffer.prefix { $0 != 0 }
-        return String(decoding: Array(trimmed), as: UTF8.self)
+        if let nullIndex = nodeBuffer.firstIndex(of: 0) {
+            nodeBuffer.removeSubrange(nullIndex...)
+        }
+        return String(cString: nodeBuffer)
     }
 
     private static func ipv4(from host: String) -> String? {
