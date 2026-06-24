@@ -590,6 +590,18 @@ struct SettingsView: View {
                 }
             }
 
+            Section("AI Log") {
+                Button {
+                    viewModel.openAIRequestLog()
+                } label: {
+                    Label("開啟 AI Log", systemImage: "doc.text.magnifyingglass")
+                }
+                Text(AIRequestLogStore.logFileURL.path)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+
             Section {
                 Button(role: .destructive) {
                     viewModel.quitApp()

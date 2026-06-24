@@ -15,6 +15,7 @@ struct CoreChecks {
         try await pipelineRefreshesEnabledSourcesWithMocks()
         try await storePersistsQuizQuestions()
         try await storeMigratesLegacyDatabaseWhenNeeded()
+        localDatabaseURLIsScopedByICloudIdentity()
         try await storeReloadsFromDiskWhenDatabaseChangesExternally()
         try await storeUpdateMergesExternalChangesBeforeWriting()
         try await storeUpdatePreservesInterleavedConcurrentWrites()
@@ -191,6 +192,21 @@ struct CoreChecks {
         let snapshot = await reloaded.read()
         expect(snapshot.quizzes.count == 1, "quiz should persist in SQLite")
         expect(snapshot.quizzes[0].question == "「駅」の意味は？", "quiz question should round trip")
+    }
+
+    private static func localDatabaseURLIsScopedByICloudIdentity() {
+        let base = URL(fileURLWithPath: "/tmp/base")
+
+        // 未登入 iCloud：沿用原本的 store.sqlite，不影響既有資料。
+        let anonymous = AppStore.makeLocalDatabaseURL(base: base, identitySuffix: nil)
+        expect(anonymous.lastPathComponent == "store.sqlite", "no iCloud identity should use the legacy store.sqlite path")
+
+        // 不同 iCloud 身分 → 不同檔，互不共用。
+        let userA = AppStore.makeLocalDatabaseURL(base: base, identitySuffix: "aaaa1111")
+        let userB = AppStore.makeLocalDatabaseURL(base: base, identitySuffix: "bbbb2222")
+        expect(userA.lastPathComponent == "store-aaaa1111.sqlite", "identity A should get its own local file")
+        expect(userA != userB, "different iCloud identities must not share the same local database file")
+        expect(userA != anonymous, "an identity-scoped file must differ from the anonymous one")
     }
 
     private static func storeMigratesLegacyDatabaseWhenNeeded() async throws {

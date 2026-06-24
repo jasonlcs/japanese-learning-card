@@ -46,6 +46,8 @@ public struct AIArticleDraft: Codable, Equatable, Sendable {
 
 public struct OpenAICompatibleLLMClient: LLMClient {
     public static let userAgent = "JapaneseLearningCard/0.1 (+https://github.com/jasonlcs/japanese-learning-card)"
+    private static let providerRequestTimeout: TimeInterval = 180
+    private static let providerResourceTimeout: TimeInterval = 240
 
     private let secretStore: SecretStore
     private let session: URLSession
@@ -57,8 +59,8 @@ public struct OpenAICompatibleLLMClient: LLMClient {
 
     public static func makeDefaultSession() -> URLSession {
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 60
-        config.timeoutIntervalForResource = 120
+        config.timeoutIntervalForRequest = providerRequestTimeout
+        config.timeoutIntervalForResource = providerResourceTimeout
         config.waitsForConnectivity = false
         config.httpAdditionalHeaders = ["User-Agent": userAgent]
         return URLSession(configuration: config)
@@ -85,8 +87,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         }
         request.httpBody = try JSONEncoder().encode(body)
 
-        let (data, response) = try await session.data(for: request)
-        try Self.validateHTTPResponse(response, data: data)
+        let data = try await performLoggedRequest(request, operation: "generateCards", model: settings.providerConfig.model)
         Self.debugLog("回應原始 body：\n\(String(decoding: data, as: UTF8.self))")
         let content = try Self.extractContent(from: data)
         return try Self.decodeCards(from: content, sourceURL: document.url)
@@ -113,8 +114,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         }
         request.httpBody = try JSONEncoder().encode(body)
 
-        let (data, response) = try await session.data(for: request)
-        try Self.validateHTTPResponse(response, data: data)
+        let data = try await performLoggedRequest(request, operation: "generateQuiz", model: settings.providerConfig.model)
         Self.debugLog("回應原始 body：\n\(String(decoding: data, as: UTF8.self))")
         let content = try Self.extractContent(from: data)
         return try Self.decodeQuiz(from: content, cards: cards)
@@ -154,8 +154,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         }
         request.httpBody = try JSONEncoder().encode(body)
 
-        let (data, response) = try await session.data(for: request)
-        try Self.validateHTTPResponse(response, data: data)
+        let data = try await performLoggedRequest(request, operation: "generateExampleReading", model: settings.providerConfig.model)
         Self.debugLog("回應原始 body：\n\(String(decoding: data, as: UTF8.self))")
         let content = try Self.extractContent(from: data)
         return try Self.decodeExampleReading(from: content)
@@ -183,8 +182,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         request.httpBody = try JSONEncoder().encode(body)
 
         Self.debugLog("article 請求 → \(request.url?.absoluteString ?? "")，model=\(settings.providerConfig.model)，levels=\(jlptLevels.map(\.rawValue).joined(separator: ","))")
-        let (data, response) = try await session.data(for: request)
-        try Self.validateHTTPResponse(response, data: data)
+        let data = try await performLoggedRequest(request, operation: "generateArticle", model: settings.providerConfig.model)
         Self.debugLog("article 回應原始 body：\n\(String(decoding: data, as: UTF8.self))")
         let content = try Self.extractContent(from: data)
         return try Self.decodeArticle(from: content, fallbackTheme: theme)
@@ -231,11 +229,50 @@ public struct OpenAICompatibleLLMClient: LLMClient {
             request.setValue(value, forHTTPHeaderField: key)
         }
 
-        let (data, response) = try await session.data(for: request)
-        try Self.validateHTTPResponse(response, data: data)
+        let data = try await performLoggedRequest(request, operation: "listModels", model: settings.providerConfig.model)
 
         let decoded = try JSONDecoder().decode(ModelsResponse.self, from: data)
         return decoded.data.map(\.id).sorted()
+    }
+
+    private func performLoggedRequest(_ request: URLRequest, operation: String, model: String) async throws -> Data {
+        var request = request
+        request.timeoutInterval = Self.providerRequestTimeout
+        let startedAt = Date()
+        let requestBytes = request.httpBody?.count ?? 0
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            await Self.logRequest(
+                operation: operation,
+                request: request,
+                model: model,
+                startedAt: startedAt,
+                statusCode: nil,
+                requestBytes: requestBytes,
+                responseData: Data(),
+                errorSummary: error.localizedDescription
+            )
+            throw error
+        }
+
+        let statusCode = (response as? HTTPURLResponse)?.statusCode
+        let isHTTPError = statusCode.map { !(200..<300).contains($0) } ?? false
+        await Self.logRequest(
+            operation: operation,
+            request: request,
+            model: model,
+            startedAt: startedAt,
+            statusCode: statusCode,
+            requestBytes: requestBytes,
+            responseData: data,
+            errorSummary: isHTTPError ? Self.responseSnippet(from: data) : nil
+        )
+        try Self.validateHTTPResponse(response, data: data)
+        return data
     }
 
     /// 依 provider 設定決定是否要求結構化輸出。集中在一處，避免每個請求各寫一份。
@@ -428,9 +465,57 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         guard let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) else {
             return
         }
-        let body = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-        let snippet = body.count > 500 ? String(body.prefix(500)) + "…" : body
+        let snippet = responseSnippet(from: data)
         throw LLMClientError.httpStatus(code: http.statusCode, body: snippet)
+    }
+
+    private static func responseSnippet(from data: Data) -> String {
+        let body = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return body.count > 500 ? String(body.prefix(500)) + "…" : body
+    }
+
+    private static func logRequest(
+        operation: String,
+        request: URLRequest,
+        model: String,
+        startedAt: Date,
+        statusCode: Int?,
+        requestBytes: Int,
+        responseData: Data,
+        errorSummary: String?
+    ) async {
+        let duration = max(Date().timeIntervalSince(startedAt), 0.001)
+        let usage = decodeUsage(from: responseData)
+        let completionTokens = usage?.completionTokens
+        let entry = AIRequestLogEntry(
+            operation: operation,
+            endpoint: sanitizedEndpoint(for: request.url),
+            model: model,
+            statusCode: statusCode,
+            durationMilliseconds: Int((duration * 1000).rounded()),
+            requestBytes: requestBytes,
+            responseBytes: responseData.count,
+            timeoutSeconds: Int(request.timeoutInterval.rounded()),
+            promptTokens: usage?.promptTokens,
+            completionTokens: completionTokens,
+            totalTokens: usage?.totalTokens,
+            bytesPerSecond: Double(responseData.count) / duration,
+            tokensPerSecond: completionTokens.map { Double($0) / duration },
+            errorSummary: errorSummary
+        )
+        await AIRequestLogStore.shared.append(entry)
+    }
+
+    private static func sanitizedEndpoint(for url: URL?) -> String {
+        guard let url else { return "" }
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        components?.query = nil
+        return components?.url?.absoluteString ?? url.absoluteString
+    }
+
+    private static func decodeUsage(from data: Data) -> ChatCompletionResponse.Usage? {
+        guard !data.isEmpty else { return nil }
+        return try? JSONDecoder().decode(ChatCompletionResponse.self, from: data).usage
     }
 
     private static func stripMarkdownFence(_ content: String) -> String {
@@ -567,7 +652,20 @@ private struct ChatCompletionResponse: Codable {
         var message: Message
     }
 
+    struct Usage: Codable {
+        var promptTokens: Int?
+        var completionTokens: Int?
+        var totalTokens: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case promptTokens = "prompt_tokens"
+            case completionTokens = "completion_tokens"
+            case totalTokens = "total_tokens"
+        }
+    }
+
     var choices: [Choice]
+    var usage: Usage?
 }
 
 private struct ModelsResponse: Codable {
