@@ -11,6 +11,12 @@ public enum AIArticleOutcome: Sendable {
     }
 }
 
+public enum ManualCardOutcome: Sendable {
+    case generated(count: Int)
+    case empty
+    case failed(String)
+}
+
 public actor LearningPipeline {
     private let store: AppStore
     private let crawler: Crawling
@@ -257,6 +263,85 @@ public actor LearningPipeline {
             await AIRequestLogStore.shared.appendEvent(
                 "flow.failed",
                 operation: "generateAIArticleNow",
+                durationMilliseconds: Self.durationMilliseconds(since: startedAt),
+                errorSummary: error.localizedDescription
+            )
+            return .failed(error.localizedDescription)
+        }
+    }
+
+    /// 由使用者貼上的文字（文章或單字清單）產生學習卡。
+    public func generateCardsFromText(_ rawText: String, instruction: String = "") async -> ManualCardOutcome {
+        let traceId = UUID().uuidString
+        return await AITraceContext.$traceId.withValue(traceId) {
+            await AITraceContext.$flow.withValue("generateCardsFromText") {
+                await generateCardsFromTextWithTrace(rawText, instruction: instruction)
+            }
+        }
+    }
+
+    private func generateCardsFromTextWithTrace(_ rawText: String, instruction: String) async -> ManualCardOutcome {
+        let startedAt = Date()
+        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return .failed("請先貼上文字內容") }
+
+        let snapshot = await store.read()
+        let contentHash = ContentHash.sha256(text)
+        await AIRequestLogStore.shared.appendEvent(
+            "flow.start",
+            operation: "generateCardsFromText",
+            input: [
+                "contentHash": contentHash,
+                "textCharacters": "\(text.count)"
+            ]
+        )
+
+        let syntheticURL = URL(string: "manual-input://\(contentHash.prefix(12))") ?? AISource.sentinelURL
+        let document = CrawledDocument(
+            sourceId: AISource.sentinelSourceId,
+            url: syntheticURL,
+            title: "手動輸入",
+            plainText: text,
+            contentHash: contentHash
+        )
+
+        do {
+            await store.ensureAISentinelSource(extractionPrompt: AISource.sentinelExtractionPrompt)
+
+            let cards = try await llmClient.generateManualCards(
+                text: text,
+                instruction: instruction,
+                sourceURL: syntheticURL,
+                settings: snapshot.settings
+            )
+
+            guard !cards.isEmpty else {
+                await AIRequestLogStore.shared.appendEvent(
+                    "flow.empty",
+                    operation: "generateCardsFromText",
+                    message: "No cards produced from manual text.",
+                    durationMilliseconds: Self.durationMilliseconds(since: startedAt)
+                )
+                return .empty
+            }
+
+            try await store.update { state in
+                if !state.documents.contains(where: { $0.contentHash == contentHash }) {
+                    state.documents.append(document)
+                }
+                state.cards.append(contentsOf: cards)
+            }
+            await AIRequestLogStore.shared.appendEvent(
+                "flow.completed",
+                operation: "generateCardsFromText",
+                output: ["cardCount": "\(cards.count)"],
+                durationMilliseconds: Self.durationMilliseconds(since: startedAt)
+            )
+            return .generated(count: cards.count)
+        } catch {
+            await AIRequestLogStore.shared.appendEvent(
+                "flow.failed",
+                operation: "generateCardsFromText",
                 durationMilliseconds: Self.durationMilliseconds(since: startedAt),
                 errorSummary: error.localizedDescription
             )

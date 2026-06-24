@@ -12,6 +12,7 @@ struct CoreChecks {
         cardSelectorPrioritizesFreshThenOldestReviewingAndSkipsSkipped()
         htmlExtractorRemovesScriptsStylesTagsAndDecodesEntities()
         try openAICompatibleRequestAndCardDecoding()
+        try manualCardsRequestAndN5Retention()
         try exampleReadingDecoding()
         try await pipelineRefreshesEnabledSourcesWithMocks()
         try await pipelineSkipsAISentinelWhenRefreshingSources()
@@ -161,6 +162,28 @@ struct CoreChecks {
         expect(cards[0].verbFormType == .notVerb, "non-verb form should decode")
         expect(cards[0].exampleReading == "えきであいます。", "example reading should decode")
         expect(cards[0].sourceUrl == document.url, "source URL should be attached")
+    }
+
+    private static func manualCardsRequestAndN5Retention() throws {
+        let settings = AppSettings(providerConfig: ProviderConfig(baseURL: URL(string: "https://api.example.test/v1")!, model: "custom-model"))
+        let body = OpenAICompatibleLLMClient.manualCardsRequestBody(
+            text: "りんご、みかん、勉強する",
+            instruction: "只挑名詞",
+            settings: settings
+        )
+        expect(body.model == "custom-model", "manual request should use configured model")
+        expect(body.messages.last?.content.contains("りんご、みかん、勉強する") == true, "manual request should include pasted text")
+        expect(body.messages.last?.content.contains("只挑名詞") == true, "manual request should include user instruction")
+        expect(body.messages.first?.content.contains("包含 N5") == true || body.messages.first?.content.contains("N5") == true, "manual prompt should mention keeping all levels")
+
+        let json = """
+        {"cards":[{"word":"水","reading":"みず","partOfSpeech":"名詞","meaningZh":"水","grammarNoteZh":"基本名詞。","jlptLevel":"N5","verbFormType":"非動詞","exampleJa":"水を飲みます。","exampleReading":"みずをのみます。","exampleZh":"喝水。"}]}
+        """
+        let url = URL(string: "manual-input://test")!
+        let dropped = try OpenAICompatibleLLMClient.decodeCards(from: json, sourceURL: url)
+        expect(dropped.isEmpty, "default decode should still drop N5")
+        let kept = try OpenAICompatibleLLMClient.decodeCards(from: json, sourceURL: url, includeN5: true)
+        expect(kept.count == 1 && kept[0].jlptLevel == .n5, "manual decode should retain N5 cards")
     }
 
     private static func exampleReadingDecoding() throws {

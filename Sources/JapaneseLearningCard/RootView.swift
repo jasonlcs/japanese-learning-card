@@ -10,6 +10,7 @@ struct RootView: View {
             Picker("", selection: $viewModel.selectedTab) {
                 Label("卡片", systemImage: "rectangle.stack").tag(0)
                 Label("AI 文章", systemImage: "sparkles.rectangle.stack").tag(1)
+                Label("手動造卡", systemImage: "doc.text.magnifyingglass").tag(6)
                 Label("考題", systemImage: "checklist").tag(2)
                 Label("資料庫", systemImage: "cylinder.split.1x2").tag(3)
                 Label("設定", systemImage: "gearshape").tag(4)
@@ -32,6 +33,8 @@ struct RootView: View {
                     SettingsView(viewModel: viewModel)
                 case 5:
                     HistoryView(viewModel: viewModel)
+                case 6:
+                    ManualCardView(viewModel: viewModel)
                 default:
                     CardView(viewModel: viewModel)
                 }
@@ -465,6 +468,14 @@ struct SettingsView: View {
     @State private var editingSourceURLs: [UUID: String] = [:]
 
     var body: some View {
+        if isSystemSettingsPresented {
+            systemSettingsView
+        } else {
+            sourceSettingsView
+        }
+    }
+
+    private var sourceSettingsView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
@@ -580,15 +591,19 @@ struct SettingsView: View {
             }
             .padding()
         }
-        .sheet(isPresented: $isSystemSettingsPresented) {
-            systemSettingsView
-        }
     }
 
     private var systemSettingsView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
+                    Button {
+                        isSystemSettingsPresented = false
+                    } label: {
+                        Label("返回", systemImage: "chevron.backward")
+                    }
+                    .buttonStyle(.borderless)
+                    Spacer()
                     Text("系統設定")
                         .font(.headline)
                     Spacer()
@@ -703,7 +718,6 @@ struct SettingsView: View {
             }
             .padding()
         }
-        .frame(width: 520, height: 560)
     }
 
     private var canAddSource: Bool {
@@ -1240,6 +1254,67 @@ struct AIArticleView: View {
         }
         .sheet(item: $selectedArticle) { article in
             AIArticleDetailView(article: article, viewModel: viewModel)
+        }
+    }
+}
+
+struct ManualCardView: View {
+    @ObservedObject var viewModel: AppViewModel
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("手動造卡")
+                        .font(.title2.weight(.semibold))
+                    Text("貼上一段日文文章，或一份單字／片語清單，AI 會理解內容後幫你產生單字卡。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                GroupBox("文章或單字清單") {
+                    TextEditor(text: $viewModel.manualCardInput)
+                        .font(.body)
+                        .scrollContentBackground(.hidden)
+                        .padding(6)
+                        .frame(minHeight: 180)
+                        .background(Color(nsColor: .textBackgroundColor))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+
+                GroupBox("額外指示（選填）") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        TextField("例如：只挑動詞、解說偏商業情境", text: $viewModel.manualCardInstruction)
+                            .textFieldStyle(.roundedBorder)
+                        Text("可指定挑選範圍或解說風格；留空則由 AI 自行判斷。")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                HStack(alignment: .firstTextBaseline) {
+                    if !viewModel.statusMessage.isEmpty {
+                        Text(viewModel.statusMessage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button {
+                        viewModel.generateManualCards()
+                    } label: {
+                        Label(
+                            viewModel.isGeneratingManualCards ? "產生中..." : "產生單字卡",
+                            systemImage: "sparkles"
+                        )
+                    }
+                    .disabled(viewModel.isGeneratingManualCards || !viewModel.canGenerateManualCards)
+                }
+            }
+            .padding()
         }
     }
 }

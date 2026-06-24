@@ -20,6 +20,9 @@ final class AppViewModel: ObservableObject {
     @Published var isUserInteracting = false
     @Published private(set) var isPopoverVisible = false
     @Published var isGeneratingAIArticle = false
+    @Published var isGeneratingManualCards = false
+    @Published var manualCardInput = ""
+    @Published var manualCardInstruction = ""
     @Published var aiArticleCustomTheme = ""
     @Published var selectedTab = 0
 
@@ -138,6 +141,35 @@ final class AppViewModel: ObservableObject {
                     self.statusMessage = "內容與既有文章重複，未新增"
                 case .failed(let message):
                     self.statusMessage = "AI 文章產生失敗：\(message)"
+                }
+            }
+            await reload()
+        }
+    }
+
+    var canGenerateManualCards: Bool {
+        !manualCardInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    func generateManualCards() {
+        guard !isGeneratingManualCards, canGenerateManualCards else { return }
+        isGeneratingManualCards = true
+        statusMessage = "AI 解析中，產生單字卡..."
+        let text = manualCardInput
+        let instruction = manualCardInstruction
+        Task {
+            let result = await pipeline.generateCardsFromText(text, instruction: instruction)
+            await MainActor.run {
+                self.isGeneratingManualCards = false
+                switch result {
+                case .generated(let count):
+                    self.statusMessage = "已從輸入內容產生 \(count) 張單字卡"
+                    self.manualCardInput = ""
+                    self.manualCardInstruction = ""
+                case .empty:
+                    self.statusMessage = "AI 沒有從內容中找到可用的單字"
+                case .failed(let message):
+                    self.statusMessage = "產生單字卡失敗：\(message)"
                 }
             }
             await reload()

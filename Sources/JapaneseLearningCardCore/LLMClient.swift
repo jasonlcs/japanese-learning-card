@@ -30,6 +30,23 @@ public protocol LLMClient: Sendable {
     func generateCards(document: CrawledDocument, sourcePrompt: String, settings: AppSettings) async throws -> [LearningCard]
     func generateQuiz(cards: [LearningCard], settings: AppSettings) async throws -> [QuizQuestion]
     func generateArticle(theme: String, jlptLevels: [JLPTLevel], settings: AppSettings) async throws -> AIArticleDraft
+    /// 由使用者貼上的文字（文章或單字清單）直接產生學習卡。
+    func generateManualCards(text: String, instruction: String, sourceURL: URL, settings: AppSettings) async throws -> [LearningCard]
+}
+
+public extension LLMClient {
+    /// 預設實作：沿用一般的擷取流程，方便測試替身或其他 client 直接套用。
+    func generateManualCards(text: String, instruction: String, sourceURL: URL, settings: AppSettings) async throws -> [LearningCard] {
+        let document = CrawledDocument(
+            sourceId: AISource.sentinelSourceId,
+            url: sourceURL,
+            title: "手動輸入",
+            plainText: text,
+            contentHash: ContentHash.sha256(text)
+        )
+        let prompt = instruction.isEmpty ? "請從以下內容挑出值得學習的日文單字與片語。" : instruction
+        return try await generateCards(document: document, sourcePrompt: prompt, settings: settings)
+    }
 }
 
 public struct AIArticleDraft: Codable, Equatable, Sendable {
@@ -96,6 +113,42 @@ public struct OpenAICompatibleLLMClient: LLMClient {
             operation: "generateCards",
             output: [
                 "sourceURL": document.url.absoluteString,
+                "cardCount": "\(cards.count)"
+            ]
+        )
+        return cards
+    }
+
+    public func generateManualCards(text: String, instruction: String, sourceURL: URL, settings: AppSettings) async throws -> [LearningCard] {
+        guard let apiKey = try secretStore.apiKey(reference: settings.providerConfig.apiKeyKeychainRef), !apiKey.isEmpty else {
+            throw LLMClientError.missingAPIKey
+        }
+
+        let body = Self.manualCardsRequestBody(text: text, instruction: instruction, settings: settings)
+        var request = URLRequest(url: settings.providerConfig.baseURL.appendingPathComponent("chat/completions"))
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let organization = settings.providerConfig.organization, !organization.isEmpty {
+            request.setValue(organization, forHTTPHeaderField: "OpenAI-Organization")
+        }
+        if let project = settings.providerConfig.project, !project.isEmpty {
+            request.setValue(project, forHTTPHeaderField: "OpenAI-Project")
+        }
+        for (key, value) in settings.providerConfig.extraHeaders {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        request.httpBody = try JSONEncoder().encode(body)
+
+        let data = try await performLoggedRequest(request, operation: "generateManualCards", model: settings.providerConfig.model)
+        Self.debugLog("回應原始 body：\n\(String(decoding: data, as: UTF8.self))")
+        let content = try Self.extractContent(from: data)
+        let cards = try Self.decodeCards(from: content, sourceURL: sourceURL, includeN5: true)
+        await AIRequestLogStore.shared.appendEvent(
+            "llm.decode.completed",
+            operation: "generateManualCards",
+            output: [
+                "sourceURL": sourceURL.absoluteString,
                 "cardCount": "\(cards.count)"
             ]
         )
@@ -356,6 +409,37 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         )
     }
 
+    public static func manualCardsRequestBody(text: String, instruction: String, settings: AppSettings) -> ChatCompletionRequest {
+        let trimmedInstruction = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        let userInstruction = trimmedInstruction.isEmpty ? "（無額外指示）" : trimmedInstruction
+        return ChatCompletionRequest(
+            model: settings.providerConfig.model,
+            messages: [
+                .init(role: "system", content: """
+                你是日文學習卡產生器。只輸出 JSON，不要 Markdown。
+                JSON schema: {"cards":[{"word":"...","reading":"...","partOfSpeech":"...","meaningZh":"...","grammarNoteZh":"...","jlptLevel":"N1|N2|N3|N4|N5|Unknown","verbFormType":"一段動詞|五段動詞|する動詞|くる動詞|不規則動詞|非動詞|不明","exampleJa":"...","exampleReading":"...","exampleZh":"..."}]}
+                使用者會貼上一段日文文章或一份單字／片語清單：
+                - 若是文章，請挑出值得學習的重要單字與片語。
+                - 若是單字／片語清單，請為清單中每個項目各產生一張卡，盡量不要遺漏。
+                所有 JLPT 等級都要保留（包含 N5），請依實際難度標註 jlptLevel；無法判斷時用 Unknown。
+                如果 partOfSpeech 是動詞，verbFormType 必須標註動詞型態；如果不是動詞，verbFormType 使用「非動詞」。
+                exampleReading 是必填欄位，必須把 exampleJa 整句完整轉成平假名讀音；漢字必須轉成正確平假名，助詞保留原本讀音，不要使用羅馬拼音。
+                exampleJa 請自然地造句示範該單字；若輸入本身就是完整句子可直接沿用。
+                請使用繁體中文解說。最多產生 30 張卡。
+                """),
+                .init(role: "user", content: """
+                使用者的額外指示：
+                \(userInstruction)
+
+                內容：
+                \(String(text.prefix(12000)))
+                """)
+            ],
+            temperature: 0.3,
+            responseFormat: responseFormat(for: settings)
+        )
+    }
+
     public static func quizRequestBody(cards: [LearningCard], settings: AppSettings) -> ChatCompletionRequest {
         let source = cards.prefix(12).map {
             """
@@ -428,7 +512,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         )
     }
 
-    public static func decodeCards(from content: String, sourceURL: URL) throws -> [LearningCard] {
+    public static func decodeCards(from content: String, sourceURL: URL, includeN5: Bool = false) throws -> [LearningCard] {
         let payload = try decodeJSON(CardPayload.self, from: content)
         return payload.cards.map {
             let jlptLevel = JLPTLevel(rawValue: $0.jlptLevel ?? "") ?? .unknown
@@ -447,7 +531,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
                 sourceUrl: sourceURL
             )
         }.filter {
-            $0.jlptLevel != .n5
+            includeN5 || $0.jlptLevel != .n5
         }
     }
 
