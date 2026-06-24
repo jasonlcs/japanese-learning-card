@@ -1,7 +1,7 @@
 import Foundation
 
 /// 一筆 3-way merge 衝突的描述, 給 UI 顯示或讓使用者手動解。
-public struct ConflictRecord: Sendable, Equatable {
+public struct ConflictRecord: Codable, Sendable, Equatable, Identifiable {
     public enum Table: String, Sendable, Codable, CaseIterable {
         case settings
         case sources
@@ -16,14 +16,40 @@ public struct ConflictRecord: Sendable, Equatable {
         case tookRemote
     }
 
+    public let id: UUID
     public let table: Table
     public let recordId: String
-    public let resolution: Resolution
+    public var resolution: Resolution
+    /// 衝突時 local 的 record JSON (給 UI 顯示 side-by-side 比較)
+    public let localValue: Data
+    /// 衝突時 remote 的 record JSON
+    public let remoteValue: Data
+    /// 衝突時 base 的 record JSON (nil = 新加入的 record 還沒在 base)
+    public let baseValue: Data?
+    public let createdAt: Date
+    /// user 是否已手動處理 (LWW 自動解掉的話預設 false, 點過「選 local/remote」就 true)
+    public var isResolved: Bool
 
-    public init(table: Table, recordId: String, resolution: Resolution) {
+    public init(
+        id: UUID = UUID(),
+        table: Table,
+        recordId: String,
+        resolution: Resolution,
+        localValue: Data,
+        remoteValue: Data,
+        baseValue: Data?,
+        createdAt: Date = Date(),
+        isResolved: Bool = false
+    ) {
+        self.id = id
         self.table = table
         self.recordId = recordId
         self.resolution = resolution
+        self.localValue = localValue
+        self.remoteValue = remoteValue
+        self.baseValue = baseValue
+        self.createdAt = createdAt
+        self.isResolved = isResolved
     }
 }
 
@@ -106,6 +132,14 @@ public enum Merger {
         Set(a).union(b).union(c)
     }
 
+    /// 衝突時把 local/remote/base 序列化進 ConflictRecord,
+    /// 給 UI side-by-side 顯示用。encode 失敗就回空 Data, 不會讓 merger 整個失敗。
+    private static func encodeValue<T: Encodable>(_ value: T) -> Data? {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        return try? encoder.encode(value)
+    }
+
     // MARK: - Settings (single record)
 
     private static func mergeSettings(
@@ -121,7 +155,10 @@ public enum Merger {
         conflicts.append(ConflictRecord(
             table: .settings,
             recordId: "settings",
-            resolution: took == local ? .tookLocal : .tookRemote
+            resolution: took == local ? .tookLocal : .tookRemote,
+            localValue: Self.encodeValue(local) ?? Data(),
+            remoteValue: Self.encodeValue(remote) ?? Data(),
+            baseValue: Self.encodeValue(base)
         ))
         return took
     }
@@ -153,7 +190,14 @@ public enum Merger {
                 else if r == b { merged.append(l) }
                 else {
                     let took = l.updatedAt >= r.updatedAt ? l : r
-                    conflicts.append(ConflictRecord(table: .sources, recordId: id.uuidString, resolution: took == l ? .tookLocal : .tookRemote))
+                    conflicts.append(ConflictRecord(
+                        table: .sources,
+                        recordId: id.uuidString,
+                        resolution: took == l ? .tookLocal : .tookRemote,
+                        localValue: Self.encodeValue(l) ?? Data(),
+                        remoteValue: Self.encodeValue(r) ?? Data(),
+                        baseValue: b.flatMap { Self.encodeValue($0) }
+                    ))
                     merged.append(took)
                 }
             }
@@ -245,7 +289,10 @@ public enum Merger {
             conflicts.append(ConflictRecord(
                 table: .learningCards,
                 recordId: cardId.uuidString,
-                resolution: took == l ? .tookLocal : .tookRemote
+                resolution: took == l ? .tookLocal : .tookRemote,
+                localValue: Self.encodeValue(l) ?? Data(),
+                remoteValue: Self.encodeValue(r) ?? Data(),
+                baseValue: b.flatMap { Self.encodeValue($0) }
             ))
             merged.append(took)
         }
@@ -315,7 +362,10 @@ public enum Merger {
             conflicts.append(ConflictRecord(
                 table: .quizQuestions,
                 recordId: qid.uuidString,
-                resolution: took == l ? .tookLocal : .tookRemote
+                resolution: took == l ? .tookLocal : .tookRemote,
+                localValue: Self.encodeValue(l) ?? Data(),
+                remoteValue: Self.encodeValue(r) ?? Data(),
+                baseValue: b.flatMap { Self.encodeValue($0) }
             ))
             merged.append(took)
         }
@@ -379,7 +429,10 @@ public enum Merger {
             conflicts.append(ConflictRecord(
                 table: .generatedArticles,
                 recordId: aid.uuidString,
-                resolution: took == l ? .tookLocal : .tookRemote
+                resolution: took == l ? .tookLocal : .tookRemote,
+                localValue: Self.encodeValue(l) ?? Data(),
+                remoteValue: Self.encodeValue(r) ?? Data(),
+                baseValue: b.flatMap { Self.encodeValue($0) }
             ))
             merged.append(took)
         }

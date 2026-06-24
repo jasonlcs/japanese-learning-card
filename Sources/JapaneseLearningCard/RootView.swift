@@ -707,6 +707,9 @@ struct SettingsView: View {
                             .foregroundStyle(.red)
                             .textSelection(.enabled)
                     }
+                    if !viewModel.iCloudConflicts.isEmpty {
+                        conflictListSection()
+                    }
                     HStack {
                         Button {
                             Task { await viewModel.performPull() }
@@ -907,6 +910,127 @@ struct SettingsView: View {
         formatter.unitsStyle = .full
         formatter.locale = Locale(identifier: "zh_TW")
         return formatter.localizedString(for: date, relativeTo: Date())
+    }
+
+    // MARK: - Conflict list
+
+    @State private var expandedConflictIDs: Set<UUID> = []
+
+    @ViewBuilder
+    private func conflictListSection() -> some View {
+        Divider()
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text("3-way merge 衝突")
+                    .font(.headline)
+                Spacer()
+                Text("\(viewModel.iCloudConflictCount) 筆未處理")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            ForEach(viewModel.iCloudConflicts) { conflict in
+                conflictRow(conflict)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func conflictRow(_ conflict: ConflictRecord) -> some View {
+        let isExpanded = expandedConflictIDs.contains(conflict.id)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Image(systemName: conflict.isResolved ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                    .foregroundStyle(conflict.isResolved ? .green : .orange)
+                Text("\(Self.tableDisplayName(conflict.table)) · \(conflict.recordId.prefix(8))…")
+                    .font(.callout)
+                Spacer()
+                if !conflict.isResolved {
+                    Text(conflict.resolution == .tookLocal ? "目前用 local" : "目前用 remote")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("已手動處理")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                }
+                Button {
+                    if isExpanded { expandedConflictIDs.remove(conflict.id) }
+                    else { expandedConflictIDs.insert(conflict.id) }
+                } label: {
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                }
+                .buttonStyle(.borderless)
+            }
+
+            if isExpanded && !conflict.isResolved {
+                conflictDetail(conflict)
+            }
+        }
+        .padding(8)
+        .background(Color.gray.opacity(0.08))
+        .cornerRadius(6)
+    }
+
+    @ViewBuilder
+    private func conflictDetail(_ conflict: ConflictRecord) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("local 值 (本機):")
+                .font(.caption).foregroundStyle(.secondary)
+            Text(Self.prettyJSON(conflict.localValue))
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .padding(6)
+                .background(Color.gray.opacity(0.1))
+                .cornerRadius(4)
+
+            Text("remote 值 (雲端):")
+                .font(.caption).foregroundStyle(.secondary)
+            Text(Self.prettyJSON(conflict.remoteValue))
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .padding(6)
+                .background(Color.gray.opacity(0.1))
+                .cornerRadius(4)
+
+            HStack {
+                Button {
+                    Task { await viewModel.resolveConflict(conflict.id, useLocal: true) }
+                } label: {
+                    Label("用 local", systemImage: "mac")
+                }
+                Button {
+                    Task { await viewModel.resolveConflict(conflict.id, useLocal: false) }
+                } label: {
+                    Label("用 remote", systemImage: "icloud")
+                }
+                Spacer()
+            }
+            .buttonStyle(.bordered)
+        }
+    }
+
+    private static func tableDisplayName(_ table: ConflictRecord.Table) -> String {
+        switch table {
+        case .settings: return "設定"
+        case .sources: return "來源"
+        case .crawledDocuments: return "爬文文件"
+        case .learningCards: return "卡片"
+        case .quizQuestions: return "考題"
+        case .generatedArticles: return "AI 文章"
+        }
+    }
+
+    private static func prettyJSON(_ data: Data) -> String {
+        guard !data.isEmpty,
+              let obj = try? JSONSerialization.jsonObject(with: data),
+              let pretty = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]),
+              let str = String(data: pretty, encoding: .utf8) else {
+            return "<無法解析>"
+        }
+        return str
     }
 
     private func stringBinding(get: @escaping (AppSettings) -> String, set: @escaping (inout AppSettings, String) -> Void) -> Binding<String> {

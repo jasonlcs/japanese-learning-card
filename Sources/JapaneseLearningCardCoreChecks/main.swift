@@ -51,6 +51,8 @@ struct CoreChecks {
         try await appStoreUndeleteRemovesFromDeletedSet()
         try mergerAppliesDeletionsToAllTables()
         try await syncCoordinatorPropagatesDeletionToOtherMac()
+        try mergerConflictRecordContainsLocalRemoteBaseJSON()
+        try await conflictStorePersistsAndReloads()
         print("All JapaneseLearningCardCore checks passed.")
     }
 
@@ -990,7 +992,7 @@ struct CoreChecks {
         }
         let transport = CloudKitTransport(backing: backing)
         let syncedBase = SyncedBaseStore(url: baseURL)
-        let conflictStore = ConflictStore()
+        let conflictStore = ConflictStore(storeURL: dir.appendingPathComponent("conflicts.json"))
 
         return (store, transport, backing, syncedBase, conflictStore, dir)
     }
@@ -1242,6 +1244,82 @@ struct CoreChecks {
         let afterPull = await harness.store.read()
         expect(afterPull.sources.isEmpty, "Mac B pull 後本地 source 應該被刪掉")
         expect(afterPull.deletedSources.contains(sourceId), "Mac B 應收到 deleted tombstones")
+    }
+
+    // MARK: - Conflict 細節
+
+    private static func mergerConflictRecordContainsLocalRemoteBaseJSON() throws {
+        // 衝突時 Merger 應該把 local / remote / base 的 JSON 都序列化進 ConflictRecord
+        // 給 UI side-by-side 顯示用
+        let id = UUID()
+        let baseT = Date(timeIntervalSince1970: 1_700_000_000)
+        let localT = Date(timeIntervalSince1970: 1_700_000_500)
+        let remoteT = Date(timeIntervalSince1970: 1_700_001_000)
+
+        let base = makeSnapshot(sources: [
+            makeSource(id: id, url: "https://base.example.com", updatedAt: baseT)
+        ])
+        let local = makeSnapshot(sources: [
+            makeSource(id: id, url: "https://local.example.com", updatedAt: localT)
+        ])
+        let remote = makeSnapshot(sources: [
+            makeSource(id: id, url: "https://remote.example.com", updatedAt: remoteT)
+        ])
+
+        let result = Merger.merge3Way(local: local, remote: remote, base: base)
+        expect(result.conflicts.count == 1, "應有一筆衝突")
+        let conflict = result.conflicts[0]
+        expect(conflict.table == .sources, "衝突表是 sources")
+        expect(!conflict.localValue.isEmpty, "localValue 應有 JSON")
+        expect(!conflict.remoteValue.isEmpty, "remoteValue 應有 JSON")
+        expect(!conflict.baseValue!.isEmpty, "baseValue 應有 JSON")
+
+        // decode 回去應該拿回原本的值
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let localDecoded = try decoder.decode(Source.self, from: conflict.localValue)
+        let remoteDecoded = try decoder.decode(Source.self, from: conflict.remoteValue)
+        let baseDecoded = try decoder.decode(Source.self, from: conflict.baseValue!)
+        expect(localDecoded.url.absoluteString == "https://local.example.com", "local JSON 應 decode 回正確的 url")
+        expect(remoteDecoded.url.absoluteString == "https://remote.example.com", "remote JSON 應 decode 回正確的 url")
+        expect(baseDecoded.url.absoluteString == "https://base.example.com", "base JSON 應 decode 回正確的 url")
+    }
+
+    private static func conflictStorePersistsAndReloads() async throws {
+        // 驗證 ConflictStore 寫進磁碟後, 重新 init 能讀回來
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("conflicts.json")
+
+        let store1 = ConflictStore(storeURL: url)
+        let id = UUID()
+        let conflict = ConflictRecord(
+            id: id,
+            table: .sources,
+            recordId: id.uuidString,
+            resolution: .tookRemote,
+            localValue: Data("\"local\"".utf8),
+            remoteValue: Data("\"remote\"".utf8),
+            baseValue: Data("\"base\"".utf8)
+        )
+        await store1.replace(with: [conflict])
+        let count1 = await store1.records.count
+        expect(count1 == 1, "寫入後應有 1 筆")
+
+        // 重新 init, 應讀到剛才寫入的
+        let store2 = ConflictStore(storeURL: url)
+        let count2 = await store2.records.count
+        expect(count2 == 1, "重新 init 後應讀到 1 筆")
+        let loaded = await store2.records.first
+        expect(loaded?.id == id, "id 應一致")
+        expect(loaded?.table == .sources, "table 應一致")
+
+        // markResolved 也要持久化
+        await store2.markResolved(id)
+        let store3 = ConflictStore(storeURL: url)
+        let resolved = await store3.records.first
+        expect(resolved?.isResolved == true, "markResolved 應持久化")
     }
 }
 
