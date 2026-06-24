@@ -414,6 +414,22 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    func openAIRequestLog() {
+        Task {
+            do {
+                let logURL = try await AIRequestLogStore.shared.ensureLogFile()
+                await MainActor.run {
+                    NSWorkspace.shared.open(logURL)
+                    self.statusMessage = "已開啟 AI log：\(logURL.lastPathComponent)"
+                }
+            } catch {
+                await MainActor.run {
+                    self.statusMessage = "開啟 AI log 失敗：\(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
     func scheduleAutoClose() {
         guard isPopoverVisible else { return }
         let duration = autoCloseRemainingSeconds ?? schedulerPolicy.visibleDuration(settings: snapshot.settings)
