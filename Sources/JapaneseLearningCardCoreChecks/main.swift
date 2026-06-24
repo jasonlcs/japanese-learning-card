@@ -18,6 +18,7 @@ struct CoreChecks {
         try await storeReloadsFromDiskWhenDatabaseChangesExternally()
         try await storeUpdateMergesExternalChangesBeforeWriting()
         try aiArticleRequestAndDecoding()
+        try articleDecodingHandlesReasoningModelOutput()
         try await pipelineGeneratesAIArticleAndCards()
         try await storePersistsGeneratedArticles()
         print("All JapaneseLearningCardCore checks passed.")
@@ -279,6 +280,39 @@ struct CoreChecks {
         )
         expect(fallbackDraft.theme == "備用", "empty theme should fall back to provided theme")
         expect(fallbackDraft.title == "備用", "empty title should fall back to theme")
+    }
+
+    private static func articleDecodingHandlesReasoningModelOutput() throws {
+        // 推理型模型在真正的 JSON 前輸出 <think>…</think>，且思考內含草稿大括號。
+        let content = """
+        <think>
+        Let me draft the JSON:
+        {
+          "theme": "草稿",
+          "title": "これは草稿です",
+          "text": "本文の下書き…"
+        }
+        Hmm, let me reconsider the grammar { not balanced here } and finalize.
+        </think>
+        {"theme":"推し活","title":"私の推し活","text":"私は毎週末ライブに行きます。"}
+        """
+
+        let draft = try OpenAICompatibleLLMClient.decodeArticle(from: content, fallbackTheme: "fallback")
+        expect(draft.theme == "推し活", "should decode the real JSON after </think>, not the draft inside it")
+        expect(draft.title == "私の推し活", "title should come from the final answer")
+        expect(draft.text == "私は毎週末ライブに行きます。", "text should come from the final answer")
+
+        // 也要相容包在 markdown code fence 內、且有前後說明文字的情況。
+        let fenced = """
+        Here is the article:
+        ```json
+        {"theme":"旅行","title":"京都の旅","text":"今日は京都に行きました。"}
+        ```
+        Hope this helps!
+        """
+        let fencedDraft = try OpenAICompatibleLLMClient.decodeArticle(from: fenced, fallbackTheme: "fallback")
+        expect(fencedDraft.theme == "旅行", "should decode JSON wrapped in markdown fence with surrounding prose")
+        expect(fencedDraft.text == "今日は京都に行きました。", "fenced article text should decode")
     }
 
     private static func pipelineGeneratesAIArticleAndCards() async throws {

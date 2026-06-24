@@ -7,6 +7,7 @@ public enum LLMClientError: LocalizedError {
     case missingAPIKey
     case invalidResponse
     case httpStatus(code: Int, body: String)
+    case decodingFailed(detail: String, raw: String)
     case noContent
 
     public var errorDescription: String? {
@@ -17,6 +18,8 @@ public enum LLMClientError: LocalizedError {
             "The provider returned an invalid response."
         case .httpStatus(let code, let body):
             body.isEmpty ? "Provider returned HTTP \(code)." : "Provider returned HTTP \(code): \(body)"
+        case .decodingFailed(let detail, let raw):
+            "無法解析模型回應(\(detail))。原始內容：\(raw)"
         case .noContent:
             "The provider returned no content."
         }
@@ -84,10 +87,8 @@ public struct OpenAICompatibleLLMClient: LLMClient {
 
         let (data, response) = try await session.data(for: request)
         try Self.validateHTTPResponse(response, data: data)
-        let decoded = try JSONDecoder().decode(ChatCompletionResponse.self, from: data)
-        guard let content = decoded.choices.first?.message.content else {
-            throw LLMClientError.noContent
-        }
+        Self.debugLog("回應原始 body：\n\(String(decoding: data, as: UTF8.self))")
+        let content = try Self.extractContent(from: data)
         return try Self.decodeCards(from: content, sourceURL: document.url)
     }
 
@@ -114,10 +115,8 @@ public struct OpenAICompatibleLLMClient: LLMClient {
 
         let (data, response) = try await session.data(for: request)
         try Self.validateHTTPResponse(response, data: data)
-        let decoded = try JSONDecoder().decode(ChatCompletionResponse.self, from: data)
-        guard let content = decoded.choices.first?.message.content else {
-            throw LLMClientError.noContent
-        }
+        Self.debugLog("回應原始 body：\n\(String(decoding: data, as: UTF8.self))")
+        let content = try Self.extractContent(from: data)
         return try Self.decodeQuiz(from: content, cards: cards)
     }
 
@@ -156,10 +155,8 @@ public struct OpenAICompatibleLLMClient: LLMClient {
 
         let (data, response) = try await session.data(for: request)
         try Self.validateHTTPResponse(response, data: data)
-        let decoded = try JSONDecoder().decode(ChatCompletionResponse.self, from: data)
-        guard let content = decoded.choices.first?.message.content else {
-            throw LLMClientError.noContent
-        }
+        Self.debugLog("回應原始 body：\n\(String(decoding: data, as: UTF8.self))")
+        let content = try Self.extractContent(from: data)
         return try Self.decodeExampleReading(from: content)
     }
 
@@ -184,13 +181,29 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         }
         request.httpBody = try JSONEncoder().encode(body)
 
+        Self.debugLog("article 請求 → \(request.url?.absoluteString ?? "")，model=\(settings.providerConfig.model)，levels=\(jlptLevels.map(\.rawValue).joined(separator: ","))")
         let (data, response) = try await session.data(for: request)
         try Self.validateHTTPResponse(response, data: data)
-        let decoded = try JSONDecoder().decode(ChatCompletionResponse.self, from: data)
+        Self.debugLog("article 回應原始 body：\n\(String(decoding: data, as: UTF8.self))")
+        let content = try Self.extractContent(from: data)
+        return try Self.decodeArticle(from: content, fallbackTheme: theme)
+    }
+
+    /// 解析 provider 的外層回應並取出 message.content；失敗時印出原始 body 方便除錯。
+    private static func extractContent(from data: Data) throws -> String {
+        let decoded: ChatCompletionResponse
+        do {
+            decoded = try JSONDecoder().decode(ChatCompletionResponse.self, from: data)
+        } catch {
+            let raw = String(decoding: data, as: UTF8.self)
+            log("無法解析 provider 外層回應 (ChatCompletionResponse)：\(describeDecodingError(error))\n----- 原始 body 開始 -----\n\(raw)\n----- 原始 body 結束 -----")
+            let snippet = raw.count > 400 ? String(raw.prefix(400)) + "…" : raw
+            throw LLMClientError.decodingFailed(detail: describeDecodingError(error), raw: snippet)
+        }
         guard let content = decoded.choices.first?.message.content else {
             throw LLMClientError.noContent
         }
-        return try Self.decodeArticle(from: content, fallbackTheme: theme)
+        return content
     }
 
     public func listModels(settings: AppSettings, apiKeyOverride: String? = nil) async throws -> [String] {
@@ -324,9 +337,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
     }
 
     public static func decodeCards(from content: String, sourceURL: URL) throws -> [LearningCard] {
-        let cleaned = stripMarkdownFence(content)
-        let data = Data(cleaned.utf8)
-        let payload = try JSONDecoder().decode(CardPayload.self, from: data)
+        let payload = try decodeJSON(CardPayload.self, from: content)
         return payload.cards.map {
             let jlptLevel = JLPTLevel(rawValue: $0.jlptLevel ?? "") ?? .unknown
             let verbFormType = VerbFormType(rawValue: $0.verbFormType ?? "") ?? .unknown
@@ -349,9 +360,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
     }
 
     public static func decodeQuiz(from content: String, cards: [LearningCard]) throws -> [QuizQuestion] {
-        let cleaned = stripMarkdownFence(content)
-        let data = Data(cleaned.utf8)
-        let payload = try JSONDecoder().decode(QuizPayload.self, from: data)
+        let payload = try decodeJSON(QuizPayload.self, from: content)
         return payload.quizzes.compactMap { item in
             let choices = item.choices.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             guard choices.count == 4, choices.contains(item.correctAnswer) else {
@@ -371,16 +380,12 @@ public struct OpenAICompatibleLLMClient: LLMClient {
     }
 
     public static func decodeExampleReading(from content: String) throws -> String {
-        let cleaned = stripMarkdownFence(content)
-        let data = Data(cleaned.utf8)
-        let payload = try JSONDecoder().decode(ExampleReadingPayload.self, from: data)
+        let payload = try decodeJSON(ExampleReadingPayload.self, from: content)
         return payload.exampleReading.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     public static func decodeArticle(from content: String, fallbackTheme: String) throws -> AIArticleDraft {
-        let cleaned = stripMarkdownFence(content)
-        let data = Data(cleaned.utf8)
-        let payload = try JSONDecoder().decode(ArticlePayload.self, from: data)
+        let payload = try decodeJSON(ArticlePayload.self, from: content)
         let theme = payload.theme.trimmingCharacters(in: .whitespacesAndNewlines)
         let title = payload.title.trimmingCharacters(in: .whitespacesAndNewlines)
         let text = payload.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -394,6 +399,17 @@ public struct OpenAICompatibleLLMClient: LLMClient {
             title: resolvedTitle,
             text: text
         )
+    }
+
+    /// 一律印到 stderr，方便 `swift run` 時直接在終端機看到。
+    static func log(_ message: @autoclosure () -> String) {
+        FileHandle.standardError.write(Data(("[LLM] " + message() + "\n").utf8))
+    }
+
+    /// 詳細請求/回應日誌，預設關閉；設 JLC_DEBUG_LLM=1 才會輸出。
+    static func debugLog(_ message: @autoclosure () -> String) {
+        guard ProcessInfo.processInfo.environment["JLC_DEBUG_LLM"] != nil else { return }
+        log(message())
     }
 
     private static func validateHTTPResponse(_ response: URLResponse, data: Data) throws {
@@ -410,6 +426,84 @@ public struct OpenAICompatibleLLMClient: LLMClient {
             .replacingOccurrences(of: "```json", with: "")
             .replacingOccurrences(of: "```", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 從模型回應中抽出最外層的 JSON 物件，容忍前後夾雜的說明文字、markdown
+    /// 或推理型模型的 <think>…</think> 區塊。
+    private static func extractJSONObject(_ content: String) -> String {
+        let withoutThink = stripThinkBlocks(content)
+        let cleaned = stripMarkdownFence(withoutThink)
+        return balancedJSONObject(in: cleaned) ?? cleaned
+    }
+
+    /// 推理型模型常在 JSON 前輸出 <think>…</think>，其中可能含有會干擾解析的大括號；
+    /// 取最後一個 </think> 之後的內容作為真正的回答。
+    private static func stripThinkBlocks(_ content: String) -> String {
+        guard let range = content.range(of: "</think>", options: .backwards) else {
+            return content
+        }
+        return String(content[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 從第一個 `{` 開始做大括號配對(忽略字串內的括號)，回傳第一個完整的 JSON 物件。
+    private static func balancedJSONObject(in content: String) -> String? {
+        guard let start = content.firstIndex(of: "{") else { return nil }
+        var depth = 0
+        var inString = false
+        var escaped = false
+        var index = start
+        while index < content.endIndex {
+            let character = content[index]
+            if escaped {
+                escaped = false
+            } else if character == "\\" {
+                escaped = true
+            } else if character == "\"" {
+                inString.toggle()
+            } else if !inString {
+                if character == "{" {
+                    depth += 1
+                } else if character == "}" {
+                    depth -= 1
+                    if depth == 0 {
+                        return String(content[start...index])
+                    }
+                }
+            }
+            index = content.index(after: index)
+        }
+        return nil
+    }
+
+    private static func decodeJSON<T: Decodable>(_ type: T.Type, from content: String) throws -> T {
+        let json = extractJSONObject(content)
+        do {
+            return try JSONDecoder().decode(T.self, from: Data(json.utf8))
+        } catch {
+            // 解碼失敗一定把模型回的完整原文印出來，方便貼上來除錯。
+            log("解碼 \(T.self) 失敗：\(describeDecodingError(error))\n----- 模型原始回應開始 -----\n\(content)\n----- 模型原始回應結束 -----")
+            let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+            let snippet = trimmed.count > 400 ? String(trimmed.prefix(400)) + "…" : trimmed
+            throw LLMClientError.decodingFailed(detail: describeDecodingError(error), raw: snippet)
+        }
+    }
+
+    private static func describeDecodingError(_ error: Error) -> String {
+        guard let decodingError = error as? DecodingError else {
+            return error.localizedDescription
+        }
+        switch decodingError {
+        case .keyNotFound(let key, _):
+            return "缺少欄位「\(key.stringValue)」"
+        case .typeMismatch(_, let context):
+            return "型別不符：\(context.debugDescription)"
+        case .valueNotFound(_, let context):
+            return "缺少值：\(context.debugDescription)"
+        case .dataCorrupted(let context):
+            return "內容非合法 JSON：\(context.debugDescription)"
+        @unknown default:
+            return decodingError.localizedDescription
+        }
     }
 }
 
