@@ -61,6 +61,14 @@ jobs:
           echo "SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
           echo "✅ Developer ID: $IDENTITY"
 
+      - name: Set version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          /usr/libexec/PlistBuddy -c "Set CFBundleShortVersionString $VERSION" Sources/JapaneseLearningCard/Info.plist
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "✅ 版本設為 $VERSION（取自 tag $GITHUB_REF_NAME）"
+
       - name: Build .app and DMG
         run: |
           chmod +x build-app.sh
@@ -92,12 +100,6 @@ jobs:
 
           echo "▸ 驗證 Gatekeeper..."
           spctl --assess --type open --context context:primary-signature -v "$DMG" || true
-
-      - name: Read version from Info.plist
-        id: version
-        run: |
-          VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" Sources/JapaneseLearningCard/Info.plist)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Create Release and Upload DMG
         uses: softprops/action-gh-release@v2
