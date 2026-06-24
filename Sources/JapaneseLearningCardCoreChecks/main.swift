@@ -17,6 +17,7 @@ struct CoreChecks {
         try await storeMigratesLegacyDatabaseWhenNeeded()
         try await storeReloadsFromDiskWhenDatabaseChangesExternally()
         try await storeUpdateMergesExternalChangesBeforeWriting()
+        try await storeUpdatePreservesInterleavedConcurrentWrites()
         try aiArticleRequestAndDecoding()
         try articleDecodingHandlesReasoningModelOutput()
         try structuredOutputIsSentPerProvider()
@@ -232,6 +233,31 @@ struct CoreChecks {
         expect(snapshot.settings.displayIntervalMinutes == 42, "computer A's setting change should be preserved")
         expect(snapshot.sources.count == 1, "computer B's source should not be overwritten by computer A's update")
         expect(snapshot.sources.first?.url == source.url, "computer B's source URL should survive computer A's update")
+    }
+
+    private static func storeUpdatePreservesInterleavedConcurrentWrites() async throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("store.sqlite")
+
+        // Two connections to the same file (e.g., two Macs via iCloud Drive).
+        let storeA = await AppStore(fileURL: fileURL)
+        let storeB = await AppStore(fileURL: fileURL)
+        let url = URL(string: "https://example.com")!
+
+        // Alternate appends; each writer's snapshot is stale by the other's last commit.
+        // Optimistic concurrency must merge rather than overwrite, losing nothing.
+        for i in 0..<5 {
+            try await storeA.update { $0.cards.append(card("A\(i)", status: .new, createdAt: Date(), lastShownAt: nil, url: url)) }
+            try await storeB.update { $0.cards.append(card("B\(i)", status: .new, createdAt: Date(), lastShownAt: nil, url: url)) }
+        }
+
+        let snapshot = await storeB.read()
+        expect(snapshot.cards.count == 10, "all interleaved appends from both writers must be preserved")
+        for i in 0..<5 {
+            expect(snapshot.cards.contains(where: { $0.word == "A\(i)" }), "writer A's card A\(i) must survive")
+            expect(snapshot.cards.contains(where: { $0.word == "B\(i)" }), "writer B's card B\(i) must survive")
+        }
     }
 
     private static func storeReloadsFromDiskWhenDatabaseChangesExternally() async throws {

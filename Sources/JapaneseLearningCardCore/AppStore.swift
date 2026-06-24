@@ -102,26 +102,66 @@ public actor AppStore {
         databaseURL
     }
 
+    static let maxUpdateAttempts = 5
+
     public func update(_ mutate: @Sendable (inout AppSnapshot) -> Void) throws {
-        // Reload from disk before applying any mutation so that concurrent writes
-        // from another device (e.g., via iCloud Drive) are merged in rather than
-        // silently overwritten.
+        // Optimistic concurrency control for the shared database file:
         //
-        // Note: a narrow TOCTOU window remains — another device could write between
-        // the reload and the subsequent persist(). This is an inherent limitation of
-        // file-based storage without distributed locking; in practice, iCloud Drive
-        // sync latency makes simultaneous writes very unlikely.
-        if hasDatabaseChangedOnDisk() {
-            try reloadFromDisk()
+        // 1. Refresh our in-memory snapshot so the mutation sees the latest data.
+        // 2. Apply the mutation to a candidate snapshot.
+        // 3. Inside a BEGIN IMMEDIATE write transaction (which holds the write lock),
+        //    re-check the SQLite data_version. If another connection committed since
+        //    we loaded, abort, reload, re-apply the mutation, and retry. Otherwise
+        //    write and COMMIT atomically.
+        //
+        // Holding the write lock across the version check and the COMMIT closes the
+        // TOCTOU window for any writer touching the same file. (Cross-Mac writes via
+        // iCloud Drive still can't be fully serialized — that needs a sync backend.)
+        for attempt in 1...Self.maxUpdateAttempts {
+            if hasDatabaseChangedOnDisk() {
+                try reloadFromDisk()
+            }
+            var candidate = snapshot
+            mutate(&candidate)
+
+            do {
+                try commitIfUnchanged(candidate)
+                snapshot = candidate
+                return
+            } catch SQLiteStoreError.optimisticConflict {
+                if attempt == Self.maxUpdateAttempts {
+                    throw SQLiteStoreError.optimisticConflict
+                }
+                try reloadFromDisk()
+            }
         }
-        mutate(&snapshot)
-        try persist()
+    }
+
+    /// 在持有寫鎖的交易中重新確認版本未被其他連線變動，相符才寫入並提交；
+    /// 否則回滾並丟出 optimisticConflict 讓呼叫端 reload 後重試。
+    private func commitIfUnchanged(_ candidate: AppSnapshot) throws {
+        let expected = lastDataVersion
+        try execute("BEGIN IMMEDIATE TRANSACTION;")
+        do {
+            if let expected, let current = currentDataVersion(), current != expected {
+                throw SQLiteStoreError.optimisticConflict
+            }
+            try writeSnapshotTables(candidate)
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
+            throw error
+        }
+        // 我們自己的提交不會改變本連線的 data_version，所以重新讀一次作為新的基準。
+        lastDataVersion = currentDataVersion()
     }
 
     private func open() throws {
         guard sqlite3_open(databaseURL.path, &database) == SQLITE_OK else {
             throw SQLiteStoreError.openFailed(message: lastErrorMessage())
         }
+        // 同檔多連線時，BEGIN IMMEDIATE 可能短暫遇到對方持鎖；等待而非立即 SQLITE_BUSY。
+        sqlite3_busy_timeout(database, 5000)
     }
 
     private func hasDatabaseChangedOnDisk() -> Bool {
@@ -238,54 +278,59 @@ public actor AppStore {
     private func persist() throws {
         try execute("BEGIN TRANSACTION;")
         do {
-            try replaceState(key: "settings", value: snapshot.settings)
-            try replaceTable("sources", values: snapshot.sources) { source in
-                [
-                    source.id.uuidString,
-                    source.url.absoluteString,
-                    source.isEnabled ? "1" : "0",
-                    try encodeString(source)
-                ]
-            }
-            try replaceTable("crawled_documents", values: snapshot.documents) { document in
-                [
-                    document.contentHash,
-                    document.sourceId.uuidString,
-                    document.url.absoluteString,
-                    Self.iso8601String(from: document.fetchedAt),
-                    try encodeString(document)
-                ]
-            }
-            try replaceTable("learning_cards", values: snapshot.cards) { card in
-                [
-                    card.id.uuidString,
-                    card.word,
-                    card.status.rawValue,
-                    card.sourceUrl.absoluteString,
-                    try encodeString(card)
-                ]
-            }
-            try replaceTable("quiz_questions", values: snapshot.quizzes) { quiz in
-                [
-                    quiz.id.uuidString,
-                    quiz.sourceWord,
-                    quiz.status.rawValue,
-                    Self.iso8601String(from: quiz.createdAt),
-                    try encodeString(quiz)
-                ]
-            }
-            try replaceTable("generated_articles", values: snapshot.generatedArticles) { article in
-                [
-                    article.id.uuidString,
-                    article.contentHash,
-                    Self.iso8601String(from: article.generatedAt),
-                    try encodeString(article)
-                ]
-            }
+            try writeSnapshotTables(snapshot)
             try execute("COMMIT;")
         } catch {
             try? execute("ROLLBACK;")
             throw error
+        }
+    }
+
+    /// 把整份快照寫入各表(整表覆蓋)。呼叫端負責開啟/提交交易。
+    private func writeSnapshotTables(_ snapshot: AppSnapshot) throws {
+        try replaceState(key: "settings", value: snapshot.settings)
+        try replaceTable("sources", values: snapshot.sources) { source in
+            [
+                source.id.uuidString,
+                source.url.absoluteString,
+                source.isEnabled ? "1" : "0",
+                try encodeString(source)
+            ]
+        }
+        try replaceTable("crawled_documents", values: snapshot.documents) { document in
+            [
+                document.contentHash,
+                document.sourceId.uuidString,
+                document.url.absoluteString,
+                Self.iso8601String(from: document.fetchedAt),
+                try encodeString(document)
+            ]
+        }
+        try replaceTable("learning_cards", values: snapshot.cards) { card in
+            [
+                card.id.uuidString,
+                card.word,
+                card.status.rawValue,
+                card.sourceUrl.absoluteString,
+                try encodeString(card)
+            ]
+        }
+        try replaceTable("quiz_questions", values: snapshot.quizzes) { quiz in
+            [
+                quiz.id.uuidString,
+                quiz.sourceWord,
+                quiz.status.rawValue,
+                Self.iso8601String(from: quiz.createdAt),
+                try encodeString(quiz)
+            ]
+        }
+        try replaceTable("generated_articles", values: snapshot.generatedArticles) { article in
+            [
+                article.id.uuidString,
+                article.contentHash,
+                Self.iso8601String(from: article.generatedAt),
+                try encodeString(article)
+            ]
         }
     }
 
@@ -447,6 +492,7 @@ private enum SQLiteStoreError: LocalizedError {
     case openFailed(message: String)
     case executeFailed(message: String)
     case invalidTable(String)
+    case optimisticConflict
 
     var errorDescription: String? {
         switch self {
@@ -456,6 +502,8 @@ private enum SQLiteStoreError: LocalizedError {
             "SQLite operation failed: \(message)"
         case .invalidTable(let table):
             "Invalid SQLite table: \(table)"
+        case .optimisticConflict:
+            "The database changed during the write and could not be reconciled after several attempts."
         }
     }
 }
