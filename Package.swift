@@ -26,7 +26,8 @@ let package = Package(
             dependencies: ["JapaneseLearningCardCore"],
             exclude: [
                 "Info.plist",
-                "JapaneseLearningCard.entitlements"
+                "JapaneseLearningCard.entitlements",
+                "JapaneseLearningCard.entitlements.ad-hoc"
             ],
             linkerSettings: [
                 .linkedFramework("AppKit"),
