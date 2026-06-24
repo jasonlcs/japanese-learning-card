@@ -88,6 +88,11 @@ final class MenuBarController: NSObject {
         popover.appearance = NSAppearance(named: .aqua)
         popover.contentViewController = NSHostingController(rootView: RootView(viewModel: viewModel))
 
+        UpdateChecker.prepareToPresentAlert = { [weak self] in
+            self?.popover.performClose(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+
         viewModel.requestShowPopover = { [weak self] in
             self?.showPopover()
         }

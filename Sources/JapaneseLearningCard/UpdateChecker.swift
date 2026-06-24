@@ -12,6 +12,10 @@ struct UpdateChecker {
     static let autoCheckDefaultsKey = "autoCheckUpdates"
     private static let lastCheckDefaultsKey = "lastUpdateCheck"
 
+    /// 在跳出任何 alert 前呼叫，讓選單列 popover 先收起、app 移到前景，
+    /// 避免 alert 被仍浮在上層的 transient popover 蓋住。由 MenuBarController 設定。
+    @MainActor static var prepareToPresentAlert: (() -> Void)?
+
     struct Release: Codable {
         let tagName: String
         let htmlUrl: String
@@ -106,6 +110,7 @@ struct UpdateChecker {
 
     @MainActor
     private func showUpdateAlert(release: Release) {
+        Self.prepareToPresentAlert?()
         let dmgAsset = release.assets.first { $0.name.hasSuffix(".dmg") }
         let downloadURL = dmgAsset?.browserDownloadUrl ?? release.htmlUrl
 
@@ -124,6 +129,7 @@ struct UpdateChecker {
 
     @MainActor
     private func showAlert(title: String, message: String) {
+        Self.prepareToPresentAlert?()
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
