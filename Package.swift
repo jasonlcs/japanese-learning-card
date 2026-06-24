@@ -24,8 +24,7 @@ let package = Package(
             name: "JapaneseLearningCard",
             dependencies: ["JapaneseLearningCardCore"],
             exclude: [
-                "Info.plist",
-                "Resources"
+                "Info.plist"
             ],
             linkerSettings: [
                 .linkedFramework("AppKit"),
