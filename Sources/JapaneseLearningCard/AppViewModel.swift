@@ -31,9 +31,14 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var iCloudFingerprint: String?
     @Published private(set) var iCloudLastPushAt: Date?
     @Published private(set) var iCloudLastPullAt: Date?
-    @Published private(set) var iCloudConflictCount: Int = 0
+    @Published private(set) var iCloudConflicts: [ConflictRecord] = []
     @Published private(set) var iCloudLastErrorMessage: String?
     @Published private(set) var iCloudIsSyncing: Bool = false
+
+    /// 未解衝突數 (isResolved == false 的), 給 settings 紅點用
+    var iCloudConflictCount: Int {
+        iCloudConflicts.filter { !$0.isResolved }.count
+    }
 
     private let store: AppStore
     private let secretStore: SecretStore
@@ -51,7 +56,7 @@ final class AppViewModel: ObservableObject {
     nonisolated(unsafe) private var sleepWakeObservers: [NSObjectProtocol] = []
     private var isSuspended = false
     private let accountChecker = CloudKitAccountChecker()
-    private let conflictStore = ConflictStore()
+    private let conflictStore = ConflictStore(storeURL: ConflictStore.defaultURL())
     private let syncedBase = SyncedBaseStore(url: SyncedBaseStore.defaultURL())
     private var syncCoordinator: SyncCoordinator?
     private var syncPollTimer: Timer?
@@ -148,7 +153,7 @@ final class AppViewModel: ObservableObject {
                 do {
                     try await syncCoordinator.pullAndMerge()
                     iCloudLastPullAt = Date()
-                    iCloudConflictCount = await conflictStore.records.count
+                    iCloudConflicts = await conflictStore.records
                     await reload()
                 } catch SyncCoordinator.SyncError.pullFailed(let msg) {
                     print("pull failed: \(msg)")
@@ -161,6 +166,88 @@ final class AppViewModel: ObservableObject {
         } catch {
             iCloudLastErrorMessage = String(describing: error)
             print("sync failed: \(error)")
+        }
+    }
+
+    /// User 在 UI 上手動選了「用 local / remote」解某個衝突:
+    /// 1. 把選中的 record 套回 local store (overwrite LWW 結果)
+    /// 2. 把 conflict 標記為 resolved
+    /// 3. 推一次讓雲端同步
+    func resolveConflict(_ conflictId: UUID, useLocal: Bool) async {
+        guard let conflict = iCloudConflicts.first(where: { $0.id == conflictId }) else { return }
+        let chosenData = useLocal ? conflict.localValue : conflict.remoteValue
+        let chosenResolution: ConflictRecord.Resolution = useLocal ? .tookLocal : .tookRemote
+
+        // 把選中的 record decode 回對應型別, 寫進 local store
+        do {
+            try await applyConflictResolution(table: conflict.table, recordId: conflict.recordId, data: chosenData)
+        } catch {
+            iCloudLastErrorMessage = "套用衝突解決失敗: \(error)"
+            print("resolveConflict apply failed: \(error)")
+            return
+        }
+
+        await conflictStore.updateResolution(conflictId, to: chosenResolution)
+        iCloudConflicts = await conflictStore.records
+        await reload()
+
+        // 推一次讓雲端知道
+        do {
+            try await syncCoordinator?.pushIfNeeded()
+        } catch {
+            iCloudLastErrorMessage = "推送衝突解決失敗: \(error)"
+        }
+    }
+
+    /// 從衝突的 JSON blob decode 出對應 record 寫進 store。
+    private func applyConflictResolution(table: ConflictRecord.Table, recordId: String, data: Data) async throws {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        // 先把 decode 做完 (throws) 再進 update closure (不 throws)
+        let newSettings: AppSettings? = (table == .settings) ? try decoder.decode(AppSettings.self, from: data) : nil
+        let newSource: Source? = (table == .sources) ? try decoder.decode(Source.self, from: data) : nil
+        let newDoc: CrawledDocument? = (table == .crawledDocuments) ? try decoder.decode(CrawledDocument.self, from: data) : nil
+        let newCard: LearningCard? = (table == .learningCards) ? try decoder.decode(LearningCard.self, from: data) : nil
+        let newQuiz: QuizQuestion? = (table == .quizQuestions) ? try decoder.decode(QuizQuestion.self, from: data) : nil
+        let newArticle: GeneratedArticle? = (table == .generatedArticles) ? try decoder.decode(GeneratedArticle.self, from: data) : nil
+
+        try await store.update { state in
+            switch table {
+            case .settings:
+                if let v = newSettings { state.settings = v }
+            case .sources:
+                if let v = newSource { Self.replaceOrAppend(&state.sources, id: recordId, value: v) }
+            case .crawledDocuments:
+                if let v = newDoc { Self.replaceOrAppendByKey(&state.documents, key: { $0.contentHash }, recordId: recordId, value: v) }
+            case .learningCards:
+                if let v = newCard { Self.replaceOrAppend(&state.cards, id: recordId, value: v) }
+            case .quizQuestions:
+                if let v = newQuiz { Self.replaceOrAppend(&state.quizzes, id: recordId, value: v) }
+            case .generatedArticles:
+                if let v = newArticle { Self.replaceOrAppend(&state.generatedArticles, id: recordId, value: v) }
+            }
+        }
+    }
+
+    nonisolated private static func replaceOrAppend<T: Identifiable>(_ list: inout [T], id: String, value: T) where T.ID == UUID {
+        guard let uuid = UUID(uuidString: id) else { return }
+        if let idx = list.firstIndex(where: { $0.id == uuid }) {
+            list[idx] = value
+        } else {
+            list.append(value)
+        }
+    }
+
+    nonisolated private static func replaceOrAppendByKey<T>(
+        _ list: inout [T],
+        key: (T) -> String,
+        recordId: String,
+        value: T
+    ) {
+        if let idx = list.firstIndex(where: { key($0) == recordId }) {
+            list[idx] = value
+        } else {
+            list.append(value)
         }
     }
 
