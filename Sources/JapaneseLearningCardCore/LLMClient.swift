@@ -39,7 +39,7 @@ public struct AIArticleDraft: Codable, Equatable, Sendable {
 }
 
 public struct OpenAICompatibleLLMClient: LLMClient {
-    public static let userAgent = WebCrawler.userAgent
+    public static let userAgent = "JapaneseLearningCard/0.1 (+https://github.com/jasonlcs/japanese-learning-card)"
 
     private let secretStore: SecretStore
     private let session: URLSession
