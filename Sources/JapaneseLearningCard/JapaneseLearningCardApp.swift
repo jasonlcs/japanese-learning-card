@@ -62,13 +62,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         .terminateNow
     }
+
+    /// 前景時順便拉一次 iCloud。macOS 的 silent push 不可靠, foreground
+    /// pull 是「使用者打開 menu bar」這個動作的最直接觸發點。
+    func applicationDidBecomeActive(_ notification: Notification) {
+        Task { @MainActor in
+            await menuBarController?.viewModel.performPull()
+        }
+    }
+
+    /// iCloud 的 silent push 送過來時叫 AppViewModel 拉一次。
+    /// macOS 不保證 background app 一定會醒, 但前景或剛醒的時候通常會送。
+    func application(
+        _ application: NSApplication,
+        didReceiveRemoteNotification userInfo: [String: Any]
+    ) {
+        Task { @MainActor in
+            await menuBarController?.viewModel.performPull()
+        }
+    }
 }
 
 @MainActor
 final class MenuBarController: NSObject {
+    let viewModel: AppViewModel
     private let statusItem: NSStatusItem
     private let popover: NSPopover
-    private let viewModel: AppViewModel
 
     init(viewModel: AppViewModel) {
         self.viewModel = viewModel
