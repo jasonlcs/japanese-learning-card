@@ -376,6 +376,13 @@ final class AppViewModel: ObservableObject {
         Task { await reload() }
     }
 
+    func copyArticle(_ article: GeneratedArticle) {
+        let text = article.title.isEmpty ? article.plainText : "\(article.title)\n\n\(article.plainText)"
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        statusMessage = "已複製文章到剪貼簿"
+    }
+
     func quitApp() {
         NSApp.terminate(nil)
     }

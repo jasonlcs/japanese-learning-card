@@ -651,6 +651,14 @@ struct SettingsView: View {
 
 struct HistoryView: View {
     @ObservedObject var viewModel: AppViewModel
+    @State private var mode: HistoryMode = .articles
+    @State private var selectedArticle: GeneratedArticle?
+
+    enum HistoryMode: String, CaseIterable, Identifiable {
+        case articles = "AI 文章"
+        case cards = "複習卡片"
+        var id: String { rawValue }
+    }
 
     // 只顯示曾經被展示過的卡片，依最近複習時間排序，做為「複習紀錄」。
     // 全部卡片的瀏覽請改用「資料庫」分頁。
@@ -661,6 +669,68 @@ struct HistoryView: View {
     }
 
     var body: some View {
+        VStack(spacing: 0) {
+            Picker("", selection: $mode) {
+                ForEach(HistoryMode.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .padding()
+
+            switch mode {
+            case .articles:
+                articleList
+            case .cards:
+                cardList
+            }
+        }
+        .sheet(item: $selectedArticle) { article in
+            AIArticleDetailView(article: article, viewModel: viewModel)
+        }
+    }
+
+    private var articleList: some View {
+        List(viewModel.snapshot.generatedArticles) { article in
+            HStack(alignment: .top, spacing: 8) {
+                Button {
+                    selectedArticle = article
+                } label: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(article.title.isEmpty ? article.theme : article.title)
+                                .font(.headline)
+                                .lineLimit(1)
+                            Spacer()
+                            Text(article.generatedAt.formatted(date: .numeric, time: .shortened))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        Text(article.plainText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    viewModel.copyArticle(article)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                }
+                .buttonStyle(.borderless)
+                .help("複製整篇文章")
+            }
+            .padding(.vertical, 2)
+        }
+        .overlay {
+            if viewModel.snapshot.generatedArticles.isEmpty {
+                ContentUnavailableView("還沒有 AI 文章", systemImage: "doc.text")
+            }
+        }
+    }
+
+    private var cardList: some View {
         List(reviewedCards) { card in
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
@@ -871,6 +941,12 @@ struct AIArticleDetailView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                Button {
+                    viewModel.copyArticle(article)
+                } label: {
+                    Label("複製", systemImage: "doc.on.doc")
+                }
+                .help("複製整篇文章到剪貼簿")
                 Button("關閉") { dismiss() }
             }
 
