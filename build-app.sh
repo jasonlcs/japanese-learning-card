@@ -7,6 +7,7 @@ BUILD_DIR=".build/app"
 APP_BUNDLE="$BUILD_DIR/$PRODUCT.app"
 STAGING="$BUILD_DIR/staging"
 RESOURCES="$SRC/Resources"
+ENTITLEMENTS="$SRC/$PRODUCT.entitlements"
 DMG_NAME="$PRODUCT.dmg"
 DMG_FINAL="$BUILD_DIR/$DMG_NAME"
 
@@ -28,13 +29,23 @@ if [ -d "$RESOURCES" ] && [ "$(find "$RESOURCES" -type f | wc -l | tr -d ' ')" !
     cp -R "$RESOURCES"/. "$APP_BUNDLE/Contents/Resources/"
 fi
 
+ENTITLEMENT_ARG=""
+if [ -f "$ENTITLEMENTS" ]; then
+    ENTITLEMENT_ARG="--entitlements $ENTITLEMENTS"
+    echo "▸ 套用 entitlements: $ENTITLEMENTS"
+else
+    echo "⚠️ 找不到 $ENTITLEMENTS，iCloud 同步會被系統拒絕"
+fi
+
 SIGNING_IDENTITY="${SIGNING_IDENTITY:-}"
 if [ -n "$SIGNING_IDENTITY" ]; then
     echo "▸ 使用 Developer ID 簽名 app: $SIGNING_IDENTITY"
-    codesign --deep --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$APP_BUNDLE"
+    codesign --deep --force --options runtime --timestamp \
+        $ENTITLEMENT_ARG \
+        --sign "$SIGNING_IDENTITY" "$APP_BUNDLE"
 else
     echo "▸ 用 ad-hoc 簽名 app..."
-    codesign -s - "$APP_BUNDLE" 2>/dev/null || true
+    codesign --force $ENTITLEMENT_ARG -s - "$APP_BUNDLE" 2>/dev/null || true
 fi
 
 echo "▸ 驗證 app 簽名..."

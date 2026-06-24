@@ -77,35 +77,9 @@ public actor AppStore {
     }
 
     /// 強制關閉並重新開啟資料庫連線，重新讀取整份 snapshot。
-    /// 給測試或 CloudKit pull 觸發用: 把遠端 sqlite bytes 寫到本地後呼叫
-    /// `replaceDatabase(with:)`, 內部會 close 舊連線、寫入、重新 open。
+    /// 給測試或外部工具用。
     public func forceReloadFromDisk() throws {
         try reloadFromDisk()
-    }
-
-    /// 給 CloudKit pull 流程使用: 把 bytes 當新的 SQLite 檔寫入, close 舊連線,
-    /// 重新 open 讀入。寫入成功後 fire `onExternalChange` 讓 UI 自動 reload。
-    public func replaceDatabase(with bytes: Data) throws {
-        closeDatabase()
-        let directory = databaseURL.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try bytes.write(to: databaseURL, options: [.atomic])
-        do {
-            try open()
-            try migrate()
-            snapshot = try loadSnapshot()
-            lastDataVersion = currentDataVersion()
-        } catch {
-            lastDataVersion = nil
-            throw error
-        }
-        onExternalChange?()
-    }
-
-    /// 給 CloudKit transport 用: 把目前 SQLite 檔的 bytes 讀出來, 讓
-    /// transport 包成 `DatabasePayload` 上傳。
-    public func readCurrentDatabaseBytes() throws -> Data {
-        try Data(contentsOf: databaseURL)
     }
 
     public func read() -> AppSnapshot {

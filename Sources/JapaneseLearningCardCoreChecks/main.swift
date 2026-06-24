@@ -43,7 +43,10 @@ struct CoreChecks {
         try await cloudKitTransportRetriesOnceOnConflict()
         try await cloudKitTransportFetchReturnsNilWhenEmpty()
         try await cloudKitTransportFetchDecodesPayload()
-        try await appStoreReplaceDatabaseRoundTrips()
+        try await appStoreAppliesMergedSnapshot()
+        try await syncCoordinatorPushesLocalToCloud()
+        try await syncCoordinatorPullsAndMergesRemoteChanges()
+        try await syncCoordinatorMergesConflictingChanges()
         print("All JapaneseLearningCardCore checks passed.")
     }
 
@@ -864,18 +867,21 @@ struct CoreChecks {
     private static func cloudKitTransportSubmitsFirstTimeWithoutRetry() async throws {
         let backing = MockCloudKitBacking()
         let transport = CloudKitTransport(backing: backing)
+        // 用整數秒的 Date, ISO8601 預設格式 (無 fractional seconds) 才能
+        // 完整 round-trip。否則 sub-second 精度會在 encode/decode 之間丟失。
         let payload = DatabasePayload(
             bundleVersion: "1.0",
-            generatedAt: Date(),
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
             updatedBy: "test",
-            sqliteBytes: Data([0x01, 0x02])
+            snapshot: makeSnapshot()
         )
 
         try await transport.submit(payload)
         let snap = backing.snapshot()
-        let expectedBytes = try payload.encoded()
         expect(snap.saveCount == 1, "first-time submit should save exactly once (no retry)")
-        expect(snap.stored?.payload == expectedBytes, "stored payload should match what was sent")
+        // JSON encode 不保證 key 順序, decode 後比對內容才準。
+        let stored = snap.stored.flatMap { try? DatabasePayload.decoded(from: $0.payload) }
+        expect(stored == payload, "stored payload should round-trip to the same value")
     }
 
     private static func cloudKitTransportRetriesOnceOnConflict() async throws {
@@ -885,7 +891,7 @@ struct CoreChecks {
             bundleVersion: "1.0",
             generatedAt: Date(),
             updatedBy: "test",
-            sqliteBytes: Data([0xAA, 0xBB])
+            snapshot: makeSnapshot()
         )
 
         // 第一次 save 衝突, 第二次應該成功
@@ -908,9 +914,9 @@ struct CoreChecks {
         let backing = MockCloudKitBacking()
         let original = DatabasePayload(
             bundleVersion: "1.0",
-            generatedAt: Date(timeIntervalSince1970: 1_000_000),
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
             updatedBy: "remote-mac",
-            sqliteBytes: Data([0xDE, 0xAD, 0xBE, 0xEF])
+            snapshot: makeSnapshot(sources: [makeSource(url: "https://remote.example.com")])
         )
         backing.setStored(CloudKitBackingStored(payload: try original.encoded(), version: 42))
 
@@ -919,73 +925,188 @@ struct CoreChecks {
         expect(decoded != nil, "fetchLatest should decode the stored payload")
         expect(decoded?.bundleVersion == "1.0", "bundleVersion should round trip")
         expect(decoded?.updatedBy == "remote-mac", "updatedBy should round trip")
-        expect(decoded?.sqliteBytes == Data([0xDE, 0xAD, 0xBE, 0xEF]), "sqliteBytes should round trip")
         expect(decoded?.generatedAt == original.generatedAt, "generatedAt should round trip")
+        expect(decoded?.snapshot.sources.first?.url.absoluteString == "https://remote.example.com", "snapshot contents should round trip")
     }
 
-    private static func appStoreReplaceDatabaseRoundTrips() async throws {
+    private static func appStoreAppliesMergedSnapshot() async throws {
+        // 模擬 CloudKit pull 流程: 拿到遠端 snapshot → 跑 merger → 把 merged
+        // 寫回本地 store。本測試驗證「merged snapshot 透過 store.update 套用」
+        // 這個新流程是對的 (之前是直接灌 raw bytes, 現在走語意層)。
+
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let fileURL = dir.appendingPathComponent("store.sqlite")
+        let store = await AppStore(fileURL: fileURL)
+
+        // 本地有 1 筆, 遠端有 2 筆 (含本地那筆 + 一筆新增)
+        let sourceId = UUID()
+        let newSourceId = UUID()
+        let localSnapshot = makeSnapshot(sources: [
+            makeSource(id: sourceId, url: "https://local.example.com", updatedAt: Date(timeIntervalSince1970: 1000))
+        ])
+        let remoteSnapshot = makeSnapshot(sources: [
+            makeSource(id: sourceId, url: "https://local.example.com", updatedAt: Date(timeIntervalSince1970: 2000)),
+            makeSource(id: newSourceId, url: "https://added-by-remote.example.com", updatedAt: Date(timeIntervalSince1970: 2000))
+        ])
+
+        // 把 local 寫進去
+        try await store.update { state in state.sources = localSnapshot.sources }
+
+        // 跑 merger (base 假設等於 local, 模擬「兩台都從同樣的 base 開始」)
+        let result = Merger.merge3Way(local: localSnapshot, remote: remoteSnapshot, base: localSnapshot)
+        expect(result.snapshot.sources.count == 2, "merged should have both sources")
+        expect(result.conflicts.isEmpty, "no conflict: local==base, remote only added")
+
+        // 把 merged 套回 store
+        try await store.update { state in state = result.snapshot }
+
+        let afterMerge = await store.read()
+        expect(afterMerge.sources.count == 2, "after applying merge, store should have 2 sources")
+        expect(afterMerge.sources.contains(where: { $0.id == newSourceId }), "should include the source added by remote")
+    }
+
+    // MARK: - SyncCoordinator integration
+
+    /// 起一份測試用 AppStore + SyncedBaseStore + MockCloudKitBacking + SyncCoordinator
+    /// 全部放在各自獨立的 temp 目錄, 避免互相干擾。
+    private static func makeTestSyncHarness(
+        remoteInitial: DatabasePayload? = nil
+    ) async throws -> (store: AppStore, transport: CloudKitTransport, backing: MockCloudKitBacking, syncedBase: SyncedBaseStore, conflictStore: ConflictStore, dir: URL) {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let fileURL = dir.appendingPathComponent("store.sqlite")
+        let baseURL = dir.appendingPathComponent("store-synced.sqlite")
 
         let store = await AppStore(fileURL: fileURL)
+        let backing = MockCloudKitBacking()
+        if let initial = remoteInitial {
+            backing.setStored(CloudKitBackingStored(payload: try initial.encoded(), version: 1))
+        }
+        let transport = CloudKitTransport(backing: backing)
+        let syncedBase = SyncedBaseStore(url: baseURL)
+        let conflictStore = ConflictStore()
+
+        return (store, transport, backing, syncedBase, conflictStore, dir)
+    }
+
+    private static func syncCoordinatorPushesLocalToCloud() async throws {
+        let harness = try await makeTestSyncHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dir) }
+
         let sourceId = UUID()
-        try await store.update { state in
-            state.sources = [Source(
-                id: sourceId,
-                url: URL(string: "https://before.example.com")!,
-                isEnabled: true,
-                extractionPrompt: "",
-                lastFetchedAt: nil,
-                lastError: nil,
-                updatedAt: Date()
-            )]
+        try await harness.store.update { state in
+            state.sources = [makeSource(id: sourceId, url: "https://local.example.com", updatedAt: Date(timeIntervalSince1970: 1000))]
         }
-        let originalSnapshot = await store.read()
-        expect(originalSnapshot.sources.count == 1, "should have one source before replace")
 
-        // 模擬 CloudKit pull 帶新 bytes 回來: 用另一個 AppStore 寫新內容, 把它的檔案 bytes 灌回原 store
-        let remoteDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: remoteDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: remoteDir) }
-        let remoteFileURL = remoteDir.appendingPathComponent("store.sqlite")
-        let remoteStore = await AppStore(fileURL: remoteFileURL)
+        let coordinator = SyncCoordinator(
+            transport: harness.transport,
+            store: harness.store,
+            syncedBase: harness.syncedBase,
+            conflictStore: harness.conflictStore
+        )
+        try await coordinator.pushIfNeeded()
+
+        let snap = harness.backing.snapshot()
+        expect(snap.saveCount == 1, "first push should hit cloud once")
+        expect(snap.stored != nil, "cloud should have the payload after push")
+        let stored = snap.stored.flatMap { try? DatabasePayload.decoded(from: $0.payload) }
+        expect(stored?.snapshot.sources.first?.id == sourceId, "cloud should have the local source")
+
+        // synced base 也應該被更新
+        let baseBytes = try harness.syncedBase.loadSync()
+        expect(baseBytes != nil, "synced base should be written after successful push")
+    }
+
+    private static func syncCoordinatorPullsAndMergesRemoteChanges() async throws {
+        // 模擬「另一台 Mac 加了一筆 source」, 然後本機 pull 跟 merge。
+        // 兩台對於「既有的那筆」內容完全一致 (同樣的 id / url), 但因為
+        // AppStore 會 stamp updatedAt 到「現在」, 兩邊的 updatedAt 不會
+        // 完全相等 → 走 LWW 分支, 視為一次「無實質衝突的更新」, merged
+        // 結果應有 2 筆 source (既有那筆 LWW 解決, 新那筆加進來)。
+        let sourceId = UUID()
         let newSourceId = UUID()
-        try await remoteStore.update { state in
-            state.sources = [
-                Source(
-                    id: sourceId,
-                    url: URL(string: "https://after.example.com")!,
-                    isEnabled: true,
-                    extractionPrompt: "",
-                    lastFetchedAt: nil,
-                    lastError: nil,
-                    updatedAt: Date()
-                ),
-                Source(
-                    id: newSourceId,
-                    url: URL(string: "https://added-by-remote.example.com")!,
-                    isEnabled: true,
-                    extractionPrompt: "",
-                    lastFetchedAt: nil,
-                    lastError: nil,
-                    updatedAt: Date()
-                )
-            ]
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let remotePayload = DatabasePayload(
+            bundleVersion: "1.0",
+            generatedAt: now,
+            updatedBy: "remote-mac",
+            snapshot: makeSnapshot(sources: [
+                makeSource(id: sourceId, url: "https://local.example.com", updatedAt: now),
+                makeSource(id: newSourceId, url: "https://added-by-remote.example.com", updatedAt: now)
+            ])
+        )
+        let harness = try await makeTestSyncHarness(remoteInitial: remotePayload)
+        defer { try? FileManager.default.removeItem(at: harness.dir) }
+
+        // 本地先寫一筆, 跟 remote 既有的那筆同 id / url
+        try await harness.store.update { state in
+            state.sources = [makeSource(id: sourceId, url: "https://local.example.com", updatedAt: now)]
         }
-        let remoteBytes = try await remoteStore.readCurrentDatabaseBytes()
 
-        // 觸發 onExternalChange callback
-        let firedFlag = FlagBox()
-        await store.setOnExternalChange { firedFlag.value = true }
+        let coordinator = SyncCoordinator(
+            transport: harness.transport,
+            store: harness.store,
+            syncedBase: harness.syncedBase,
+            conflictStore: harness.conflictStore
+        )
+        try await coordinator.pullAndMerge()
 
-        try await store.replaceDatabase(with: remoteBytes)
+        let afterPull = await harness.store.read()
+        expect(afterPull.sources.count == 2, "after pull, local should have 2 sources (existing LWW + new from remote)")
+        expect(afterPull.sources.contains(where: { $0.id == newSourceId }), "should include the new source from remote")
+    }
 
-        let replaced = await store.read()
-        expect(replaced.sources.count == 2, "after replaceDatabase, local store should have remote's 2 sources")
-        expect(replaced.sources.contains(where: { $0.id == newSourceId }), "should include the source added remotely")
-        expect(firedFlag.value, "onExternalChange should fire after replaceDatabase")
+    private static func syncCoordinatorMergesConflictingChanges() async throws {
+        // 模擬「兩台都改了同一筆 source 的 url」, 內容跟 base 都不一樣 →
+        // 衝突偵測, 走 LWW。具體誰贏不重要 (AppStore 會 stamp updatedAt
+        // 到「現在」, 測試無法保證 local vs remote 哪個時間較新), 只要:
+        // 1. conflict 有被記下來
+        // 2. merged 後的 url 是 local 或 remote 其中之一, 不是 base
+        let sourceId = UUID()
+        let baseT = Date(timeIntervalSince1970: 1_700_000_000)
+        let baseSnapshot = makeSnapshot(sources: [
+            makeSource(id: sourceId, url: "https://base.example.com", updatedAt: baseT)
+        ])
+        let remotePayload = DatabasePayload(
+            bundleVersion: "1.0",
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_500),
+            updatedBy: "remote",
+            snapshot: makeSnapshot(sources: [
+                makeSource(id: sourceId, url: "https://remote.example.com", updatedAt: Date(timeIntervalSince1970: 1_700_000_500))
+            ])
+        )
+
+        let harness = try await makeTestSyncHarness(remoteInitial: remotePayload)
+        defer { try? FileManager.default.removeItem(at: harness.dir) }
+
+        // 本地寫入: 跟 base 同 id 但 url 改成 local.example.com
+        try await harness.store.update { state in
+            state.sources = [makeSource(id: sourceId, url: "https://local.example.com", updatedAt: baseT)]
+        }
+        // synced base 寫成 base
+        try harness.syncedBase.recordSync(try DatabasePayload(
+            bundleVersion: "1.0", generatedAt: baseT, updatedBy: "test", snapshot: baseSnapshot
+        ).encoded())
+
+        let coordinator = SyncCoordinator(
+            transport: harness.transport,
+            store: harness.store,
+            syncedBase: harness.syncedBase,
+            conflictStore: harness.conflictStore
+        )
+        try await coordinator.pullAndMerge()
+
+        let conflictCount = await harness.conflictStore.records.count
+        expect(conflictCount == 1, "should record one conflict for the source (url differs on both sides)")
+        let conflicts = await harness.conflictStore.records
+        expect(conflicts.first?.table == .sources, "conflict should be in sources table")
+
+        let afterPull = await harness.store.read()
+        let mergedURL = afterPull.sources.first?.url.absoluteString
+        expect(mergedURL == "https://local.example.com" || mergedURL == "https://remote.example.com", "merged url should be local or remote, not base")
+        expect(mergedURL != "https://base.example.com", "merged url should NOT be the base value (it was overwritten)")
     }
 }
 
