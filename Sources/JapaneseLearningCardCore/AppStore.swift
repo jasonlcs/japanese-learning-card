@@ -30,7 +30,7 @@ public actor AppStore {
     private let databaseURL: URL
     private var database: OpaquePointer?
     private var snapshot: AppSnapshot
-    private var lastDatabaseModificationDate: Date?
+    private var lastDataVersion: Int64?
     private let stateLock = NSLock()
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
@@ -61,7 +61,7 @@ public actor AppStore {
             } else {
                 snapshot = loaded
             }
-            lastDatabaseModificationDate = try? databaseURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+            lastDataVersion = currentDataVersion()
         } catch {
             snapshot = AppSnapshot()
         }
@@ -125,16 +125,28 @@ public actor AppStore {
     }
 
     private func hasDatabaseChangedOnDisk() -> Bool {
-        guard FileManager.default.fileExists(atPath: databaseURL.path) else {
+        // Use SQLite's data_version cookie rather than the file modification date.
+        // It reliably changes when *another* connection commits, and stays constant
+        // for our own writes. The file mtime was unreliable: its granularity is too
+        // coarse to detect near-simultaneous writes from another Mac via iCloud Drive,
+        // which silently dropped the other device's changes.
+        guard let current = currentDataVersion(), let last = lastDataVersion else {
             return false
         }
-        guard let currentDate = try? databaseURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate else {
-            return false
+        return current != last
+    }
+
+    private func currentDataVersion() -> Int64? {
+        guard database != nil else { return nil }
+        var statement: OpaquePointer?
+        do {
+            try prepare("PRAGMA data_version;", statement: &statement)
+        } catch {
+            return nil
         }
-        guard let lastDate = lastDatabaseModificationDate else {
-            return false
-        }
-        return currentDate != lastDate
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return sqlite3_column_int64(statement, 0)
     }
 
     private func reloadFromDisk() throws {
@@ -143,9 +155,9 @@ public actor AppStore {
             try open()
             try migrate()
             snapshot = try loadSnapshot()
-            lastDatabaseModificationDate = try? databaseURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+            lastDataVersion = currentDataVersion()
         } catch {
-            lastDatabaseModificationDate = nil
+            lastDataVersion = nil
             throw error
         }
     }
@@ -397,7 +409,7 @@ public actor AppStore {
             .appendingPathComponent("store.sqlite")
     }
 
-    static func migrateLegacyDatabaseIfNeeded(to databaseURL: URL, legacyDatabaseURL: URL? = nil) throws {
+    public static func migrateLegacyDatabaseIfNeeded(to databaseURL: URL, legacyDatabaseURL: URL? = nil) throws {
         guard !FileManager.default.fileExists(atPath: databaseURL.path) else {
             return
         }

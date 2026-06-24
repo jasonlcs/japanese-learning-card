@@ -6,7 +6,7 @@ struct CoreChecks {
     static func main() async throws {
         try sourceValidatorAcceptsHTTPAndHTTPS()
         try sourceValidatorBlocksSSRF()
-        webCrawlerUsesBrowserUserAgent()
+        webCrawlerUsesCustomUserAgent()
         schedulerClampsIntervals()
         cardSelectorPrioritizesFreshThenOldestReviewingAndSkipsSkipped()
         htmlExtractorRemovesScriptsStylesTagsAndDecodesEntities()
@@ -57,11 +57,10 @@ struct CoreChecks {
         try validator.validate(URL(string: "https://news.yahoo.co.jp/")!)
     }
 
-    private static func webCrawlerUsesBrowserUserAgent() {
+    private static func webCrawlerUsesCustomUserAgent() {
         let userAgent = WebCrawler.userAgent
-        expect(userAgent.contains("Mozilla"), "WebCrawler should use a browser User-Agent to avoid bot detection")
-        expect(userAgent.contains("AppleWebKit"), "WebCrawler User-Agent should include AppleWebKit")
-        expect(!userAgent.contains("JapaneseLearningCard"), "WebCrawler should not identify as the app to avoid bot detection")
+        expect(userAgent.contains("JapaneseLearningCard"), "WebCrawler should identify with the app's custom User-Agent")
+        expect(!userAgent.contains("Mozilla"), "WebCrawler should not spoof a browser User-Agent")
     }
 
     private static func schedulerClampsIntervals() {
@@ -242,17 +241,14 @@ struct CoreChecks {
             state.settings.displayIntervalMinutes = 5
         }
 
-        let initialModificationDate = try fileURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
-
+        // A second connection (e.g., another Mac via iCloud Drive) commits a change.
         let externalStore = await AppStore(fileURL: fileURL)
         try await externalStore.update { state in
             state.settings.displayIntervalMinutes = 17
         }
 
-        let updatedModificationDate = try fileURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
-        expect(updatedModificationDate != nil, "database file should receive a new modification date")
-        expect(initialModificationDate != updatedModificationDate, "database file should change when another writer updates it")
-
+        // The first store should detect the external commit via SQLite's data_version
+        // cookie and reload — even when both writes share the same filesystem mtime.
         let snapshot = await store.read()
         expect(snapshot.settings.displayIntervalMinutes == 17, "store should reload from disk when another writer updates the database")
     }
@@ -311,7 +307,7 @@ struct CoreChecks {
         )
 
         let article = await pipeline.generateAIArticleNow(theme: "旅行")
-        expect(article != nil, "pipeline should return generated article")
+        expect(article.generatedArticle != nil, "pipeline should return generated article")
         let snapshot = await store.read()
         expect(snapshot.generatedArticles.count == 1, "generated article should be persisted")
         expect(snapshot.documents.count == 1, "AI article should also become a crawled document")
@@ -323,7 +319,7 @@ struct CoreChecks {
         expect(sentinel?.lastError == nil, "sentinel source should have no error")
 
         let dup = await pipeline.generateAIArticleNow(theme: "旅行")
-        expect(dup == nil, "duplicate AI article should be skipped")
+        expect(dup.generatedArticle == nil, "duplicate AI article should be skipped")
 
         let afterDup = await store.read()
         expect(afterDup.generatedArticles.count == 1, "duplicate should not be stored again")

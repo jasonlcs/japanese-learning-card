@@ -131,10 +131,13 @@ final class AppViewModel: ObservableObject {
             let result = await pipeline.generateAIArticleNow(theme: theme ?? aiArticleCustomTheme)
             await MainActor.run {
                 self.isGeneratingAIArticle = false
-                if let article = result {
+                switch result {
+                case .generated(let article):
                     self.statusMessage = "已產生「\(article.title)」(\(article.cardCount) 張卡)"
-                } else {
-                    self.statusMessage = "AI 文章產生失敗或內容重複"
+                case .duplicate:
+                    self.statusMessage = "內容與既有文章重複，未新增"
+                case .failed(let message):
+                    self.statusMessage = "AI 文章產生失敗：\(message)"
                 }
             }
             await reload()
@@ -214,32 +217,30 @@ final class AppViewModel: ObservableObject {
         scheduleTimers()
     }
 
-    func saveAPIKey() {
-        do {
-            try secretStore.saveAPIKey(apiKeyInput, reference: snapshot.settings.providerConfig.apiKeyKeychainRef)
-            apiKeyInput = ""
-            statusMessage = "API key 已存入 Keychain"
-        } catch {
-            statusMessage = error.localizedDescription
-        }
-    }
-
-    func saveAndValidateProvider() {
+    func validateAndSaveProvider() {
         isValidatingProvider = true
         statusMessage = "驗證 provider..."
         Task {
             do {
                 let trimmedKey = apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                // 先用「輸入的 key」(若留空則用既有 key) 驗證，成功才寫入 Keychain；失敗不動 Keychain。
+                let candidateKey: String?
                 if trimmedKey.isEmpty {
                     let existingKey = try secretStore.apiKey(reference: snapshot.settings.providerConfig.apiKeyKeychainRef)
                     guard existingKey?.isEmpty == false else {
                         throw LLMClientError.missingAPIKey
                     }
+                    candidateKey = nil
                 } else {
-                    try secretStore.saveAPIKey(trimmedKey, reference: snapshot.settings.providerConfig.apiKeyKeychainRef)
+                    candidateKey = trimmedKey
                 }
 
-                let models = try await providerClient.listModels(settings: snapshot.settings)
+                let models = try await providerClient.listModels(settings: snapshot.settings, apiKeyOverride: candidateKey)
+
+                // 驗證成功後才儲存新的 key。
+                if let candidateKey {
+                    try secretStore.saveAPIKey(candidateKey, reference: snapshot.settings.providerConfig.apiKeyKeychainRef)
+                }
                 await MainActor.run {
                     self.availableModels = models.isEmpty ? self.snapshot.settings.providerConfig.preset.fallbackModels : models
                     if !self.availableModels.contains(self.snapshot.settings.providerConfig.model),

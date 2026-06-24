@@ -6,6 +6,7 @@ import FoundationNetworking
 public enum LLMClientError: LocalizedError {
     case missingAPIKey
     case invalidResponse
+    case httpStatus(code: Int, body: String)
     case noContent
 
     public var errorDescription: String? {
@@ -14,6 +15,8 @@ public enum LLMClientError: LocalizedError {
             "Missing API key."
         case .invalidResponse:
             "The provider returned an invalid response."
+        case .httpStatus(let code, let body):
+            body.isEmpty ? "Provider returned HTTP \(code)." : "Provider returned HTTP \(code): \(body)"
         case .noContent:
             "The provider returned no content."
         }
@@ -80,9 +83,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         request.httpBody = try JSONEncoder().encode(body)
 
         let (data, response) = try await session.data(for: request)
-        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-            throw LLMClientError.invalidResponse
-        }
+        try Self.validateHTTPResponse(response, data: data)
         let decoded = try JSONDecoder().decode(ChatCompletionResponse.self, from: data)
         guard let content = decoded.choices.first?.message.content else {
             throw LLMClientError.noContent
@@ -112,9 +113,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         request.httpBody = try JSONEncoder().encode(body)
 
         let (data, response) = try await session.data(for: request)
-        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-            throw LLMClientError.invalidResponse
-        }
+        try Self.validateHTTPResponse(response, data: data)
         let decoded = try JSONDecoder().decode(ChatCompletionResponse.self, from: data)
         guard let content = decoded.choices.first?.message.content else {
             throw LLMClientError.noContent
@@ -156,9 +155,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         request.httpBody = try JSONEncoder().encode(body)
 
         let (data, response) = try await session.data(for: request)
-        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-            throw LLMClientError.invalidResponse
-        }
+        try Self.validateHTTPResponse(response, data: data)
         let decoded = try JSONDecoder().decode(ChatCompletionResponse.self, from: data)
         guard let content = decoded.choices.first?.message.content else {
             throw LLMClientError.noContent
@@ -188,9 +185,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         request.httpBody = try JSONEncoder().encode(body)
 
         let (data, response) = try await session.data(for: request)
-        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-            throw LLMClientError.invalidResponse
-        }
+        try Self.validateHTTPResponse(response, data: data)
         let decoded = try JSONDecoder().decode(ChatCompletionResponse.self, from: data)
         guard let content = decoded.choices.first?.message.content else {
             throw LLMClientError.noContent
@@ -198,9 +193,15 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         return try Self.decodeArticle(from: content, fallbackTheme: theme)
     }
 
-    public func listModels(settings: AppSettings) async throws -> [String] {
-        guard let apiKey = try secretStore.apiKey(reference: settings.providerConfig.apiKeyKeychainRef), !apiKey.isEmpty else {
-            throw LLMClientError.missingAPIKey
+    public func listModels(settings: AppSettings, apiKeyOverride: String? = nil) async throws -> [String] {
+        let apiKey: String
+        if let apiKeyOverride, !apiKeyOverride.isEmpty {
+            apiKey = apiKeyOverride
+        } else {
+            guard let stored = try secretStore.apiKey(reference: settings.providerConfig.apiKeyKeychainRef), !stored.isEmpty else {
+                throw LLMClientError.missingAPIKey
+            }
+            apiKey = stored
         }
 
         var request = URLRequest(url: settings.providerConfig.baseURL.appendingPathComponent("models"))
@@ -217,9 +218,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         }
 
         let (data, response) = try await session.data(for: request)
-        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-            throw LLMClientError.invalidResponse
-        }
+        try Self.validateHTTPResponse(response, data: data)
 
         let decoded = try JSONDecoder().decode(ModelsResponse.self, from: data)
         return decoded.data.map(\.id).sorted()
@@ -395,6 +394,15 @@ public struct OpenAICompatibleLLMClient: LLMClient {
             title: resolvedTitle,
             text: text
         )
+    }
+
+    private static func validateHTTPResponse(_ response: URLResponse, data: Data) throws {
+        guard let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) else {
+            return
+        }
+        let body = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        let snippet = body.count > 500 ? String(body.prefix(500)) + "…" : body
+        throw LLMClientError.httpStatus(code: http.statusCode, body: snippet)
     }
 
     private static func stripMarkdownFence(_ content: String) -> String {

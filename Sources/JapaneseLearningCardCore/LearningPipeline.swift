@@ -1,5 +1,16 @@
 import Foundation
 
+public enum AIArticleOutcome: Sendable {
+    case generated(GeneratedArticle)
+    case duplicate
+    case failed(String)
+
+    public var generatedArticle: GeneratedArticle? {
+        if case .generated(let article) = self { return article }
+        return nil
+    }
+}
+
 public actor LearningPipeline {
     private let store: AppStore
     private let crawler: Crawling
@@ -49,7 +60,7 @@ public actor LearningPipeline {
     }
 
     @discardableResult
-    public func generateAIArticleNow(theme: String? = nil) async -> GeneratedArticle? {
+    public func generateAIArticleNow(theme: String? = nil) async -> AIArticleOutcome {
         let snapshot = await store.read()
         let levels = snapshot.settings.aiArticleLevels.isEmpty ? JLPTLevel.allCases : snapshot.settings.aiArticleLevels
         let explicitTheme = theme?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -74,7 +85,7 @@ public actor LearningPipeline {
             )
 
             if snapshot.documents.contains(where: { $0.contentHash == contentHash }) {
-                return nil
+                return .duplicate
             }
 
             let cards = try await llmClient.generateCards(
@@ -104,14 +115,14 @@ public actor LearningPipeline {
                     state.sources[index].extractionPrompt = extractionPrompt
                 }
             }
-            return article
+            return .generated(article)
         } catch {
             try? await store.update { state in
                 if let index = state.sources.firstIndex(where: { $0.id == AISource.sentinelSourceId }) {
                     state.sources[index].lastError = error.localizedDescription
                 }
             }
-            return nil
+            return .failed(error.localizedDescription)
         }
     }
 }

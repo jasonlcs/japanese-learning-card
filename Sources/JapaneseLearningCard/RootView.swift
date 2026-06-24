@@ -507,20 +507,13 @@ struct SettingsView: View {
                 ))
                 SecureField("API key", text: $viewModel.apiKeyInput)
 
-                HStack {
-                    Button {
-                        viewModel.saveAndValidateProvider()
-                    } label: {
-                        Label(viewModel.isValidatingProvider ? "驗證中..." : "存 Key 並驗證", systemImage: "checkmark.seal")
-                    }
-                    .disabled(viewModel.isValidatingProvider)
-
-                    Button {
-                        viewModel.saveAPIKey()
-                    } label: {
-                        Label("只存 Key", systemImage: "key")
-                    }
+                Button {
+                    viewModel.validateAndSaveProvider()
+                } label: {
+                    Label(viewModel.isValidatingProvider ? "驗證中..." : "驗證並儲存", systemImage: "checkmark.seal")
                 }
+                .disabled(viewModel.isValidatingProvider)
+                .help("驗證成功才會把 API key 存入 Keychain；失敗則不變更。")
 
                 if !viewModel.statusMessage.isEmpty {
                     Text(viewModel.statusMessage)
@@ -642,8 +635,16 @@ struct SettingsView: View {
 struct HistoryView: View {
     @ObservedObject var viewModel: AppViewModel
 
+    // 只顯示曾經被展示過的卡片，依最近複習時間排序，做為「複習紀錄」。
+    // 全部卡片的瀏覽請改用「資料庫」分頁。
+    private var reviewedCards: [LearningCard] {
+        viewModel.snapshot.cards
+            .filter { $0.lastShownAt != nil }
+            .sorted { ($0.lastShownAt ?? .distantPast) > ($1.lastShownAt ?? .distantPast) }
+    }
+
     var body: some View {
-        List(viewModel.snapshot.cards) { card in
+        List(reviewedCards) { card in
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text(card.word).font(.headline)
@@ -651,14 +652,19 @@ struct HistoryView: View {
                     Spacer()
                     Text(card.status.rawValue).font(.caption)
                 }
+                if let lastShownAt = card.lastShownAt {
+                    Text("複習：\(lastShownAt.formatted())")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Text(card.meaningZh).lineLimit(2)
                 Text(card.exampleJa).font(.caption).foregroundStyle(.secondary).lineLimit(2)
             }
             .padding(.vertical, 4)
         }
         .overlay {
-            if viewModel.snapshot.cards.isEmpty {
-                ContentUnavailableView("沒有歷史卡片", systemImage: "clock")
+            if reviewedCards.isEmpty {
+                ContentUnavailableView("還沒有複習紀錄", systemImage: "clock")
             }
         }
     }
@@ -671,7 +677,8 @@ struct AIArticleView: View {
     private let levelOrder: [JLPTLevel] = [.n1, .n2, .n3, .n4, .n5, .unknown]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 6) {
                 Text("AI 文章產生")
                     .font(.title2.weight(.semibold))
@@ -761,7 +768,7 @@ struct AIArticleView: View {
                     description: Text("按「立即產生文章」開始，或開啟自動排程。")
                 )
             } else {
-                List(viewModel.snapshot.generatedArticles) { article in
+                ForEach(viewModel.snapshot.generatedArticles) { article in
                     Button {
                         selectedArticle = article
                     } label: {
@@ -792,13 +799,13 @@ struct AIArticleView: View {
                         .padding(.vertical, 4)
                     }
                     .buttonStyle(.plain)
+                    Divider()
                 }
-                .listStyle(.plain)
             }
-
-            Spacer()
+            }
+            .padding()
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding()
         .sheet(item: $selectedArticle) { article in
             AIArticleDetailView(article: article, viewModel: viewModel)
         }
