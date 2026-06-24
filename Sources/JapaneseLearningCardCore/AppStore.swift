@@ -34,10 +34,10 @@ public actor AppStore {
     private let stateLock = NSLock()
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
-    private var filePresenter: DatabaseFilePresenter?
 
-    /// 當 iCloud Drive 把 `store.sqlite` 整個換掉並 reload 成功後觸發。
-    /// 設為 nil 可取消監聽。callback 跑在背景 actor 上，UI 更新需自行切到 MainActor。
+    /// 當資料庫被外部替換成功後觸發 (例如 CloudKit pull 把遠端 bytes
+    /// 寫進來, 或測試強制 reload)。設為 nil 可取消監聽。callback 跑在
+    /// 背景 actor 上, UI 更新需自行切到 MainActor。
     private var onExternalChange: (@Sendable () -> Void)?
 
     public func setOnExternalChange(_ callback: (@Sendable () -> Void)?) {
@@ -74,33 +74,38 @@ public actor AppStore {
         } catch {
             snapshot = AppSnapshot()
         }
-        startWatchingForExternalChanges()
-    }
-
-    /// 監聽 iCloud Drive (或其他行程) 替換 `store.sqlite` 的事件。
-    /// SQLite 自己的 `PRAGMA data_version` 無法偵測到背景被整檔替換的情況，
-    /// 需要靠 `NSFilePresenter` 收到 `presentedItemDidChange` 後強制 close+reopen。
-    private func startWatchingForExternalChanges() {
-        let url = self.databaseURL
-        let presenter = DatabaseFilePresenter(url: url) { [weak self] in
-            await self?.handleExternalChange()
-        }
-        self.filePresenter = presenter
-    }
-
-    private func handleExternalChange() async {
-        do {
-            try reloadFromDisk()
-            onExternalChange?()
-        } catch {
-            print("External reload failed at \(databaseURL.path): \(error)")
-        }
     }
 
     /// 強制關閉並重新開啟資料庫連線，重新讀取整份 snapshot。
-    /// 給測試或外部工具用；正式 iCloud 流程會由 `DatabaseFilePresenter` 觸發。
+    /// 給測試或 CloudKit pull 觸發用: 把遠端 sqlite bytes 寫到本地後呼叫
+    /// `replaceDatabase(with:)`, 內部會 close 舊連線、寫入、重新 open。
     public func forceReloadFromDisk() throws {
         try reloadFromDisk()
+    }
+
+    /// 給 CloudKit pull 流程使用: 把 bytes 當新的 SQLite 檔寫入, close 舊連線,
+    /// 重新 open 讀入。寫入成功後 fire `onExternalChange` 讓 UI 自動 reload。
+    public func replaceDatabase(with bytes: Data) throws {
+        closeDatabase()
+        let directory = databaseURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try bytes.write(to: databaseURL, options: [.atomic])
+        do {
+            try open()
+            try migrate()
+            snapshot = try loadSnapshot()
+            lastDataVersion = currentDataVersion()
+        } catch {
+            lastDataVersion = nil
+            throw error
+        }
+        onExternalChange?()
+    }
+
+    /// 給 CloudKit transport 用: 把目前 SQLite 檔的 bytes 讀出來, 讓
+    /// transport 包成 `DatabasePayload` 上傳。
+    public func readCurrentDatabaseBytes() throws -> Data {
+        try Data(contentsOf: databaseURL)
     }
 
     public func read() -> AppSnapshot {
@@ -542,9 +547,7 @@ public actor AppStore {
     }
 
     private static func defaultDatabaseURL() -> URL {
-        if let iCloudDatabaseURL = iCloudDriveDatabaseURL() {
-            return iCloudDatabaseURL
-        }
+        // 走 CloudKit payload 同步後, 本機就是唯一來源, 直接用本地路徑。
         return localDatabaseURL()
     }
 
@@ -587,21 +590,6 @@ public actor AppStore {
 
         try FileManager.default.createDirectory(at: databaseURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try FileManager.default.copyItem(at: legacyURL, to: databaseURL)
-    }
-
-    private static func iCloudDriveDatabaseURL() -> URL? {
-        guard let ubiquityContainer = FileManager.default.url(forUbiquityContainerIdentifier: nil) else {
-            return nil
-        }
-
-        let appDirectory = ubiquityContainer.appendingPathComponent("Documents/JapaneseLearningCard", isDirectory: true)
-        do {
-            try FileManager.default.createDirectory(at: appDirectory, withIntermediateDirectories: true)
-        } catch {
-            print("Unable to create the iCloud-backed database directory at \(appDirectory.path): \(error)")
-            return nil
-        }
-        return appDirectory.appendingPathComponent("store.sqlite")
     }
 
     private static func iso8601String(from date: Date) -> String {

@@ -1,4 +1,5 @@
 import Foundation
+import os
 import JapaneseLearningCardCore
 
 @main
@@ -38,6 +39,11 @@ struct CoreChecks {
         try mergerDetectsSettingsConflict()
         try mergerHandlesNilBase()
         try await appStoreStampsUpdatedAtOnChangedRecords()
+        try await cloudKitTransportSubmitsFirstTimeWithoutRetry()
+        try await cloudKitTransportRetriesOnceOnConflict()
+        try await cloudKitTransportFetchReturnsNilWhenEmpty()
+        try await cloudKitTransportFetchDecodesPayload()
+        try await appStoreReplaceDatabaseRoundTrips()
         print("All JapaneseLearningCardCore checks passed.")
     }
 
@@ -851,6 +857,190 @@ struct CoreChecks {
         let changed = thirdSnapshot.sources.first { $0.id == sourceId }
         expect(changed?.url.absoluteString == "https://changed.example.com", "source should reflect update")
         expect((changed?.updatedAt ?? .distantPast) > afterFirstWrite, "modified record should get a newer updatedAt")
+    }
+
+    // MARK: - CloudKit Transport
+
+    private static func cloudKitTransportSubmitsFirstTimeWithoutRetry() async throws {
+        let backing = MockCloudKitBacking()
+        let transport = CloudKitTransport(backing: backing)
+        let payload = DatabasePayload(
+            bundleVersion: "1.0",
+            generatedAt: Date(),
+            updatedBy: "test",
+            sqliteBytes: Data([0x01, 0x02])
+        )
+
+        try await transport.submit(payload)
+        let snap = backing.snapshot()
+        let expectedBytes = try payload.encoded()
+        expect(snap.saveCount == 1, "first-time submit should save exactly once (no retry)")
+        expect(snap.stored?.payload == expectedBytes, "stored payload should match what was sent")
+    }
+
+    private static func cloudKitTransportRetriesOnceOnConflict() async throws {
+        let backing = MockCloudKitBacking()
+        let transport = CloudKitTransport(backing: backing)
+        let payload = DatabasePayload(
+            bundleVersion: "1.0",
+            generatedAt: Date(),
+            updatedBy: "test",
+            sqliteBytes: Data([0xAA, 0xBB])
+        )
+
+        // 第一次 save 衝突, 第二次應該成功
+        backing.setNextSaveError(CloudKitBackingError.conflict(actualVersion: 99))
+        try await transport.submit(payload)
+
+        let snap = backing.snapshot()
+        expect(snap.saveCount == 2, "conflict should trigger one retry (2 total save calls)")
+        expect(snap.stored != nil, "after retry the store should have the payload")
+    }
+
+    private static func cloudKitTransportFetchReturnsNilWhenEmpty() async throws {
+        let backing = MockCloudKitBacking()
+        let transport = CloudKitTransport(backing: backing)
+        let result = try await transport.fetchLatest()
+        expect(result == nil, "fetchLatest should return nil when cloud has no record")
+    }
+
+    private static func cloudKitTransportFetchDecodesPayload() async throws {
+        let backing = MockCloudKitBacking()
+        let original = DatabasePayload(
+            bundleVersion: "1.0",
+            generatedAt: Date(timeIntervalSince1970: 1_000_000),
+            updatedBy: "remote-mac",
+            sqliteBytes: Data([0xDE, 0xAD, 0xBE, 0xEF])
+        )
+        backing.setStored(CloudKitBackingStored(payload: try original.encoded(), version: 42))
+
+        let transport = CloudKitTransport(backing: backing)
+        let decoded = try await transport.fetchLatest()
+        expect(decoded != nil, "fetchLatest should decode the stored payload")
+        expect(decoded?.bundleVersion == "1.0", "bundleVersion should round trip")
+        expect(decoded?.updatedBy == "remote-mac", "updatedBy should round trip")
+        expect(decoded?.sqliteBytes == Data([0xDE, 0xAD, 0xBE, 0xEF]), "sqliteBytes should round trip")
+        expect(decoded?.generatedAt == original.generatedAt, "generatedAt should round trip")
+    }
+
+    private static func appStoreReplaceDatabaseRoundTrips() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fileURL = dir.appendingPathComponent("store.sqlite")
+
+        let store = await AppStore(fileURL: fileURL)
+        let sourceId = UUID()
+        try await store.update { state in
+            state.sources = [Source(
+                id: sourceId,
+                url: URL(string: "https://before.example.com")!,
+                isEnabled: true,
+                extractionPrompt: "",
+                lastFetchedAt: nil,
+                lastError: nil,
+                updatedAt: Date()
+            )]
+        }
+        let originalSnapshot = await store.read()
+        expect(originalSnapshot.sources.count == 1, "should have one source before replace")
+
+        // 模擬 CloudKit pull 帶新 bytes 回來: 用另一個 AppStore 寫新內容, 把它的檔案 bytes 灌回原 store
+        let remoteDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: remoteDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: remoteDir) }
+        let remoteFileURL = remoteDir.appendingPathComponent("store.sqlite")
+        let remoteStore = await AppStore(fileURL: remoteFileURL)
+        let newSourceId = UUID()
+        try await remoteStore.update { state in
+            state.sources = [
+                Source(
+                    id: sourceId,
+                    url: URL(string: "https://after.example.com")!,
+                    isEnabled: true,
+                    extractionPrompt: "",
+                    lastFetchedAt: nil,
+                    lastError: nil,
+                    updatedAt: Date()
+                ),
+                Source(
+                    id: newSourceId,
+                    url: URL(string: "https://added-by-remote.example.com")!,
+                    isEnabled: true,
+                    extractionPrompt: "",
+                    lastFetchedAt: nil,
+                    lastError: nil,
+                    updatedAt: Date()
+                )
+            ]
+        }
+        let remoteBytes = try await remoteStore.readCurrentDatabaseBytes()
+
+        // 觸發 onExternalChange callback
+        let firedFlag = FlagBox()
+        await store.setOnExternalChange { firedFlag.value = true }
+
+        try await store.replaceDatabase(with: remoteBytes)
+
+        let replaced = await store.read()
+        expect(replaced.sources.count == 2, "after replaceDatabase, local store should have remote's 2 sources")
+        expect(replaced.sources.contains(where: { $0.id == newSourceId }), "should include the source added remotely")
+        expect(firedFlag.value, "onExternalChange should fire after replaceDatabase")
+    }
+}
+
+// MARK: - Test helpers
+
+/// 用 class 裝可變 flag, 避免在 @Sendable closure 裡 mutate captured var。
+private final class FlagBox: @unchecked Sendable {
+    var value: Bool = false
+}
+
+/// 可程控的 in-memory backing, 測試用。可指定 fetch / save 行為, 模擬
+/// 衝突、網路錯誤等情境。
+private final class MockCloudKitBacking: CloudKitBacking, @unchecked Sendable {
+    private struct State {
+        var stored: CloudKitBackingStored?
+        var nextSaveError: Error?
+        var saveCallCount = 0
+        var subscriptionRegistered = false
+    }
+    private let lock = OSAllocatedUnfairLock<State>(initialState: State())
+
+    func setStored(_ value: CloudKitBackingStored?) {
+        lock.withLock { $0.stored = value }
+    }
+
+    func setNextSaveError(_ error: Error?) {
+        lock.withLock { $0.nextSaveError = error }
+    }
+
+    func snapshot() -> (stored: CloudKitBackingStored?, saveCount: Int, subscribed: Bool) {
+        lock.withLock { ($0.stored, $0.saveCallCount, $0.subscriptionRegistered) }
+    }
+
+    func fetchCurrent() async throws -> CloudKitBackingStored? {
+        lock.withLock { $0.stored }
+    }
+
+    func save(payload: Data, expectedVersion: Int?) async throws -> Int {
+        let (newVersion, stored) = try lock.withLock { state -> (Int, CloudKitBackingStored) in
+            state.saveCallCount += 1
+            if let error = state.nextSaveError {
+                state.nextSaveError = nil
+                throw error
+            }
+            let version = state.saveCallCount * 7
+            let entry = CloudKitBackingStored(payload: payload, version: version)
+            state.stored = entry
+            return (version, entry)
+        }
+        _ = stored
+        return newVersion
+    }
+
+    func registerSubscription() async throws {
+        lock.withLock { $0.subscriptionRegistered = true }
     }
 }
 
