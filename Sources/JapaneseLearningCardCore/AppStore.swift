@@ -106,6 +106,11 @@ public actor AppStore {
         // Reload from disk before applying any mutation so that concurrent writes
         // from another device (e.g., via iCloud Drive) are merged in rather than
         // silently overwritten.
+        //
+        // Note: a narrow TOCTOU window remains — another device could write between
+        // the reload and the subsequent persist(). This is an inherent limitation of
+        // file-based storage without distributed locking; in practice, iCloud Drive
+        // sync latency makes simultaneous writes very unlikely.
         if hasDatabaseChangedOnDisk() {
             try reloadFromDisk()
         }
