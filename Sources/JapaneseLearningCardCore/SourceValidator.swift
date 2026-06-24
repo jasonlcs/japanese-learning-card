@@ -67,7 +67,7 @@ public struct SourceValidator: Sendable {
         if let nullIndex = nodeBuffer.firstIndex(of: 0) {
             nodeBuffer.removeSubrange(nullIndex...)
         }
-        return String(cString: nodeBuffer)
+        return String(decoding: nodeBuffer.map { UInt8(bitPattern: $0) }, as: UTF8.self)
     }
 
     private static func ipv4(from host: String) -> String? {
