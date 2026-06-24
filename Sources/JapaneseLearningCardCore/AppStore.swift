@@ -449,9 +449,28 @@ public actor AppStore {
     private static func localDatabaseURL() -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser
-        return base
-            .appendingPathComponent("JapaneseLearningCard", isDirectory: true)
-            .appendingPathComponent("store.sqlite")
+        return makeLocalDatabaseURL(base: base, identitySuffix: currentICloudIdentitySuffix())
+    }
+
+    /// 本機 fallback DB 路徑。登入 iCloud 時依帳號身分分檔，避免同一台 Mac
+    /// 切換 iCloud 帳號時兩個帳號共用同一個本機檔而互相串味。
+    /// 未登入 iCloud (identitySuffix 為 nil) 時沿用原本的 store.sqlite，不影響既有資料。
+    public static func makeLocalDatabaseURL(base: URL, identitySuffix: String?) -> URL {
+        let directory = base.appendingPathComponent("JapaneseLearningCard", isDirectory: true)
+        if let identitySuffix, !identitySuffix.isEmpty {
+            return directory.appendingPathComponent("store-\(identitySuffix).sqlite")
+        }
+        return directory.appendingPathComponent("store.sqlite")
+    }
+
+    /// 目前登入的 iCloud 身分對應的檔名安全短雜湊；未登入回 nil。
+    /// 本機檔不會跨裝置同步，因此這裡用「本機 token」沒有跨裝置一致性的問題。
+    private static func currentICloudIdentitySuffix() -> String? {
+        guard let token = FileManager.default.ubiquityIdentityToken,
+              let data = try? NSKeyedArchiver.archivedData(withRootObject: token, requiringSecureCoding: true) else {
+            return nil
+        }
+        return String(ContentHash.sha256(data.base64EncodedString()).prefix(16))
     }
 
     public static func migrateLegacyDatabaseIfNeeded(to databaseURL: URL, legacyDatabaseURL: URL? = nil) throws {
