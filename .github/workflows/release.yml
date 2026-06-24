@@ -14,6 +14,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Select latest Xcode 16 (Swift 6)
+        run: |
+          LATEST=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$LATEST" ]; then
+            sudo xcode-select -s "$LATEST"
+            echo "✅ 使用 $LATEST"
+          else
+            echo "🔸 找不到 Xcode 16，沿用預設工具鏈"
+          fi
+          swift --version
+
       - name: Setup Developer ID signing
         run: |
           CERT_BASE64="${{ secrets.DEVELOPER_CERTIFICATE_BASE64 }}"
