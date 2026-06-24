@@ -20,6 +20,7 @@ struct CoreChecks {
         try await storeMigratesLegacyDatabaseWhenNeeded()
         localDatabaseURLIsScopedByICloudIdentity()
         try await storeReloadsFromDiskWhenDatabaseChangesExternally()
+        try await storeForceReloadPicksUpAtomicFileReplace()
         try await storeUpdateMergesExternalChangesBeforeWriting()
         try await storeUpdatePreservesInterleavedConcurrentWrites()
         try aiArticleRequestAndDecoding()
@@ -27,6 +28,16 @@ struct CoreChecks {
         try structuredOutputIsSentPerProvider()
         try await pipelineGeneratesAIArticleAndCards()
         try await storePersistsGeneratedArticles()
+        try syncedBaseStoreRoundTrips()
+        try mergerKeepsLocalOnlyChanges()
+        try mergerKeepsRemoteOnlyChanges()
+        try mergerTakesRemoteWhenLocalEqualsBase()
+        try mergerTakesLocalWhenRemoteEqualsBase()
+        try mergerDetectsConflictAndResolvesByLWW()
+        try mergerTreatsCardShallowDiffAsNonConflict()
+        try mergerDetectsSettingsConflict()
+        try mergerHandlesNilBase()
+        try await appStoreStampsUpdatedAtOnChangedRecords()
         print("All JapaneseLearningCardCore checks passed.")
     }
 
@@ -377,6 +388,42 @@ struct CoreChecks {
         expect(snapshot.settings.displayIntervalMinutes == 17, "store should reload from disk when another writer updates the database")
     }
 
+    /// 模擬 iCloud Drive 用 atomic replace 換檔後，AppStore 必須能靠
+    /// `forceReloadFromDisk` 撈到新檔的內容。
+    private static func storeForceReloadPicksUpAtomicFileReplace() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fileURL = dir.appendingPathComponent("store.sqlite")
+
+        let store = await AppStore(fileURL: fileURL)
+        try await store.update { state in
+            state.settings.displayIntervalMinutes = 5
+        }
+
+        // 另一台 Mac 寫了一份新 SQLite，再用 atomic replace 蓋過原檔。
+        // 這是 iCloud Drive 同步的典型行為：路徑一樣，inode 換掉，
+        // 原本的 SQLite handle 仍掛在舊 inode 上，看不到 data_version 變化。
+        let incomingURL = dir.appendingPathComponent("store-incoming.sqlite")
+        let externalStore = await AppStore(fileURL: incomingURL)
+        try await externalStore.update { state in
+            state.settings.displayIntervalMinutes = 42
+        }
+
+        _ = try FileManager.default.replaceItemAt(
+            fileURL,
+            withItemAt: incomingURL,
+            backupItemName: nil,
+            options: []
+        )
+
+        // 一般 `read()` 在這個情境下不會看到新內容(舊 inode 沒變)，
+        // 由 `DatabaseFilePresenter` 觸發的 `forceReloadFromDisk` 才是正確路徑。
+        try await store.forceReloadFromDisk()
+        let snapshot = await store.read()
+        expect(snapshot.settings.displayIntervalMinutes == 42, "force reload must pick up the content of the atomically replaced file")
+    }
+
     private static func aiArticleRequestAndDecoding() throws {
         let settings = AppSettings(providerConfig: ProviderConfig(baseURL: URL(string: "https://api.example.test/v1")!, model: "custom-model"))
 
@@ -565,6 +612,246 @@ struct CoreChecks {
             lastShownAt: lastShownAt
         )
     }
+
+    // MARK: - SyncedBaseStore
+
+    private static func syncedBaseStoreRoundTrips() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let url = tempDir.appendingPathComponent("synced.sqlite")
+        let store = SyncedBaseStore(url: url)
+
+        let initial = try store.loadSync()
+        expect(initial == nil, "loadSync should return nil when no base exists")
+
+        let payload = Data([0x01, 0x02, 0x03, 0x04])
+        try store.recordSync(payload)
+        let loaded = try store.loadSync()
+        expect(loaded == payload, "loadSync should return what was written")
+
+        // Overwrite
+        let payload2 = Data([0xAA, 0xBB])
+        try store.recordSync(payload2)
+        let reloaded = try store.loadSync()
+        expect(reloaded == payload2, "recordSync should overwrite previous base")
+
+        try store.clear()
+        let afterClear = try store.loadSync()
+        expect(afterClear == nil, "clear should remove the base")
+    }
+
+    // MARK: - Merger
+
+    private static func makeSnapshot(
+        settings: AppSettings? = nil,
+        sources: [Source] = [],
+        documents: [CrawledDocument] = [],
+        cards: [LearningCard] = [],
+        quizzes: [QuizQuestion] = [],
+        articles: [GeneratedArticle] = []
+    ) -> AppSnapshot {
+        let fixedSettings = settings ?? AppSettings(updatedAt: Date(timeIntervalSince1970: 0))
+        return AppSnapshot(
+            settings: fixedSettings,
+            sources: sources,
+            documents: documents,
+            cards: cards,
+            quizzes: quizzes,
+            generatedArticles: articles
+        )
+    }
+
+    private static func makeCard(
+        id: UUID = UUID(),
+        word: String = "電車",
+        status: CardStatus = .new,
+        lastShownAt: Date? = nil,
+        updatedAt: Date = Date()
+    ) -> LearningCard {
+        LearningCard(
+            id: id,
+            word: word,
+            reading: "でんしゃ",
+            partOfSpeech: "名詞",
+            meaningZh: "電車",
+            grammarNoteZh: "",
+            jlptLevel: .n4,
+            verbFormType: .notVerb,
+            exampleJa: "例",
+            exampleReading: "",
+            exampleZh: "例",
+            sourceUrl: URL(string: "https://example.com")!,
+            status: status,
+            createdAt: Date(timeIntervalSince1970: 0),
+            lastShownAt: lastShownAt,
+            updatedAt: updatedAt
+        )
+    }
+
+    private static func makeSource(id: UUID = UUID(), url: String = "https://example.com", updatedAt: Date = Date()) -> Source {
+        Source(
+            id: id,
+            url: URL(string: url)!,
+            isEnabled: true,
+            extractionPrompt: "",
+            lastFetchedAt: nil,
+            lastError: nil,
+            updatedAt: updatedAt
+        )
+    }
+
+    private static func mergerKeepsLocalOnlyChanges() throws {
+        let id = UUID()
+        let local = makeSnapshot(sources: [makeSource(id: id, url: "https://local.example.com")])
+        let remote = makeSnapshot()
+        let base = makeSnapshot()
+
+        let result = Merger.merge3Way(local: local, remote: remote, base: base)
+        expect(result.snapshot.sources.count == 1, "local-only record must survive merge")
+        expect(result.snapshot.sources[0].url.absoluteString == "https://local.example.com", "local record preserved")
+        expect(result.conflicts.isEmpty, "local-only change should not be flagged as conflict")
+    }
+
+    private static func mergerKeepsRemoteOnlyChanges() throws {
+        let id = UUID()
+        let local = makeSnapshot()
+        let remote = makeSnapshot(sources: [makeSource(id: id, url: "https://remote.example.com")])
+        let base = makeSnapshot()
+
+        let result = Merger.merge3Way(local: local, remote: remote, base: base)
+        expect(result.snapshot.sources.count == 1, "remote-only record must survive merge")
+        expect(result.snapshot.sources[0].url.absoluteString == "https://remote.example.com", "remote record preserved")
+        expect(result.conflicts.isEmpty, "remote-only change should not be flagged as conflict")
+    }
+
+    private static func mergerTakesRemoteWhenLocalEqualsBase() throws {
+        let id = UUID()
+        let original = makeSource(id: id, url: "https://example.com")
+        let modified = makeSource(id: id, url: "https://updated.example.com", updatedAt: Date(timeIntervalSinceNow: 100))
+
+        let local = makeSnapshot(sources: [original])
+        let remote = makeSnapshot(sources: [modified])
+        let base = makeSnapshot(sources: [original])
+
+        let result = Merger.merge3Way(local: local, remote: remote, base: base)
+        expect(result.snapshot.sources.count == 1, "merged should have one record")
+        expect(result.snapshot.sources[0].url.absoluteString == "https://updated.example.com", "remote's change should win when local==base")
+        expect(result.conflicts.isEmpty, "non-overlapping change should not be a conflict")
+    }
+
+    private static func mergerTakesLocalWhenRemoteEqualsBase() throws {
+        let id = UUID()
+        let original = makeSource(id: id, url: "https://example.com")
+        let modified = makeSource(id: id, url: "https://updated.example.com", updatedAt: Date(timeIntervalSinceNow: 100))
+
+        let local = makeSnapshot(sources: [modified])
+        let remote = makeSnapshot(sources: [original])
+        let base = makeSnapshot(sources: [original])
+
+        let result = Merger.merge3Way(local: local, remote: remote, base: base)
+        expect(result.snapshot.sources.count == 1, "merged should have one record")
+        expect(result.snapshot.sources[0].url.absoluteString == "https://updated.example.com", "local's change should win when remote==base")
+        expect(result.conflicts.isEmpty, "non-overlapping change should not be a conflict")
+    }
+
+    private static func mergerDetectsConflictAndResolvesByLWW() throws {
+        let id = UUID()
+        let base = makeSource(id: id, url: "https://example.com", updatedAt: Date(timeIntervalSince1970: 1000))
+        let localChanged = makeSource(id: id, url: "https://local.example.com", updatedAt: Date(timeIntervalSince1970: 2000))
+        let remoteChanged = makeSource(id: id, url: "https://remote.example.com", updatedAt: Date(timeIntervalSince1970: 3000))
+
+        let local = makeSnapshot(sources: [localChanged])
+        let remote = makeSnapshot(sources: [remoteChanged])
+        let baseSnap = makeSnapshot(sources: [base])
+
+        let result = Merger.merge3Way(local: local, remote: remote, base: baseSnap)
+        expect(result.snapshot.sources.count == 1, "merged should have one record")
+        expect(result.snapshot.sources[0].url.absoluteString == "https://remote.example.com", "remote has later updatedAt so it wins")
+        expect(result.conflicts.count == 1, "true conflict should be recorded")
+        expect(result.conflicts[0].table == .sources, "conflict table should be sources")
+        expect(result.conflicts[0].resolution == .tookRemote, "conflict resolution should be tookRemote")
+    }
+
+    private static func mergerTreatsCardShallowDiffAsNonConflict() throws {
+        let cardId = UUID()
+        let t1 = Date(timeIntervalSince1970: 1000)
+        let t2 = Date(timeIntervalSince1970: 2000)
+        let base = makeCard(id: cardId, status: .new, lastShownAt: nil, updatedAt: t1)
+        let localReviewed = makeCard(id: cardId, status: .reviewing, lastShownAt: t1, updatedAt: t1)
+        let remoteReviewed = makeCard(id: cardId, status: .reviewing, lastShownAt: t2, updatedAt: t2)
+
+        let local = makeSnapshot(cards: [localReviewed])
+        let remote = makeSnapshot(cards: [remoteReviewed])
+        let baseSnap = makeSnapshot(cards: [base])
+
+        let result = Merger.merge3Way(local: local, remote: remote, base: baseSnap)
+        expect(result.snapshot.cards.count == 1, "shallow diff should keep one card")
+        expect(result.snapshot.cards[0].lastShownAt == t2, "should pick the later lastShownAt")
+        expect(result.conflicts.isEmpty, "shallow diff (only status/lastShownAt) should not be a conflict")
+    }
+
+    private static func mergerDetectsSettingsConflict() throws {
+        let baseSettings = AppSettings(displayIntervalMinutes: 30, updatedAt: Date(timeIntervalSince1970: 500))
+        let localSettings = AppSettings(displayIntervalMinutes: 10, updatedAt: Date(timeIntervalSince1970: 1000))
+        let remoteSettings = AppSettings(displayIntervalMinutes: 20, updatedAt: Date(timeIntervalSince1970: 2000))
+
+        let local = makeSnapshot(settings: localSettings)
+        let remote = makeSnapshot(settings: remoteSettings)
+        let baseSnap = makeSnapshot(settings: baseSettings)
+
+        let result = Merger.merge3Way(local: local, remote: remote, base: baseSnap)
+        expect(result.snapshot.settings.displayIntervalMinutes == 20, "remote has later updatedAt, should win")
+        expect(result.conflicts.count == 1, "settings conflict should be recorded")
+        expect(result.conflicts[0].table == .settings, "conflict table should be settings")
+        expect(result.conflicts[0].resolution == .tookRemote, "remote has later updatedAt")
+    }
+
+    private static func mergerHandlesNilBase() throws {
+        let local = makeSnapshot(sources: [makeSource(url: "https://local.example.com")])
+        let remote = makeSnapshot(sources: [makeSource(url: "https://remote.example.com")])
+        let result = Merger.merge3Way(local: local, remote: remote, base: nil)
+        expect(result.snapshot.sources.count == 2, "with no base, union of local+remote should be kept")
+    }
+
+    private static func appStoreStampsUpdatedAtOnChangedRecords() async throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("store.sqlite")
+        let store = await AppStore(fileURL: fileURL)
+        defer { try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent()) }
+
+        let beforeWrite = Date()
+        let sourceId = UUID()
+        try await store.update { state in
+            state.sources = [makeSource(id: sourceId, url: "https://example.com", updatedAt: beforeWrite)]
+        }
+        let firstSnapshot = await store.read()
+        let initialUpdatedAt = firstSnapshot.sources[0].updatedAt
+        // AppStore.update() 會 stamp 寫入時刻, 不保留 caller 給的 updatedAt
+        expect(initialUpdatedAt >= beforeWrite, "newly written record should be stamped with a time at or after the write moment")
+
+        // 模擬改 settings 但 source 沒動 → source 的 updatedAt 應保留
+        let afterFirstWrite = initialUpdatedAt
+        try await store.update { state in
+            state.settings.displayIntervalMinutes = 5
+        }
+        let secondSnapshot = await store.read()
+        let cardAfter = secondSnapshot.sources.first { $0.id == sourceId }
+        expect(cardAfter?.updatedAt == afterFirstWrite, "unchanged record should keep its previous updatedAt")
+
+        // 改 source 內容 → updatedAt 應重 stamp
+        try await store.update { state in
+            if let i = state.sources.firstIndex(where: { $0.id == sourceId }) {
+                state.sources[i].url = URL(string: "https://changed.example.com")!
+            }
+        }
+        let thirdSnapshot = await store.read()
+        let changed = thirdSnapshot.sources.first { $0.id == sourceId }
+        expect(changed?.url.absoluteString == "https://changed.example.com", "source should reflect update")
+        expect((changed?.updatedAt ?? .distantPast) > afterFirstWrite, "modified record should get a newer updatedAt")
+    }
 }
 
 private struct MockCrawler: Crawling {
@@ -624,3 +911,4 @@ private struct MockLLMClient: LLMClient {
         )
     }
 }
+

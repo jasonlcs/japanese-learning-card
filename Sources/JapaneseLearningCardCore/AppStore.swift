@@ -34,6 +34,15 @@ public actor AppStore {
     private let stateLock = NSLock()
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
+    private var filePresenter: DatabaseFilePresenter?
+
+    /// 當 iCloud Drive 把 `store.sqlite` 整個換掉並 reload 成功後觸發。
+    /// 設為 nil 可取消監聽。callback 跑在背景 actor 上，UI 更新需自行切到 MainActor。
+    private var onExternalChange: (@Sendable () -> Void)?
+
+    public func setOnExternalChange(_ callback: (@Sendable () -> Void)?) {
+        onExternalChange = callback
+    }
 
     public init(fileURL: URL? = nil) async {
         let resolvedURL = fileURL ?? Self.defaultDatabaseURL()
@@ -65,6 +74,33 @@ public actor AppStore {
         } catch {
             snapshot = AppSnapshot()
         }
+        startWatchingForExternalChanges()
+    }
+
+    /// 監聽 iCloud Drive (或其他行程) 替換 `store.sqlite` 的事件。
+    /// SQLite 自己的 `PRAGMA data_version` 無法偵測到背景被整檔替換的情況，
+    /// 需要靠 `NSFilePresenter` 收到 `presentedItemDidChange` 後強制 close+reopen。
+    private func startWatchingForExternalChanges() {
+        let url = self.databaseURL
+        let presenter = DatabaseFilePresenter(url: url) { [weak self] in
+            await self?.handleExternalChange()
+        }
+        self.filePresenter = presenter
+    }
+
+    private func handleExternalChange() async {
+        do {
+            try reloadFromDisk()
+            onExternalChange?()
+        } catch {
+            print("External reload failed at \(databaseURL.path): \(error)")
+        }
+    }
+
+    /// 強制關閉並重新開啟資料庫連線，重新讀取整份 snapshot。
+    /// 給測試或外部工具用；正式 iCloud 流程會由 `DatabaseFilePresenter` 觸發。
+    public func forceReloadFromDisk() throws {
+        try reloadFromDisk()
     }
 
     public func read() -> AppSnapshot {
@@ -87,28 +123,31 @@ public actor AppStore {
     }
 
     public func ensureAISentinelSource(extractionPrompt: String) {
-        if let index = snapshot.sources.firstIndex(where: AISource.isSentinelSource) {
-            let existing = snapshot.sources[index]
-            snapshot.sources[index] = Source(
-                id: AISource.sentinelSourceId,
-                url: AISource.sentinelURL,
-                isEnabled: false,
-                extractionPrompt: extractionPrompt.isEmpty ? existing.extractionPrompt : extractionPrompt,
-                lastFetchedAt: existing.lastFetchedAt,
-                lastError: nil
-            )
-            try? persist()
-            return
-        }
+        do {
+            try update { state in
+                if let index = state.sources.firstIndex(where: AISource.isSentinelSource) {
+                    let existing = state.sources[index]
+                    state.sources[index] = Source(
+                        id: AISource.sentinelSourceId,
+                        url: AISource.sentinelURL,
+                        isEnabled: false,
+                        extractionPrompt: extractionPrompt.isEmpty ? existing.extractionPrompt : extractionPrompt,
+                        lastFetchedAt: existing.lastFetchedAt,
+                        lastError: nil
+                    )
+                    return
+                }
 
-        let source = Source(
-            id: AISource.sentinelSourceId,
-            url: AISource.sentinelURL,
-            isEnabled: false,
-            extractionPrompt: extractionPrompt
-        )
-        snapshot.sources.append(source)
-        try? persist()
+                state.sources.append(Source(
+                    id: AISource.sentinelSourceId,
+                    url: AISource.sentinelURL,
+                    isEnabled: false,
+                    extractionPrompt: extractionPrompt
+                ))
+            }
+        } catch {
+            print("ensureAISentinelSource failed: \(error)")
+        }
     }
 
     public func exportableDatabaseURL() -> URL {
@@ -134,8 +173,10 @@ public actor AppStore {
             if hasDatabaseChangedOnDisk() {
                 try reloadFromDisk()
             }
+            let before = snapshot
             var candidate = snapshot
             mutate(&candidate)
+            Self.stampUpdatedAt(before: before, after: &candidate)
 
             do {
                 try commitIfUnchanged(candidate)
@@ -146,6 +187,54 @@ public actor AppStore {
                     throw SQLiteStoreError.optimisticConflict
                 }
                 try reloadFromDisk()
+            }
+        }
+    }
+
+    /// 對「實際被改動」的 record 戳上 `updatedAt = Date()`, 沒動到的保留原值。
+    /// Merger 靠這個欄位判斷 LWW 與偵測衝突, 所以必須在 persist 之前設定。
+    private static func stampUpdatedAt(before: AppSnapshot, after: inout AppSnapshot) {
+        let now = Date()
+        if before.settings != after.settings {
+            after.settings.updatedAt = now
+        }
+        stampRecords(before: before.sources, after: &after.sources, key: \.id, now: now)
+        stampRecords(before: before.documents, after: &after.documents, key: \.contentHash, now: now)
+        stampRecords(before: before.cards, after: &after.cards, key: \.id, now: now)
+        stampRecords(before: before.quizzes, after: &after.quizzes, key: \.id, now: now)
+        stampRecords(before: before.generatedArticles, after: &after.generatedArticles, key: \.id, now: now)
+    }
+
+    private static func stampRecords<T: MergeTrackable>(
+        before: [T],
+        after: inout [T],
+        key: KeyPath<T, UUID>,
+        now: Date
+    ) {
+        let oldById = Dictionary(uniqueKeysWithValues: before.map { ($0[keyPath: key], $0) })
+        for index in after.indices {
+            let recordID = after[index][keyPath: key]
+            if let oldRecord = oldById[recordID], oldRecord == after[index] {
+                after[index].updatedAt = oldRecord.updatedAt
+            } else {
+                after[index].updatedAt = now
+            }
+        }
+    }
+
+    private static func stampRecords<T: MergeTrackable>(
+        before: [T],
+        after: inout [T],
+        key: KeyPath<T, String>,
+        now: Date
+    ) {
+        let oldById = Dictionary(uniqueKeysWithValues: before.map { ($0[keyPath: key], $0) })
+        for index in after.indices {
+            let recordID = after[index][keyPath: key]
+            if let oldRecord = oldById[recordID], oldRecord == after[index] {
+                after[index].updatedAt = oldRecord.updatedAt
+            } else {
+                after[index].updatedAt = now
             }
         }
     }
