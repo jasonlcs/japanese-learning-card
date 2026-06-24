@@ -103,6 +103,12 @@ public actor AppStore {
     }
 
     public func update(_ mutate: @Sendable (inout AppSnapshot) -> Void) throws {
+        // Reload from disk before applying any mutation so that concurrent writes
+        // from another device (e.g., via iCloud Drive) are merged in rather than
+        // silently overwritten.
+        if hasDatabaseChangedOnDisk() {
+            try reloadFromDisk()
+        }
         mutate(&snapshot)
         try persist()
     }
