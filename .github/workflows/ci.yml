@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build & Checks
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select latest Xcode 16 (Swift 6)
+        run: |
+          LATEST=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1 || true)
+          if [ -n "$LATEST" ]; then
+            sudo xcode-select -s "$LATEST"
+            echo "✅ 使用 $LATEST"
+          else
+            echo "🔸 找不到 Xcode 16，沿用預設工具鏈"
+          fi
+          swift --version
+
+      - name: Cache SwiftPM build
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: spm-${{ runner.os }}-${{ hashFiles('Package.swift') }}-${{ hashFiles('Sources/**/*.swift') }}
+          restore-keys: |
+            spm-${{ runner.os }}-${{ hashFiles('Package.swift') }}-
+            spm-${{ runner.os }}-
+
+      - name: Build (debug)
+        run: swift build
+
+      - name: Run checks (test suite)
+        run: swift run JapaneseLearningCardCoreChecks
+
+      - name: Build release binary
+        run: swift build -c release --product JapaneseLearningCard
