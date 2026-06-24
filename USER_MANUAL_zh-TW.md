@@ -152,6 +152,8 @@ Log 檔案格式是 JSONL，一行代表一次 AI/API 呼叫。常見欄位：
 
 ## 11. 資料儲存位置
 
+> **iCloud 同步需要用 Developer ID 簽名的版本**(見 [DEVELOPMENT.md](./DEVELOPMENT.md) 的 iCloud 設定)。ad-hoc 或 `swift run` 啟動的版本會自動 fallback 到本機路徑, 資料不會跨 Mac 同步。
+
 app 會優先使用 iCloud Drive 的資料庫：
 
 ```text

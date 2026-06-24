@@ -26,6 +26,15 @@ final class AppViewModel: ObservableObject {
     @Published var aiArticleCustomTheme = ""
     @Published var selectedTab = 0
 
+    // iCloud 同步狀態 (給 settings 頁詳細面板用)
+    @Published private(set) var iCloudStatus: CloudKitAccountChecker.Result = .unknown(underlying: "尚未檢查")
+    @Published private(set) var iCloudFingerprint: String?
+    @Published private(set) var iCloudLastPushAt: Date?
+    @Published private(set) var iCloudLastPullAt: Date?
+    @Published private(set) var iCloudConflictCount: Int = 0
+    @Published private(set) var iCloudLastErrorMessage: String?
+    @Published private(set) var iCloudIsSyncing: Bool = false
+
     private let store: AppStore
     private let secretStore: SecretStore
     private let providerClient: OpenAICompatibleLLMClient
@@ -41,6 +50,13 @@ final class AppViewModel: ObservableObject {
     private var autoCloseDeadline: Date?
     nonisolated(unsafe) private var sleepWakeObservers: [NSObjectProtocol] = []
     private var isSuspended = false
+    private let accountChecker = CloudKitAccountChecker()
+    private let conflictStore = ConflictStore()
+    private let syncedBase = SyncedBaseStore(url: SyncedBaseStore.defaultURL())
+    private var syncCoordinator: SyncCoordinator?
+    private var syncPollTimer: Timer?
+    private var pushDebounceTask: Task<Void, Never>?
+    private var lastSnapshotDataVersion: Int64?
     var requestShowPopover: (() -> Void)?
     var requestClosePopover: (() -> Void)?
 
@@ -49,6 +65,11 @@ final class AppViewModel: ObservableObject {
         self.secretStore = secretStore
         self.providerClient = OpenAICompatibleLLMClient(secretStore: secretStore)
         registerSleepWakeObservers()
+        // iCloud Drive 從別台 Mac 把 store.sqlite 整檔換掉時，讓 UI 跟著重讀。
+        let onChange: @Sendable () -> Void = { [weak self] in
+            Task { @MainActor in await self?.reload() }
+        }
+        Task { await store.setOnExternalChange(onChange) }
     }
 
     deinit {
@@ -63,6 +84,93 @@ final class AppViewModel: ObservableObject {
             await store.ensureAISentinelSource(extractionPrompt: AISource.sentinelExtractionPrompt)
             await reload()
             scheduleTimers()
+            await bootstrapICloudSync()
+        }
+    }
+
+    /// 開機時啟動 iCloud 同步流程: 檢查帳號、註冊訂閱、第一次 pull/push。
+    /// 沒 iCloud entitlement 或帳號不可用時整段 no-op, app 退回純本地模式。
+    private func bootstrapICloudSync() async {
+        let info = await accountChecker.info()
+        iCloudStatus = info.status
+        iCloudFingerprint = CloudKitAccountChecker.displayFingerprint(info.userRecordName)
+        guard case .available = info.status else {
+            print("iCloud not available: \(info.status)")
+            return
+        }
+
+        let transport = CloudKitTransport(backing: CKContainerBacking())
+        self.syncCoordinator = SyncCoordinator(
+            transport: transport,
+            store: store,
+            syncedBase: syncedBase,
+            conflictStore: conflictStore
+        )
+
+        // 註冊 silent push 訂閱 (失敗也不影響 pull, log 一下)
+        do {
+            try await transport.ensureSubscriptionRegistered()
+        } catch {
+            print("subscription registration failed: \(error)")
+        }
+
+        // 啟動定期 pull
+        scheduleSyncPollTimer()
+
+        // 第一次 pull (雲端有就 merge, 沒就 push 上去)
+        await performSync()
+    }
+
+    /// snapshot 變化時觸發 push。debounce 500ms 避免短時間多次寫入。
+    private func schedulePushDebounced() {
+        pushDebounceTask?.cancel()
+        pushDebounceTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard !Task.isCancelled else { return }
+            await self?.performSync(direction: .push)
+        }
+    }
+
+    /// 從雲端拉一次 (前景 / 定時 / 啟動都會叫)。
+    func performPull() async {
+        await performSync(direction: .pull)
+    }
+
+    private enum SyncDirection { case push, pull, both }
+
+    private func performSync(direction: SyncDirection = .both) async {
+        guard let syncCoordinator else { return }
+        iCloudIsSyncing = true
+        defer { iCloudIsSyncing = false }
+        iCloudLastErrorMessage = nil
+        do {
+            if direction == .pull || direction == .both {
+                do {
+                    try await syncCoordinator.pullAndMerge()
+                    iCloudLastPullAt = Date()
+                    iCloudConflictCount = await conflictStore.records.count
+                    await reload()
+                } catch SyncCoordinator.SyncError.pullFailed(let msg) {
+                    print("pull failed: \(msg)")
+                }
+            }
+            if direction == .push || direction == .both {
+                try await syncCoordinator.pushIfNeeded()
+                iCloudLastPushAt = Date()
+            }
+        } catch {
+            iCloudLastErrorMessage = String(describing: error)
+            print("sync failed: \(error)")
+        }
+    }
+
+    private func scheduleSyncPollTimer() {
+        syncPollTimer?.invalidate()
+        // macOS push 不可靠, 每 60 秒主動 pull 一次當保底
+        syncPollTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                await self?.performPull()
+            }
         }
     }
 
@@ -83,6 +191,9 @@ final class AppViewModel: ObservableObject {
         if availableModels.isEmpty || !availableModels.contains(snapshot.settings.providerConfig.model) {
             availableModels = Array(Set(snapshot.settings.providerConfig.preset.fallbackModels + [snapshot.settings.providerConfig.model])).sorted()
         }
+        // 任何 reload (來自本地寫入或 pull 後 merge) 都排一個 debounce push,
+        // 避免快照改了卻忘記上雲。
+        schedulePushDebounced()
     }
 
     func showNextCard() {

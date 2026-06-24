@@ -696,6 +696,32 @@ struct SettingsView: View {
                     }
                 }
 
+                settingsBox("iCloud 同步") {
+                    icloudStatusRow()
+                    icloudFingerprintRow()
+                    icloudLastSyncRow()
+                    icloudConflictRow()
+                    if let err = viewModel.iCloudLastErrorMessage {
+                        Label(err, systemImage: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .textSelection(.enabled)
+                    }
+                    HStack {
+                        Button {
+                            Task { await viewModel.performPull() }
+                        } label: {
+                            Label(
+                                viewModel.iCloudIsSyncing ? "同步中..." : "立即同步 (Pull)",
+                                systemImage: "arrow.clockwise.icloud"
+                            )
+                        }
+                        .disabled(viewModel.iCloudIsSyncing)
+                        .help("從 iCloud 拉最新一份回來, 跟本機做 3-way merge")
+                        Spacer()
+                    }
+                }
+
                 settingsBox("AI Log") {
                     Button {
                         viewModel.openAIRequestLog()
@@ -792,6 +818,95 @@ struct SettingsView: View {
             settings[keyPath: keyPath] = value
             viewModel.updateSettings(settings)
         }
+    }
+
+    // MARK: - iCloud status rows
+
+    @ViewBuilder
+    private func icloudStatusRow() -> some View {
+        let (icon, color, text) = icloudStatusDisplay()
+        HStack {
+            Image(systemName: icon)
+                .foregroundStyle(color)
+            Text(text)
+                .font(.callout)
+            Spacer()
+        }
+    }
+
+    private func icloudStatusDisplay() -> (String, Color, String) {
+        switch viewModel.iCloudStatus {
+        case .available:
+            return ("checkmark.icloud.fill", .green, "iCloud 已連線")
+        case .noAccount:
+            return ("icloud.slash", .orange, "未登入 iCloud (系統設定 → Apple ID)")
+        case .restricted:
+            return ("exclamationmark.icloud", .red, "iCloud 帳號被限制")
+        case .unknown:
+            return ("questionmark.circle", .secondary, CloudKitAccountChecker.displayMessage(for: viewModel.iCloudStatus))
+        case .unexpected:
+            return ("questionmark.circle", .secondary, CloudKitAccountChecker.displayMessage(for: viewModel.iCloudStatus))
+        }
+    }
+
+    @ViewBuilder
+    private func icloudFingerprintRow() -> some View {
+        if let fp = viewModel.iCloudFingerprint {
+            labeledRow("帳號") {
+                Text("iCloud _\(fp)")
+                    .font(.system(.callout, design: .monospaced))
+                    .textSelection(.enabled)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func icloudLastSyncRow() -> some View {
+        labeledRow("上次同步") {
+            VStack(alignment: .leading, spacing: 2) {
+                if let push = viewModel.iCloudLastPushAt {
+                    Text("Push: \(Self.relativeTimeString(from: push))")
+                } else {
+                    Text("Push: 尚未執行")
+                        .foregroundStyle(.secondary)
+                }
+                if let pull = viewModel.iCloudLastPullAt {
+                    Text("Pull: \(Self.relativeTimeString(from: pull))")
+                } else {
+                    Text("Pull: 尚未執行")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .font(.caption)
+        }
+    }
+
+    @ViewBuilder
+    private func icloudConflictRow() -> some View {
+        if viewModel.iCloudConflictCount > 0 {
+            HStack {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text("有 \(viewModel.iCloudConflictCount) 筆 3-way merge 衝突, 已用 last-writer-wins 自動解決")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+        } else {
+            HStack {
+                Image(systemName: "checkmark.circle")
+                    .foregroundStyle(.green)
+                Text("無未解決衝突")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private static func relativeTimeString(from date: Date) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        formatter.locale = Locale(identifier: "zh_TW")
+        return formatter.localizedString(for: date, relativeTo: Date())
     }
 
     private func stringBinding(get: @escaping (AppSettings) -> String, set: @escaping (inout AppSettings, String) -> Void) -> Binding<String> {

@@ -7,6 +7,7 @@ public struct Source: Codable, Identifiable, Equatable, Sendable {
     public var extractionPrompt: String
     public var lastFetchedAt: Date?
     public var lastError: String?
+    public var updatedAt: Date
 
     public init(
         id: UUID = UUID(),
@@ -14,7 +15,8 @@ public struct Source: Codable, Identifiable, Equatable, Sendable {
         isEnabled: Bool = true,
         extractionPrompt: String = "",
         lastFetchedAt: Date? = nil,
-        lastError: String? = nil
+        lastError: String? = nil,
+        updatedAt: Date = Date()
     ) {
         self.id = id
         self.url = url
@@ -22,6 +24,18 @@ public struct Source: Codable, Identifiable, Equatable, Sendable {
         self.extractionPrompt = extractionPrompt
         self.lastFetchedAt = lastFetchedAt
         self.lastError = lastError
+        self.updatedAt = updatedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(UUID.self, forKey: .id)
+        self.url = try container.decode(URL.self, forKey: .url)
+        self.isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true
+        self.extractionPrompt = try container.decodeIfPresent(String.self, forKey: .extractionPrompt) ?? ""
+        self.lastFetchedAt = try container.decodeIfPresent(Date.self, forKey: .lastFetchedAt)
+        self.lastError = try container.decodeIfPresent(String.self, forKey: .lastError)
+        self.updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
     }
 }
 
@@ -33,14 +47,27 @@ public struct CrawledDocument: Codable, Identifiable, Equatable, Sendable {
     public var plainText: String
     public var fetchedAt: Date
     public var contentHash: String
+    public var updatedAt: Date
 
-    public init(sourceId: UUID, url: URL, title: String, plainText: String, fetchedAt: Date = Date(), contentHash: String) {
+    public init(sourceId: UUID, url: URL, title: String, plainText: String, fetchedAt: Date = Date(), contentHash: String, updatedAt: Date = Date()) {
         self.sourceId = sourceId
         self.url = url
         self.title = title
         self.plainText = plainText
         self.fetchedAt = fetchedAt
         self.contentHash = contentHash
+        self.updatedAt = updatedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.sourceId = try container.decode(UUID.self, forKey: .sourceId)
+        self.url = try container.decode(URL.self, forKey: .url)
+        self.title = try container.decode(String.self, forKey: .title)
+        self.plainText = try container.decode(String.self, forKey: .plainText)
+        self.fetchedAt = try container.decodeIfPresent(Date.self, forKey: .fetchedAt) ?? Date()
+        self.contentHash = try container.decode(String.self, forKey: .contentHash)
+        self.updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
     }
 }
 
@@ -197,6 +224,7 @@ public struct LearningCard: Codable, Identifiable, Equatable, Sendable {
     public var status: CardStatus
     public var createdAt: Date
     public var lastShownAt: Date?
+    public var updatedAt: Date
 
     public init(
         id: UUID = UUID(),
@@ -213,7 +241,8 @@ public struct LearningCard: Codable, Identifiable, Equatable, Sendable {
         sourceUrl: URL,
         status: CardStatus = .new,
         createdAt: Date = Date(),
-        lastShownAt: Date? = nil
+        lastShownAt: Date? = nil,
+        updatedAt: Date = Date()
     ) {
         self.id = id
         self.word = word
@@ -230,6 +259,7 @@ public struct LearningCard: Codable, Identifiable, Equatable, Sendable {
         self.status = status
         self.createdAt = createdAt
         self.lastShownAt = lastShownAt
+        self.updatedAt = updatedAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -249,6 +279,7 @@ public struct LearningCard: Codable, Identifiable, Equatable, Sendable {
         self.status = try container.decodeIfPresent(CardStatus.self, forKey: .status) ?? .new
         self.createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         self.lastShownAt = try container.decodeIfPresent(Date.self, forKey: .lastShownAt)
+        self.updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
     }
 }
 
@@ -264,6 +295,7 @@ public struct QuizQuestion: Codable, Identifiable, Equatable, Sendable {
     public var selectedAnswer: String?
     public var createdAt: Date
     public var answeredAt: Date?
+    public var updatedAt: Date
 
     public init(
         id: UUID = UUID(),
@@ -276,7 +308,8 @@ public struct QuizQuestion: Codable, Identifiable, Equatable, Sendable {
         status: QuizStatus = .pending,
         selectedAnswer: String? = nil,
         createdAt: Date = Date(),
-        answeredAt: Date? = nil
+        answeredAt: Date? = nil,
+        updatedAt: Date = Date()
     ) {
         self.id = id
         self.cardId = cardId
@@ -289,6 +322,23 @@ public struct QuizQuestion: Codable, Identifiable, Equatable, Sendable {
         self.selectedAnswer = selectedAnswer
         self.createdAt = createdAt
         self.answeredAt = answeredAt
+        self.updatedAt = updatedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        self.cardId = try container.decodeIfPresent(UUID.self, forKey: .cardId)
+        self.sourceWord = try container.decode(String.self, forKey: .sourceWord)
+        self.question = try container.decode(String.self, forKey: .question)
+        self.choices = try container.decode([String].self, forKey: .choices)
+        self.correctAnswer = try container.decode(String.self, forKey: .correctAnswer)
+        self.explanationZh = try container.decode(String.self, forKey: .explanationZh)
+        self.status = try container.decodeIfPresent(QuizStatus.self, forKey: .status) ?? .pending
+        self.selectedAnswer = try container.decodeIfPresent(String.self, forKey: .selectedAnswer)
+        self.createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        self.answeredAt = try container.decodeIfPresent(Date.self, forKey: .answeredAt)
+        self.updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
     }
 }
 
@@ -345,6 +395,7 @@ public struct GeneratedArticle: Codable, Identifiable, Equatable, Sendable {
     public var sourceId: UUID
     public var generatedAt: Date
     public var cardCount: Int
+    public var updatedAt: Date
 
     public init(
         id: UUID = UUID(),
@@ -355,7 +406,8 @@ public struct GeneratedArticle: Codable, Identifiable, Equatable, Sendable {
         contentHash: String,
         sourceId: UUID,
         generatedAt: Date = Date(),
-        cardCount: Int = 0
+        cardCount: Int = 0,
+        updatedAt: Date = Date()
     ) {
         self.id = id
         self.theme = theme
@@ -366,6 +418,7 @@ public struct GeneratedArticle: Codable, Identifiable, Equatable, Sendable {
         self.sourceId = sourceId
         self.generatedAt = generatedAt
         self.cardCount = cardCount
+        self.updatedAt = updatedAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -379,6 +432,7 @@ public struct GeneratedArticle: Codable, Identifiable, Equatable, Sendable {
         self.sourceId = try container.decode(UUID.self, forKey: .sourceId)
         self.generatedAt = try container.decodeIfPresent(Date.self, forKey: .generatedAt) ?? Date()
         self.cardCount = try container.decodeIfPresent(Int.self, forKey: .cardCount) ?? 0
+        self.updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
     }
 }
 
@@ -398,6 +452,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var aiArticleWeekdays: [Int]
     public var aiArticleLevels: [JLPTLevel]
     public var aiArticleCustomTheme: String
+    public var updatedAt: Date
 
     public init(
         displayIntervalMinutes: Int = 30,
@@ -411,7 +466,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         aiArticleScheduleMinute: Int = 0,
         aiArticleWeekdays: [Int] = [1, 2, 3, 4, 5, 6, 7],
         aiArticleLevels: [JLPTLevel] = JLPTLevel.allCases,
-        aiArticleCustomTheme: String = ""
+        aiArticleCustomTheme: String = "",
+        updatedAt: Date = Date()
     ) {
         self.displayIntervalMinutes = displayIntervalMinutes
         self.visibleDurationSeconds = visibleDurationSeconds
@@ -425,6 +481,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.aiArticleWeekdays = AppSettings.normalizeWeekdays(aiArticleWeekdays)
         self.aiArticleLevels = aiArticleLevels.isEmpty ? JLPTLevel.allCases : aiArticleLevels
         self.aiArticleCustomTheme = aiArticleCustomTheme
+        self.updatedAt = updatedAt
     }
 
     public static func clampHour(_ value: Int) -> Int { min(23, max(0, value)) }
@@ -449,5 +506,19 @@ public struct AppSettings: Codable, Equatable, Sendable {
         let decodedLevels = try container.decodeIfPresent([JLPTLevel].self, forKey: .aiArticleLevels) ?? JLPTLevel.allCases
         self.aiArticleLevels = decodedLevels.isEmpty ? JLPTLevel.allCases : decodedLevels
         self.aiArticleCustomTheme = try container.decodeIfPresent(String.self, forKey: .aiArticleCustomTheme) ?? ""
+        self.updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
     }
 }
+
+/// 標記可以參與 iCloud 3-way merge 的 model。`updatedAt` 是 LWW 與衝突偵測
+/// 的依據, 由 `AppStore.update()` 在每次寫入時自動更新。
+public protocol MergeTrackable: Codable, Equatable, Sendable {
+    var updatedAt: Date { get set }
+}
+
+extension Source: MergeTrackable {}
+extension CrawledDocument: MergeTrackable {}
+extension LearningCard: MergeTrackable {}
+extension QuizQuestion: MergeTrackable {}
+extension GeneratedArticle: MergeTrackable {}
+extension AppSettings: MergeTrackable {}

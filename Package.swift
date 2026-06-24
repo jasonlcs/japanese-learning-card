@@ -17,6 +17,7 @@ let package = Package(
             name: "JapaneseLearningCardCore",
             linkerSettings: [
                 .linkedFramework("Security"),
+                .linkedFramework("CloudKit"),
                 .linkedLibrary("sqlite3")
             ]
         ),
@@ -24,7 +25,8 @@ let package = Package(
             name: "JapaneseLearningCard",
             dependencies: ["JapaneseLearningCardCore"],
             exclude: [
-                "Info.plist"
+                "Info.plist",
+                "JapaneseLearningCard.entitlements"
             ],
             linkerSettings: [
                 .linkedFramework("AppKit"),
