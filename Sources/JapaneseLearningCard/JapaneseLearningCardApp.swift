@@ -51,6 +51,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.menuBarController = controller
             viewModel.start()
         }
+
+        Task { @MainActor in
+            // 啟動稍後再檢查，避免和開窗、初始化搶資源。
+            try? await Task.sleep(for: .seconds(3))
+            await UpdateChecker.shared.autoCheckIfNeeded()
+        }
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {

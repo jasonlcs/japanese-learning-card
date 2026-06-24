@@ -12,7 +12,6 @@ struct RootView: View {
                 Label("AI 文章", systemImage: "sparkles.rectangle.stack").tag(1)
                 Label("手動造卡", systemImage: "doc.text.magnifyingglass").tag(6)
                 Label("考題", systemImage: "checklist").tag(2)
-                Label("資料庫", systemImage: "cylinder.split.1x2").tag(3)
                 Label("設定", systemImage: "gearshape").tag(4)
                 Label("歷史", systemImage: "clock").tag(5)
             }
@@ -27,8 +26,6 @@ struct RootView: View {
                     AIArticleView(viewModel: viewModel)
                 case 2:
                     QuizView(viewModel: viewModel)
-                case 3:
-                    DatabaseView(viewModel: viewModel)
                 case 4:
                     SettingsView(viewModel: viewModel)
                 case 5:
@@ -463,6 +460,7 @@ struct CopyableTextRow: View {
 struct SettingsView: View {
     @ObservedObject var viewModel: AppViewModel
     @State private var isSystemSettingsPresented = false
+    @AppStorage(UpdateChecker.autoCheckDefaultsKey) private var autoCheckUpdates = false
     @FocusState private var isSourceURLFocused: Bool
     /// 既有來源網址的編輯緩衝區（key 為 Source.id），送出前不寫回資料。
     @State private var editingSourceURLs: [UUID: String] = [:]
@@ -710,6 +708,23 @@ struct SettingsView: View {
                         .textSelection(.enabled)
                 }
 
+                settingsBox("更新") {
+                    Toggle("自動檢查更新", isOn: $autoCheckUpdates)
+                        .help("啟動時若有新版本會跳出提示（每小時最多檢查一次）。")
+                    HStack {
+                        Button {
+                            Task { await UpdateChecker.shared.checkForUpdates(showUpToDate: true) }
+                        } label: {
+                            Label("立即檢查更新", systemImage: "arrow.down.circle")
+                        }
+                        Spacer()
+                        Text("目前版本 \(UpdateChecker.shared.currentVersion)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                }
+
                 Button(role: .destructive) {
                     viewModel.quitApp()
                 } label: {
@@ -825,6 +840,7 @@ struct HistoryView: View {
         case articles = "AI 文章"
         case cards = "複習卡片"
         case quizzes = "考試紀錄"
+        case database = "資料庫"
         var id: String { rawValue }
     }
 
@@ -872,6 +888,8 @@ struct HistoryView: View {
                 cardList
             case .quizzes:
                 quizList
+            case .database:
+                DatabaseView(viewModel: viewModel)
             }
         }
         .sheet(item: $selectedArticle) { article in
