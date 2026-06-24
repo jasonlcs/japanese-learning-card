@@ -21,6 +21,7 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var isPopoverVisible = false
     @Published var isGeneratingAIArticle = false
     @Published var aiArticleCustomTheme = ""
+    @Published var selectedTab = 0
 
     private let store: AppStore
     private let secretStore: SecretStore
@@ -35,6 +36,8 @@ final class AppViewModel: ObservableObject {
     private var autoCloseGeneration = 0
     private var autoCloseRemainingSeconds: TimeInterval?
     private var autoCloseDeadline: Date?
+    nonisolated(unsafe) private var sleepWakeObservers: [NSObjectProtocol] = []
+    private var isSuspended = false
     var requestShowPopover: (() -> Void)?
     var requestClosePopover: (() -> Void)?
 
@@ -42,6 +45,13 @@ final class AppViewModel: ObservableObject {
         self.store = store
         self.secretStore = secretStore
         self.providerClient = OpenAICompatibleLLMClient(secretStore: secretStore)
+        registerSleepWakeObservers()
+    }
+
+    deinit {
+        for observer in sleepWakeObservers {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
     }
 
     func start() {
@@ -74,8 +84,14 @@ final class AppViewModel: ObservableObject {
 
     func showNextCard() {
         currentCard = cardSelector.nextCard(from: snapshot.cards)
+        let isAutoShow = !isPopoverVisible
+        if isAutoShow {
+            selectedTab = 0
+        }
         guard let card = currentCard else {
-            requestShowPopover?()
+            if isAutoShow {
+                requestShowPopover?()
+            }
             return
         }
 
@@ -89,7 +105,9 @@ final class AppViewModel: ObservableObject {
                 }
             }
             await reload()
-            requestShowPopover?()
+            if isAutoShow {
+                requestShowPopover?()
+            }
             scheduleAutoClose()
         }
     }
@@ -480,6 +498,53 @@ final class AppViewModel: ObservableObject {
                 Task { @MainActor in self?.generateAIArticleNow() }
             }
         }
+    }
+
+    private func registerSleepWakeObservers() {
+        let center = NSWorkspace.shared.notificationCenter
+        let entries: [(Notification.Name, Bool)] = [
+            (NSWorkspace.willSleepNotification, true),
+            (NSWorkspace.didWakeNotification, false),
+            (NSWorkspace.screensDidSleepNotification, true),
+            (NSWorkspace.screensDidWakeNotification, false)
+        ]
+        for (name, shouldPause) in entries {
+            let observer = center.addObserver(
+                forName: name,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in
+                    if shouldPause {
+                        self?.pauseTimers()
+                    } else {
+                        self?.resumeTimers()
+                    }
+                }
+            }
+            sleepWakeObservers.append(observer)
+        }
+    }
+
+    private func pauseTimers() {
+        guard !isSuspended else { return }
+        isSuspended = true
+        displayTimer?.invalidate()
+        crawlTimer?.invalidate()
+        aiArticleTimer?.invalidate()
+        autoCloseTask?.cancel()
+        autoCloseGeneration += 1
+        autoCloseDeadline = nil
+        autoCloseRemainingSeconds = nil
+        if isPopoverVisible {
+            requestClosePopover?()
+        }
+    }
+
+    private func resumeTimers() {
+        guard isSuspended else { return }
+        isSuspended = false
+        scheduleTimers()
     }
 
     private func storeUpdate(_ mutate: @escaping @Sendable (inout AppSnapshot) -> Void) {

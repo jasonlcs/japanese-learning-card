@@ -4,11 +4,10 @@ import SwiftUI
 
 struct RootView: View {
     @ObservedObject var viewModel: AppViewModel
-    @State private var selectedTab = 0
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("", selection: $selectedTab) {
+            Picker("", selection: $viewModel.selectedTab) {
                 Label("卡片", systemImage: "rectangle.stack").tag(0)
                 Label("AI 文章", systemImage: "sparkles.rectangle.stack").tag(1)
                 Label("考題", systemImage: "checklist").tag(2)
@@ -22,7 +21,7 @@ struct RootView: View {
             Divider()
 
             Group {
-                switch selectedTab {
+                switch viewModel.selectedTab {
                 case 1:
                     AIArticleView(viewModel: viewModel)
                 case 2:
