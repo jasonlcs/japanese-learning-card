@@ -91,6 +91,22 @@ public enum VerbFormType: String, Codable, CaseIterable, Identifiable, Sendable 
     public var id: String { rawValue }
 }
 
+/// 是否在請求中加入 OpenAI 相容的 `response_format`，要求模型只輸出 JSON。
+/// 與模型無關的「主動」治本手段；不支援此欄位的 endpoint 應設為 .off。
+public enum StructuredOutputMode: String, Codable, CaseIterable, Identifiable, Sendable {
+    case off
+    case jsonObject
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .off: "關閉"
+        case .jsonObject: "JSON 物件 (json_object)"
+        }
+    }
+}
+
 public enum ProviderPreset: String, Codable, CaseIterable, Identifiable, Sendable {
     case openAI
     case openCodeGo
@@ -98,6 +114,15 @@ public enum ProviderPreset: String, Codable, CaseIterable, Identifiable, Sendabl
     case custom
 
     public var id: String { rawValue }
+
+    /// 各 preset 預設是否要求結構化輸出。OpenAI 官方支援，預設開；
+    /// 其他第三方/本地 endpoint 不一定支援，預設關以免回 400。
+    public var defaultStructuredOutput: StructuredOutputMode {
+        switch self {
+        case .openAI: .jsonObject
+        case .openCodeGo, .openCodeZen, .custom: .off
+        }
+    }
 
     public var displayName: String {
         switch self {
@@ -271,6 +296,7 @@ public struct ProviderConfig: Codable, Equatable, Sendable {
     public var organization: String?
     public var project: String?
     public var extraHeaders: [String: String]
+    public var structuredOutput: StructuredOutputMode
 
     public init(
         preset: ProviderPreset = .openAI,
@@ -279,7 +305,8 @@ public struct ProviderConfig: Codable, Equatable, Sendable {
         apiKeyKeychainRef: String = "default",
         organization: String? = nil,
         project: String? = nil,
-        extraHeaders: [String: String] = [:]
+        extraHeaders: [String: String] = [:],
+        structuredOutput: StructuredOutputMode = .jsonObject
     ) {
         self.preset = preset
         self.baseURL = baseURL
@@ -288,6 +315,7 @@ public struct ProviderConfig: Codable, Equatable, Sendable {
         self.organization = organization
         self.project = project
         self.extraHeaders = extraHeaders
+        self.structuredOutput = structuredOutput
     }
 
     public init(from decoder: Decoder) throws {
@@ -299,6 +327,7 @@ public struct ProviderConfig: Codable, Equatable, Sendable {
         self.organization = try container.decodeIfPresent(String.self, forKey: .organization)
         self.project = try container.decodeIfPresent(String.self, forKey: .project)
         self.extraHeaders = try container.decodeIfPresent([String: String].self, forKey: .extraHeaders) ?? [:]
+        self.structuredOutput = try container.decodeIfPresent(StructuredOutputMode.self, forKey: .structuredOutput) ?? preset.defaultStructuredOutput
     }
 }
 

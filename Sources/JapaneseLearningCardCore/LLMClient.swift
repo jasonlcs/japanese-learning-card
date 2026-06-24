@@ -135,7 +135,8 @@ public struct OpenAICompatibleLLMClient: LLMClient {
                 """),
                 .init(role: "user", content: exampleJa)
             ],
-            temperature: 0.1
+            temperature: 0.1,
+            responseFormat: Self.responseFormat(for: settings)
         )
 
         var request = URLRequest(url: settings.providerConfig.baseURL.appendingPathComponent("chat/completions"))
@@ -237,6 +238,14 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         return decoded.data.map(\.id).sorted()
     }
 
+    /// 依 provider 設定決定是否要求結構化輸出。集中在一處，避免每個請求各寫一份。
+    static func responseFormat(for settings: AppSettings) -> ChatCompletionRequest.ResponseFormat? {
+        switch settings.providerConfig.structuredOutput {
+        case .jsonObject: ChatCompletionRequest.ResponseFormat(type: "json_object")
+        case .off: nil
+        }
+    }
+
     public static func requestBody(document: CrawledDocument, sourcePrompt: String, settings: AppSettings) -> ChatCompletionRequest {
         let extractionPrompt = sourcePrompt.isEmpty ? settings.defaultExtractionPrompt : sourcePrompt
         return ChatCompletionRequest(
@@ -262,7 +271,8 @@ public struct OpenAICompatibleLLMClient: LLMClient {
                 \(String(document.plainText.prefix(12000)))
                 """)
             ],
-            temperature: 0.4
+            temperature: 0.4,
+            responseFormat: responseFormat(for: settings)
         )
     }
 
@@ -297,7 +307,8 @@ public struct OpenAICompatibleLLMClient: LLMClient {
                 \(source)
                 """)
             ],
-            temperature: 0.35
+            temperature: 0.35,
+            responseFormat: responseFormat(for: settings)
         )
     }
 
@@ -332,7 +343,8 @@ public struct OpenAICompatibleLLMClient: LLMClient {
                 目標 JLPT 等級：\(levelList)
                 """)
             ],
-            temperature: 0.7
+            temperature: 0.7,
+            responseFormat: responseFormat(for: settings)
         )
     }
 
@@ -436,13 +448,22 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         return balancedJSONObject(in: cleaned) ?? cleaned
     }
 
-    /// 推理型模型常在 JSON 前輸出 <think>…</think>，其中可能含有會干擾解析的大括號；
-    /// 取最後一個 </think> 之後的內容作為真正的回答。
+    /// 推理型模型(R1 / QwQ / deepseek 等)會在真正答案前輸出推理區塊，
+    /// 其中常含有會干擾解析的大括號。泛化處理常見的推理結束標記，
+    /// 取最後一個標記之後的內容作為真正的回答——新模型只要用同類標記即可自動相容。
+    private static let reasoningCloseTags = ["</think>", "</thinking>", "</reasoning>", "</thought>"]
+
     private static func stripThinkBlocks(_ content: String) -> String {
-        guard let range = content.range(of: "</think>", options: .backwards) else {
-            return content
+        var cutIndex: String.Index?
+        for tag in reasoningCloseTags {
+            if let range = content.range(of: tag, options: [.backwards, .caseInsensitive]) {
+                if cutIndex == nil || range.upperBound > cutIndex! {
+                    cutIndex = range.upperBound
+                }
+            }
         }
-        return String(content[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let cutIndex else { return content }
+        return String(content[cutIndex...]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// 從第一個 `{` 開始做大括號配對(忽略字串內的括號)，回傳第一個完整的 JSON 物件。
@@ -513,9 +534,28 @@ public struct ChatCompletionRequest: Codable, Equatable, Sendable {
         public var content: String
     }
 
+    public struct ResponseFormat: Codable, Equatable, Sendable {
+        public var type: String
+        public init(type: String) { self.type = type }
+    }
+
     public var model: String
     public var messages: [Message]
     public var temperature: Double
+    /// 對應 OpenAI 的 response_format；nil 時不送出此欄位(相容不支援的 endpoint)。
+    public var responseFormat: ResponseFormat?
+
+    enum CodingKeys: String, CodingKey {
+        case model, messages, temperature
+        case responseFormat = "response_format"
+    }
+
+    public init(model: String, messages: [Message], temperature: Double, responseFormat: ResponseFormat? = nil) {
+        self.model = model
+        self.messages = messages
+        self.temperature = temperature
+        self.responseFormat = responseFormat
+    }
 }
 
 private struct ChatCompletionResponse: Codable {

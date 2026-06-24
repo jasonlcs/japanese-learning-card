@@ -19,6 +19,7 @@ struct CoreChecks {
         try await storeUpdateMergesExternalChangesBeforeWriting()
         try aiArticleRequestAndDecoding()
         try articleDecodingHandlesReasoningModelOutput()
+        try structuredOutputIsSentPerProvider()
         try await pipelineGeneratesAIArticleAndCards()
         try await storePersistsGeneratedArticles()
         print("All JapaneseLearningCardCore checks passed.")
@@ -313,6 +314,34 @@ struct CoreChecks {
         let fencedDraft = try OpenAICompatibleLLMClient.decodeArticle(from: fenced, fallbackTheme: "fallback")
         expect(fencedDraft.theme == "旅行", "should decode JSON wrapped in markdown fence with surrounding prose")
         expect(fencedDraft.text == "今日は京都に行きました。", "fenced article text should decode")
+
+        // 推理標記是泛化處理的，不限 <think>；換成 <reasoning> 也要能運作。
+        let reasoning = """
+        <reasoning>draft {"x":1} more</reasoning>
+        {"theme":"料理","title":"和食","text":"味噌汁を作ります。"}
+        """
+        let reasoningDraft = try OpenAICompatibleLLMClient.decodeArticle(from: reasoning, fallbackTheme: "fallback")
+        expect(reasoningDraft.theme == "料理", "should handle generic reasoning markers, not only <think>")
+        expect(reasoningDraft.text == "味噌汁を作ります。", "text after </reasoning> should decode")
+    }
+
+    private static func structuredOutputIsSentPerProvider() throws {
+        let encoder = JSONEncoder()
+
+        // OpenAI preset 預設要求結構化輸出。
+        let openAISettings = AppSettings(providerConfig: ProviderConfig(preset: .openAI))
+        expect(openAISettings.providerConfig.structuredOutput == .jsonObject, "OpenAI preset should default to json_object")
+        let openAIBody = OpenAICompatibleLLMClient.articleRequestBody(theme: "旅行", jlptLevels: [.n2], settings: openAISettings)
+        let openAIJSON = String(decoding: try encoder.encode(openAIBody), as: UTF8.self)
+        expect(openAIJSON.contains("response_format"), "OpenAI request should include response_format")
+        expect(openAIJSON.contains("json_object"), "OpenAI request should request json_object")
+
+        // 第三方/本地 preset 預設不送 response_format，避免不支援的 endpoint 回 400。
+        let zenSettings = AppSettings(providerConfig: ProviderConfig(preset: .openCodeZen, structuredOutput: .off))
+        expect(zenSettings.providerConfig.structuredOutput == .off, "non-OpenAI preset should be able to disable structured output")
+        let zenBody = OpenAICompatibleLLMClient.articleRequestBody(theme: "旅行", jlptLevels: [.n2], settings: zenSettings)
+        let zenJSON = String(decoding: try encoder.encode(zenBody), as: UTF8.self)
+        expect(!zenJSON.contains("response_format"), "request should omit response_format when structured output is off")
     }
 
     private static func pipelineGeneratesAIArticleAndCards() async throws {

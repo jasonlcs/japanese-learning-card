@@ -501,6 +501,13 @@ struct SettingsView: View {
                     }
                 }
 
+                Picker("JSON 格式輸出", selection: structuredOutputBinding()) {
+                    ForEach(StructuredOutputMode.allCases) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .help("要求模型只輸出 JSON (response_format)。OpenAI 等支援的 provider 建議開啟；不支援的 endpoint 請關閉，否則可能回 400。關閉時仍會自動清洗 <think>、markdown 等雜訊。")
+
                 TextField("Keychain reference", text: stringBinding(
                     get: { $0.providerConfig.apiKeyKeychainRef },
                     set: { $0.providerConfig.apiKeyKeychainRef = $1 }
@@ -620,6 +627,16 @@ struct SettingsView: View {
             viewModel.snapshot.settings.providerConfig.preset
         } set: { preset in
             viewModel.applyProviderPreset(preset)
+        }
+    }
+
+    private func structuredOutputBinding() -> Binding<StructuredOutputMode> {
+        Binding {
+            viewModel.snapshot.settings.providerConfig.structuredOutput
+        } set: { mode in
+            var settings = viewModel.snapshot.settings
+            settings.providerConfig.structuredOutput = mode
+            viewModel.updateSettings(settings)
         }
     }
 

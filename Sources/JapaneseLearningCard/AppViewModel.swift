@@ -268,6 +268,7 @@ final class AppViewModel: ObservableObject {
         settings.providerConfig.baseURL = preset.defaultBaseURL
         settings.providerConfig.model = preset.defaultModel
         settings.providerConfig.apiKeyKeychainRef = preset.rawValue
+        settings.providerConfig.structuredOutput = preset.defaultStructuredOutput
         availableModels = preset.fallbackModels
         updateSettings(settings)
     }
