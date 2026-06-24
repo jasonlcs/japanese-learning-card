@@ -36,6 +36,15 @@ if [ -d "$RESOURCES" ] && [ "$(find "$RESOURCES" -type f | wc -l | tr -d ' ')" !
     cp -R "$RESOURCES"/. "$APP_BUNDLE/Contents/Resources/"
 fi
 
+# Developer ID Provisioning Profile (for restricted entitlements like CloudKit)
+PROVISIONING_PROFILE="${PROVISIONING_PROFILE:-${PRODUCT}_DeveloperID.provisionprofile}"
+if [ -n "$SIGNING_IDENTITY" ] && [ -f "$PROVISIONING_PROFILE" ]; then
+    echo "▸ 嵌入 provisioning profile: $PROVISIONING_PROFILE"
+    cp "$PROVISIONING_PROFILE" "$APP_BUNDLE/Contents/embedded.provisionprofile"
+elif [ -n "$SIGNING_IDENTITY" ] && [ ! -f "$PROVISIONING_PROFILE" ]; then
+    echo "⚠️ 找不到 provisioning profile ($PROVISIONING_PROFILE)，iCloud 同步可能被 AMFI 拒絕"
+fi
+
 # 根據簽名類型選 entitlement 檔:
 # - Developer ID 簽名 → 完整版, 含 com.apple.developer.icloud-* (restricted)
 # - ad-hoc 簽名 → 精簡版, 不放 restricted entitlements (AMFI 會拒絕執行)
