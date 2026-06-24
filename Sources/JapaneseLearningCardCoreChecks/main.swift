@@ -6,6 +6,7 @@ struct CoreChecks {
     static func main() async throws {
         try sourceValidatorAcceptsHTTPAndHTTPS()
         try sourceValidatorBlocksSSRF()
+        webCrawlerUsesBrowserUserAgent()
         schedulerClampsIntervals()
         cardSelectorPrioritizesFreshThenOldestReviewingAndSkipsSkipped()
         htmlExtractorRemovesScriptsStylesTagsAndDecodesEntities()
@@ -54,6 +55,13 @@ struct CoreChecks {
             }
         }
         try validator.validate(URL(string: "https://news.yahoo.co.jp/")!)
+    }
+
+    private static func webCrawlerUsesBrowserUserAgent() {
+        let userAgent = WebCrawler.userAgent
+        expect(userAgent.contains("Mozilla"), "WebCrawler should use a browser User-Agent to avoid bot detection")
+        expect(userAgent.contains("AppleWebKit"), "WebCrawler User-Agent should include AppleWebKit")
+        expect(!userAgent.contains("JapaneseLearningCard"), "WebCrawler should not identify as the app to avoid bot detection")
     }
 
     private static func schedulerClampsIntervals() {
