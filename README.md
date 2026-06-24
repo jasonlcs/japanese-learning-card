@@ -47,8 +47,9 @@ swift run JapaneseLearningCardCoreChecks
 
 ## Data And Secrets
 
-- App data is stored in SQLite at `~/Library/Application Support/JapaneseLearningCard/store.sqlite`.
-- Crawled documents, generated learning cards, and AI-generated quiz questions are persisted in the database.
+- App data is stored in SQLite in the current iCloud container's `Documents/JapaneseLearningCard` folder when iCloud Drive is available; otherwise it falls back to `~/Library/Application Support/JapaneseLearningCard/store.sqlite`.
+- Crawled documents, generated learning cards, and AI-generated quiz questions are persisted in the database so they can be shared across macs using the same iCloud-backed file.
+- The app reloads from the backing database when the file changes, and on first launch it copies any existing local database into the iCloud-backed location so prior data is preserved.
 - API keys are stored in macOS Keychain under the configured keychain reference.
 - The default provider base URL is `https://api.openai.com/v1`, but any OpenAI-compatible `chat/completions` endpoint can be configured.
 

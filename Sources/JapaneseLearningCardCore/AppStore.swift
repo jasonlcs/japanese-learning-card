@@ -30,6 +30,8 @@ public actor AppStore {
     private let databaseURL: URL
     private var database: OpaquePointer?
     private var snapshot: AppSnapshot
+    private var lastDatabaseModificationDate: Date?
+    private let stateLock = NSLock()
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
@@ -47,6 +49,9 @@ public actor AppStore {
 
         do {
             try FileManager.default.createDirectory(at: databaseURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if fileURL == nil {
+                try Self.migrateLegacyDatabaseIfNeeded(to: databaseURL)
+            }
             try open()
             try migrate()
             let loaded = try loadSnapshot()
@@ -56,13 +61,29 @@ public actor AppStore {
             } else {
                 snapshot = loaded
             }
+            lastDatabaseModificationDate = try? databaseURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
         } catch {
             snapshot = AppSnapshot()
         }
     }
 
     public func read() -> AppSnapshot {
-        snapshot
+        stateLock.lock()
+        defer { stateLock.unlock() }
+
+        do {
+            return try refreshFromDiskIfNeeded()
+        } catch {
+            print("Failed to reload database from disk at \(databaseURL.path): \(error). This may be resolved by restarting the app or checking iCloud Drive connectivity.")
+            return snapshot
+        }
+    }
+
+    private func refreshFromDiskIfNeeded() throws -> AppSnapshot {
+        if hasDatabaseChangedOnDisk() {
+            try reloadFromDisk()
+        }
+        return snapshot
     }
 
     public func ensureAISentinelSource(extractionPrompt: String) {
@@ -82,6 +103,17 @@ public actor AppStore {
     }
 
     public func update(_ mutate: @Sendable (inout AppSnapshot) -> Void) throws {
+        // Reload from disk before applying any mutation so that concurrent writes
+        // from another device (e.g., via iCloud Drive) are merged in rather than
+        // silently overwritten.
+        //
+        // Note: a narrow TOCTOU window remains — another device could write between
+        // the reload and the subsequent persist(). This is an inherent limitation of
+        // file-based storage without distributed locking; in practice, iCloud Drive
+        // sync latency makes simultaneous writes very unlikely.
+        if hasDatabaseChangedOnDisk() {
+            try reloadFromDisk()
+        }
         mutate(&snapshot)
         try persist()
     }
@@ -90,6 +122,42 @@ public actor AppStore {
         guard sqlite3_open(databaseURL.path, &database) == SQLITE_OK else {
             throw SQLiteStoreError.openFailed(message: lastErrorMessage())
         }
+    }
+
+    private func hasDatabaseChangedOnDisk() -> Bool {
+        guard FileManager.default.fileExists(atPath: databaseURL.path) else {
+            return false
+        }
+        guard let currentDate = try? databaseURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate else {
+            return false
+        }
+        guard let lastDate = lastDatabaseModificationDate else {
+            return false
+        }
+        return currentDate != lastDate
+    }
+
+    private func reloadFromDisk() throws {
+        closeDatabase()
+        do {
+            try open()
+            try migrate()
+            snapshot = try loadSnapshot()
+            lastDatabaseModificationDate = try? databaseURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+        } catch {
+            lastDatabaseModificationDate = nil
+            throw error
+        }
+    }
+
+    private func closeDatabase() {
+        guard let database else { return }
+        let closeResult = sqlite3_close(database)
+        if closeResult != SQLITE_OK {
+            print("Failed to close database cleanly at \(databaseURL.path): \(closeResult) (\(lastErrorMessage())). This may require restarting the app to avoid stale state.")
+            return
+        }
+        self.database = nil
     }
 
     private func migrate() throws {
@@ -315,11 +383,47 @@ public actor AppStore {
     }
 
     private static func defaultDatabaseURL() -> URL {
+        if let iCloudDatabaseURL = iCloudDriveDatabaseURL() {
+            return iCloudDatabaseURL
+        }
+        return localDatabaseURL()
+    }
+
+    private static func localDatabaseURL() -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser
         return base
             .appendingPathComponent("JapaneseLearningCard", isDirectory: true)
             .appendingPathComponent("store.sqlite")
+    }
+
+    static func migrateLegacyDatabaseIfNeeded(to databaseURL: URL, legacyDatabaseURL: URL? = nil) throws {
+        guard !FileManager.default.fileExists(atPath: databaseURL.path) else {
+            return
+        }
+
+        let legacyURL = legacyDatabaseURL ?? localDatabaseURL()
+        guard FileManager.default.fileExists(atPath: legacyURL.path) else {
+            return
+        }
+
+        try FileManager.default.createDirectory(at: databaseURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: legacyURL, to: databaseURL)
+    }
+
+    private static func iCloudDriveDatabaseURL() -> URL? {
+        guard let ubiquityContainer = FileManager.default.url(forUbiquityContainerIdentifier: nil) else {
+            return nil
+        }
+
+        let appDirectory = ubiquityContainer.appendingPathComponent("Documents/JapaneseLearningCard", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: appDirectory, withIntermediateDirectories: true)
+        } catch {
+            print("Unable to create the iCloud-backed database directory at \(appDirectory.path): \(error)")
+            return nil
+        }
+        return appDirectory.appendingPathComponent("store.sqlite")
     }
 
     private static func iso8601String(from date: Date) -> String {
