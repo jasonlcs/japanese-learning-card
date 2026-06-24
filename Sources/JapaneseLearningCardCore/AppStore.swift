@@ -9,13 +9,28 @@ public struct AppSnapshot: Codable, Equatable, Sendable {
     public var quizzes: [QuizQuestion]
     public var generatedArticles: [GeneratedArticle]
 
+    /// Soft-delete tombstones, 用 UUID / contentHash 標記已刪除的 record。
+    /// AppStore.update 自動偵測 closure 裡刪掉的 record 並推進這裡,
+    /// 跨 Mac 的刪除才會被 merge 帶過去。record 本身不在 `sources` /
+    /// `cards` 等陣列裡, 這些陣列永遠是 live 狀態, UI 不用過濾。
+    public var deletedSources: [UUID]
+    public var deletedDocuments: [String]
+    public var deletedCards: [UUID]
+    public var deletedQuizzes: [UUID]
+    public var deletedArticles: [UUID]
+
     public init(
         settings: AppSettings = AppSettings(),
         sources: [Source] = [],
         documents: [CrawledDocument] = [],
         cards: [LearningCard] = [],
         quizzes: [QuizQuestion] = [],
-        generatedArticles: [GeneratedArticle] = []
+        generatedArticles: [GeneratedArticle] = [],
+        deletedSources: [UUID] = [],
+        deletedDocuments: [String] = [],
+        deletedCards: [UUID] = [],
+        deletedQuizzes: [UUID] = [],
+        deletedArticles: [UUID] = []
     ) {
         self.settings = settings
         self.sources = sources
@@ -23,6 +38,27 @@ public struct AppSnapshot: Codable, Equatable, Sendable {
         self.cards = cards
         self.quizzes = quizzes
         self.generatedArticles = generatedArticles
+        self.deletedSources = deletedSources
+        self.deletedDocuments = deletedDocuments
+        self.deletedCards = deletedCards
+        self.deletedQuizzes = deletedQuizzes
+        self.deletedArticles = deletedArticles
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.settings = try container.decodeIfPresent(AppSettings.self, forKey: .settings) ?? AppSettings()
+        self.sources = try container.decodeIfPresent([Source].self, forKey: .sources) ?? []
+        self.documents = try container.decodeIfPresent([CrawledDocument].self, forKey: .documents) ?? []
+        self.cards = try container.decodeIfPresent([LearningCard].self, forKey: .cards) ?? []
+        self.quizzes = try container.decodeIfPresent([QuizQuestion].self, forKey: .quizzes) ?? []
+        self.generatedArticles = try container.decodeIfPresent([GeneratedArticle].self, forKey: .generatedArticles) ?? []
+        // 舊版 snapshot 沒有 deleted* 欄位, decode 時預設空陣列 (向後相容)
+        self.deletedSources = try container.decodeIfPresent([UUID].self, forKey: .deletedSources) ?? []
+        self.deletedDocuments = try container.decodeIfPresent([String].self, forKey: .deletedDocuments) ?? []
+        self.deletedCards = try container.decodeIfPresent([UUID].self, forKey: .deletedCards) ?? []
+        self.deletedQuizzes = try container.decodeIfPresent([UUID].self, forKey: .deletedQuizzes) ?? []
+        self.deletedArticles = try container.decodeIfPresent([UUID].self, forKey: .deletedArticles) ?? []
     }
 }
 
@@ -155,6 +191,7 @@ public actor AppStore {
             let before = snapshot
             var candidate = snapshot
             mutate(&candidate)
+            Self.applyDeletions(before: before, after: &candidate)
             Self.stampUpdatedAt(before: before, after: &candidate)
 
             do {
@@ -168,6 +205,53 @@ public actor AppStore {
                 try reloadFromDisk()
             }
         }
+    }
+
+    /// 自動偵測 closure 裡刪掉的 record, 推進對應的 `deleted*` 清單。
+    /// 雙向處理:
+    /// - `before` 有 / `after` 沒有的 ID → 加進 deleted 清單 (soft delete)
+    /// - `before` 沒 / `after` 有的 ID, 且原本在 deleted 清單 → 從清單移除 (un-delete)
+    /// 跨 Mac 的刪除才能透過 merge 帶到另一台。
+    private static func applyDeletions(before: AppSnapshot, after: inout AppSnapshot) {
+        // Sources
+        let beforeSourceIDs = Set(before.sources.map { $0.id })
+        let afterSourceIDs = Set(after.sources.map { $0.id })
+        var deletedSources = Set(after.deletedSources)
+        deletedSources.formUnion(beforeSourceIDs.subtracting(afterSourceIDs))
+        deletedSources.subtract(afterSourceIDs.subtracting(beforeSourceIDs))
+        after.deletedSources = Array(deletedSources)
+
+        // Documents (keyed by contentHash)
+        let beforeDocHashes = Set(before.documents.map { $0.contentHash })
+        let afterDocHashes = Set(after.documents.map { $0.contentHash })
+        var deletedDocs = Set(after.deletedDocuments)
+        deletedDocs.formUnion(beforeDocHashes.subtracting(afterDocHashes))
+        deletedDocs.subtract(afterDocHashes.subtracting(beforeDocHashes))
+        after.deletedDocuments = Array(deletedDocs)
+
+        // Cards
+        let beforeCardIDs = Set(before.cards.map { $0.id })
+        let afterCardIDs = Set(after.cards.map { $0.id })
+        var deletedCards = Set(after.deletedCards)
+        deletedCards.formUnion(beforeCardIDs.subtracting(afterCardIDs))
+        deletedCards.subtract(afterCardIDs.subtracting(beforeCardIDs))
+        after.deletedCards = Array(deletedCards)
+
+        // Quizzes
+        let beforeQuizIDs = Set(before.quizzes.map { $0.id })
+        let afterQuizIDs = Set(after.quizzes.map { $0.id })
+        var deletedQuizzes = Set(after.deletedQuizzes)
+        deletedQuizzes.formUnion(beforeQuizIDs.subtracting(afterQuizIDs))
+        deletedQuizzes.subtract(afterQuizIDs.subtracting(beforeQuizIDs))
+        after.deletedQuizzes = Array(deletedQuizzes)
+
+        // Articles
+        let beforeArticleIDs = Set(before.generatedArticles.map { $0.id })
+        let afterArticleIDs = Set(after.generatedArticles.map { $0.id })
+        var deletedArticles = Set(after.deletedArticles)
+        deletedArticles.formUnion(beforeArticleIDs.subtracting(afterArticleIDs))
+        deletedArticles.subtract(afterArticleIDs.subtracting(beforeArticleIDs))
+        after.deletedArticles = Array(deletedArticles)
     }
 
     /// 對「實際被改動」的 record 戳上 `updatedAt = Date()`, 沒動到的保留原值。
