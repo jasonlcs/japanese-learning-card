@@ -47,6 +47,10 @@ struct CoreChecks {
         try await syncCoordinatorPushesLocalToCloud()
         try await syncCoordinatorPullsAndMergesRemoteChanges()
         try await syncCoordinatorMergesConflictingChanges()
+        try await appStoreAutoDetectsDeletedSource()
+        try await appStoreUndeleteRemovesFromDeletedSet()
+        try mergerAppliesDeletionsToAllTables()
+        try await syncCoordinatorPropagatesDeletionToOtherMac()
         print("All JapaneseLearningCardCore checks passed.")
     }
 
@@ -1107,6 +1111,137 @@ struct CoreChecks {
         let mergedURL = afterPull.sources.first?.url.absoluteString
         expect(mergedURL == "https://local.example.com" || mergedURL == "https://remote.example.com", "merged url should be local or remote, not base")
         expect(mergedURL != "https://base.example.com", "merged url should NOT be the base value (it was overwritten)")
+    }
+
+    // MARK: - 刪除同步
+
+    private static func appStoreAutoDetectsDeletedSource() async throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("store.sqlite")
+        let store = await AppStore(fileURL: fileURL)
+        defer { try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent()) }
+
+        let keepId = UUID()
+        let dropId = UUID()
+        try await store.update { state in
+            state.sources = [
+                makeSource(id: keepId, url: "https://keep.example.com"),
+                makeSource(id: dropId, url: "https://drop.example.com")
+            ]
+        }
+
+        // 使用者刪掉其中一筆
+        try await store.update { state in
+            state.sources.removeAll { $0.id == dropId }
+        }
+
+        let after = await store.read()
+        expect(after.sources.count == 1, "刪除後 sources 應該剩 1 筆")
+        expect(after.sources.first?.id == keepId, "留下來的應該是 keepId")
+        expect(after.deletedSources.contains(dropId), "dropId 應該被加進 deletedSources tombstones")
+        expect(!after.deletedSources.contains(keepId), "keepId 不應該在 deletedSources")
+    }
+
+    private static func appStoreUndeleteRemovesFromDeletedSet() async throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("store.sqlite")
+        let store = await AppStore(fileURL: fileURL)
+        defer { try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent()) }
+
+        let id = UUID()
+        try await store.update { state in
+            state.sources = [makeSource(id: id, url: "https://will-be-deleted.example.com")]
+        }
+        try await store.update { state in
+            state.sources.removeAll { $0.id == id }
+        }
+        let afterDelete = await store.read()
+        expect(afterDelete.deletedSources.contains(id), "刪除後要在 deleted 清單")
+
+        // 使用者又把同一個 id 加回來 (un-delete)
+        try await store.update { state in
+            state.sources = [makeSource(id: id, url: "https://restored.example.com")]
+        }
+        let afterUndelete = await store.read()
+        expect(afterUndelete.sources.count == 1, "un-delete 後 sources 應該有 1 筆")
+        expect(afterUndelete.sources.first?.url.absoluteString == "https://restored.example.com", "un-delete 後 url 應該是新值")
+        expect(!afterUndelete.deletedSources.contains(id), "un-delete 後不該再在 deleted 清單")
+    }
+
+    private static func mergerAppliesDeletionsToAllTables() throws {
+        // 驗證 deleted* 清單的 union 會把 record 從合併結果拿掉
+        let sourceID = UUID()
+        let cardID = UUID()
+        let docHash = "hash-for-deleted-doc"
+        let base = makeSnapshot(
+            sources: [makeSource(id: sourceID, url: "https://a.example.com")],
+            documents: [CrawledDocument(sourceId: sourceID, url: URL(string: "https://a.example.com")!, title: "A", plainText: "text", contentHash: docHash)],
+            cards: [makeCard(id: cardID, word: "old")]
+        )
+
+        // 遠端把那 3 個 record 都刪了 (sources 陣列拿掉, deleted 清單加 ID)
+        let remote = AppSnapshot(
+            sources: [],
+            documents: [],
+            cards: [],
+            deletedSources: [sourceID],
+            deletedDocuments: [docHash],
+            deletedCards: [cardID]
+        )
+
+        let result = Merger.merge3Way(local: makeSnapshot(), remote: remote, base: base)
+        expect(result.snapshot.sources.isEmpty, "deleted source 應該從合併結果拿掉")
+        expect(result.snapshot.documents.isEmpty, "deleted document 應該從合併結果拿掉")
+        expect(result.snapshot.cards.isEmpty, "deleted card 應該從合併結果拿掉")
+        expect(result.snapshot.deletedSources.contains(sourceID), "deletedSources 應保留 tombstone")
+        expect(result.snapshot.deletedDocuments.contains(docHash), "deletedDocuments 應保留 tombstone")
+        expect(result.snapshot.deletedCards.contains(cardID), "deletedCards 應保留 tombstone")
+    }
+
+    private static func syncCoordinatorPropagatesDeletionToOtherMac() async throws {
+        // 模擬「Mac A 刪了一筆 source → push → 雲端更新 → Mac B pull → 拿掉本地那筆」
+        let sourceId = UUID()
+        let baseT = Date(timeIntervalSince1970: 1_700_000_000)
+        let baseSnapshot = makeSnapshot(sources: [
+            makeSource(id: sourceId, url: "https://will-be-deleted.example.com", updatedAt: baseT)
+        ])
+
+        // 模擬 Mac A 刪掉 sourceId: 本地拿掉 + deletedSources 加上
+        let macA = DatabasePayload(
+            bundleVersion: "1.0",
+            generatedAt: Date(timeIntervalSince1970: 1_700_001_000),
+            updatedBy: "mac-a",
+            snapshot: AppSnapshot(
+                sources: [],
+                deletedSources: [sourceId]
+            )
+        )
+
+        let harness = try await makeTestSyncHarness(remoteInitial: macA)
+        defer { try? FileManager.default.removeItem(at: harness.dir) }
+
+        // Mac B 還沒 pull, 本地有那筆
+        try await harness.store.update { state in
+            state.sources = baseSnapshot.sources
+        }
+        // synced base 對齊到 macA 推送前
+        try harness.syncedBase.recordSync(try DatabasePayload(
+            bundleVersion: "1.0", generatedAt: baseT, updatedBy: "test", snapshot: baseSnapshot
+        ).encoded())
+
+        let coordinator = SyncCoordinator(
+            transport: harness.transport,
+            store: harness.store,
+            syncedBase: harness.syncedBase,
+            conflictStore: harness.conflictStore
+        )
+        try await coordinator.pullAndMerge()
+
+        let afterPull = await harness.store.read()
+        expect(afterPull.sources.isEmpty, "Mac B pull 後本地 source 應該被刪掉")
+        expect(afterPull.deletedSources.contains(sourceId), "Mac B 應收到 deleted tombstones")
     }
 }
 

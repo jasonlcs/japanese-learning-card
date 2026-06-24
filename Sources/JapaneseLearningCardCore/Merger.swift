@@ -74,17 +74,36 @@ public enum Merger {
         let mergedQuizzes = mergeQuizzes(local: local.quizzes, remote: remote.quizzes, base: base.quizzes, conflicts: &conflicts)
         let mergedArticles = mergeArticles(local: local.generatedArticles, remote: remote.generatedArticles, base: base.generatedArticles, conflicts: &conflicts)
 
+        // 軟刪除 tombstones: 三方聯集後, 把出現在任何一方 deleted 清單裡
+        // 的 record 從合併結果拿掉。records 陣列在 AppStore 端已經是 live 狀態
+        // (被刪的已經不在裡面), 所以這層只負責把遠端 / 別台 Mac 的刪除套
+        // 過來。
+        let deletedSourceIDs = unionDeleted(local.deletedSources, remote.deletedSources, base.deletedSources)
+        let deletedDocHashes = unionDeleted(local.deletedDocuments, remote.deletedDocuments, base.deletedDocuments)
+        let deletedCardIDs = unionDeleted(local.deletedCards, remote.deletedCards, base.deletedCards)
+        let deletedQuizIDs = unionDeleted(local.deletedQuizzes, remote.deletedQuizzes, base.deletedQuizzes)
+        let deletedArticleIDs = unionDeleted(local.deletedArticles, remote.deletedArticles, base.deletedArticles)
+
         return MergeResult(
             snapshot: AppSnapshot(
                 settings: mergedSettings,
-                sources: mergedSources,
-                documents: mergedDocuments,
-                cards: mergedCards,
-                quizzes: mergedQuizzes,
-                generatedArticles: mergedArticles
+                sources: mergedSources.filter { !deletedSourceIDs.contains($0.id) },
+                documents: mergedDocuments.filter { !deletedDocHashes.contains($0.contentHash) },
+                cards: mergedCards.filter { !deletedCardIDs.contains($0.id) },
+                quizzes: mergedQuizzes.filter { !deletedQuizIDs.contains($0.id) },
+                generatedArticles: mergedArticles.filter { !deletedArticleIDs.contains($0.id) },
+                deletedSources: Array(deletedSourceIDs),
+                deletedDocuments: Array(deletedDocHashes),
+                deletedCards: Array(deletedCardIDs),
+                deletedQuizzes: Array(deletedQuizIDs),
+                deletedArticles: Array(deletedArticleIDs)
             ),
             conflicts: conflicts
         )
+    }
+
+    private static func unionDeleted<ID: Hashable>(_ a: [ID], _ b: [ID], _ c: [ID]) -> Set<ID> {
+        Set(a).union(b).union(c)
     }
 
     // MARK: - Settings (single record)
