@@ -37,7 +37,7 @@ struct RootView: View {
                 }
             }
         }
-        .frame(minWidth: 420, minHeight: 560)
+        .frame(minWidth: 520, minHeight: 560)
         .background(Color(nsColor: .windowBackgroundColor))
         .scrollContentBackground(.hidden)
         .onHover { inside in
@@ -459,159 +459,300 @@ struct CopyableTextRow: View {
 
 struct SettingsView: View {
     @ObservedObject var viewModel: AppViewModel
+    @State private var isSystemSettingsPresented = false
+    @FocusState private var isSourceURLFocused: Bool
+    /// 既有來源網址的編輯緩衝區（key 為 Source.id），送出前不寫回資料。
+    @State private var editingSourceURLs: [UUID: String] = [:]
 
     var body: some View {
-        Form {
-            if !viewModel.statusMessage.isEmpty {
-                Section {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("來源設定")
+                        .font(.headline)
+                    Spacer()
+                    Button {
+                        isSystemSettingsPresented = true
+                    } label: {
+                        Image(systemName: "gearshape")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("系統設定")
+                }
+
+                if !viewModel.statusMessage.isEmpty {
                     Label(viewModel.statusMessage, systemImage: viewModel.isValidatingProvider || viewModel.isRefreshing ? "hourglass" : "info.circle")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
-            }
 
-            Section("顯示") {
-                Stepper("顯示頻率：\(viewModel.snapshot.settings.displayIntervalMinutes) 分鐘", value: binding(\.displayIntervalMinutes), in: 1...1440)
-                Stepper("停留秒數：\(viewModel.snapshot.settings.visibleDurationSeconds) 秒", value: binding(\.visibleDurationSeconds), in: 3...300)
-                Stepper("爬文頻率：\(viewModel.snapshot.settings.crawlIntervalHours) 小時", value: binding(\.crawlIntervalHours), in: 1...168)
-            }
-
-            Section("AI Provider") {
-                Picker("Provider", selection: providerPresetBinding()) {
-                    ForEach(ProviderPreset.allCases) { preset in
-                        Text(preset.displayName).tag(preset)
+                settingsBox("內容來源") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("卡片擷取指示")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        TextEditor(text: stringBinding(
+                            get: { $0.defaultExtractionPrompt },
+                            set: { $0.defaultExtractionPrompt = $1 }
+                        ))
+                        .font(.body)
+                        .scrollContentBackground(.hidden)
+                        .padding(6)
+                        .frame(minHeight: 96)
+                        .background(Color(nsColor: .textBackgroundColor))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
                     }
-                }
 
-                TextField("Base URL", text: stringBinding(
-                    get: { $0.providerConfig.baseURL.absoluteString },
-                    set: { settings, value in
-                        if let url = URL(string: value) {
-                            settings.providerConfig.baseURL = url
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("新增網址")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        HStack(spacing: 8) {
+                            TextField("", text: $viewModel.newSourceURL)
+                                .textFieldStyle(.roundedBorder)
+                                .focused($isSourceURLFocused)
+                                .frame(maxWidth: .infinity)
+                                .onSubmit {
+                                    if canAddSource {
+                                        addSourceAndRefocus()
+                                    }
+                                }
+                            Button {
+                                addSourceAndRefocus()
+                            } label: {
+                                Image(systemName: "plus")
+                            }
+                            .disabled(!canAddSource)
+                            .help("新增網址")
                         }
                     }
-                ))
 
-                Picker("Model", selection: stringBinding(
-                    get: { $0.providerConfig.model },
-                    set: { $0.providerConfig.model = $1 }
-                )) {
-                    ForEach(viewModel.availableModels, id: \.self) { model in
-                        Text(model).tag(model)
+                    ForEach(webSources) { source in
+                        HStack(alignment: .top, spacing: 10) {
+                            Toggle("", isOn: toggleBinding(source))
+                                .labelsHidden()
+                            VStack(alignment: .leading, spacing: 3) {
+                                TextField("", text: sourceURLBinding(source))
+                                    .textFieldStyle(.roundedBorder)
+                                    .onSubmit { commitSourceURL(source) }
+                                if let error = source.lastError {
+                                    Text(error)
+                                        .font(.caption)
+                                        .foregroundStyle(.red)
+                                        .lineLimit(3)
+                                        .textSelection(.enabled)
+                                } else if let date = source.lastFetchedAt {
+                                    Text("上次更新：\(date.formatted())")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .textSelection(.enabled)
+                                } else {
+                                    Text("尚未更新")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            Spacer()
+                            Button {
+                                viewModel.removeSource(source)
+                            } label: {
+                                Image(systemName: "trash")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("移除來源")
+                        }
+                        .padding(.vertical, 3)
                     }
                 }
 
-                Picker("JSON 格式輸出", selection: structuredOutputBinding()) {
-                    ForEach(StructuredOutputMode.allCases) { mode in
-                        Text(mode.displayName).tag(mode)
+                HStack {
+                    Button {
+                        viewModel.refreshNow()
+                    } label: {
+                        Label(viewModel.isRefreshing ? "更新中..." : "手動更新", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(viewModel.isRefreshing)
+                }
+            }
+            .padding()
+        }
+        .sheet(isPresented: $isSystemSettingsPresented) {
+            systemSettingsView
+        }
+    }
+
+    private var systemSettingsView: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("系統設定")
+                        .font(.headline)
+                    Spacer()
+                    Button("完成") {
+                        isSystemSettingsPresented = false
                     }
                 }
-                .help("要求模型只輸出 JSON (response_format)。OpenAI 等支援的 provider 建議開啟；不支援的 endpoint 請關閉，否則可能回 400。關閉時仍會自動清洗 <think>、markdown 等雜訊。")
-
-                TextField("Keychain reference", text: stringBinding(
-                    get: { $0.providerConfig.apiKeyKeychainRef },
-                    set: { $0.providerConfig.apiKeyKeychainRef = $1 }
-                ))
-                SecureField("API key", text: $viewModel.apiKeyInput)
-
-                Button {
-                    viewModel.validateAndSaveProvider()
-                } label: {
-                    Label(viewModel.isValidatingProvider ? "驗證中..." : "驗證並儲存", systemImage: "checkmark.seal")
-                }
-                .disabled(viewModel.isValidatingProvider)
-                .help("驗證成功才會把 API key 存入 Keychain；失敗則不變更。")
 
                 if !viewModel.statusMessage.isEmpty {
-                    Text(viewModel.statusMessage)
-                        .font(.caption)
+                    Label(viewModel.statusMessage, systemImage: viewModel.isValidatingProvider || viewModel.isRefreshing ? "hourglass" : "info.circle")
+                        .font(.callout)
                         .foregroundStyle(.secondary)
                 }
-            }
 
-            Section("內容來源") {
-                TextEditor(text: stringBinding(
-                    get: { $0.defaultExtractionPrompt },
-                    set: { $0.defaultExtractionPrompt = $1 }
-                ))
-                .frame(height: 72)
-
-                LabeledContent("新增網址") {
-                    HStack {
-                        TextField("", text: $viewModel.newSourceURL)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(maxWidth: .infinity)
-                        Button {
-                            viewModel.addSource()
-                        } label: {
-                            Image(systemName: "plus")
-                        }
-                        .disabled(viewModel.newSourceURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    }
+                settingsBox("顯示") {
+                    Stepper("顯示頻率：\(viewModel.snapshot.settings.displayIntervalMinutes) 分鐘", value: binding(\.displayIntervalMinutes), in: 1...1440)
+                    Stepper("停留秒數：\(viewModel.snapshot.settings.visibleDurationSeconds) 秒", value: binding(\.visibleDurationSeconds), in: 3...300)
+                    Stepper("爬文頻率：\(viewModel.snapshot.settings.crawlIntervalHours) 小時", value: binding(\.crawlIntervalHours), in: 1...168)
                 }
-                .help("例如：https://example.com/article")
 
-                ForEach(viewModel.snapshot.sources) { source in
-                    HStack {
-                        Toggle("", isOn: toggleBinding(source))
-                            .labelsHidden()
-                        VStack(alignment: .leading) {
-                            Text(source.url.absoluteString).lineLimit(1)
-                            if let error = source.lastError {
-                                Text(error).font(.caption).foregroundStyle(.red)
-                            } else if let date = source.lastFetchedAt {
-                                Text(date.formatted()).font(.caption).foregroundStyle(.secondary)
+                settingsBox("AI Provider") {
+                    labeledRow("Provider") {
+                        Picker("", selection: providerPresetBinding()) {
+                            ForEach(ProviderPreset.allCases) { preset in
+                                Text(preset.displayName).tag(preset)
                             }
                         }
-                        Spacer()
-                        Button {
-                            viewModel.removeSource(source)
-                        } label: {
-                            Image(systemName: "trash")
+                        .labelsHidden()
+                    }
+
+                    labeledRow("Base URL") {
+                        TextField("", text: stringBinding(
+                            get: { $0.providerConfig.baseURL.absoluteString },
+                            set: { settings, value in
+                                if let url = URL(string: value) {
+                                    settings.providerConfig.baseURL = url
+                                }
+                            }
+                        ))
+                        .textFieldStyle(.roundedBorder)
+                    }
+
+                    labeledRow("Model") {
+                        Picker("", selection: stringBinding(
+                            get: { $0.providerConfig.model },
+                            set: { $0.providerConfig.model = $1 }
+                        )) {
+                            ForEach(viewModel.availableModels, id: \.self) { model in
+                                Text(model).tag(model)
+                            }
                         }
+                        .labelsHidden()
+                    }
+
+                    labeledRow("JSON 格式輸出") {
+                        Picker("", selection: structuredOutputBinding()) {
+                            ForEach(StructuredOutputMode.allCases) { mode in
+                                Text(mode.displayName).tag(mode)
+                            }
+                        }
+                        .labelsHidden()
+                        .help("要求模型只輸出 JSON (response_format)。OpenAI 等支援的 provider 建議開啟；不支援的 endpoint 請關閉，否則可能回 400。關閉時仍會自動清洗 <think>、markdown 等雜訊。")
+                    }
+
+                    labeledRow("Keychain reference") {
+                        TextField("", text: stringBinding(
+                            get: { $0.providerConfig.apiKeyKeychainRef },
+                            set: { $0.providerConfig.apiKeyKeychainRef = $1 }
+                        ))
+                        .textFieldStyle(.roundedBorder)
+                    }
+
+                    labeledRow("API key") {
+                        SecureField("", text: $viewModel.apiKeyInput)
+                            .textFieldStyle(.roundedBorder)
+                    }
+
+                    Button {
+                        viewModel.validateAndSaveProvider()
+                    } label: {
+                        Label(viewModel.isValidatingProvider ? "驗證中..." : "驗證並儲存", systemImage: "checkmark.seal")
+                    }
+                    .disabled(viewModel.isValidatingProvider)
+                    .help("驗證成功才會把 API key 存入 Keychain；失敗則不變更。")
+                }
+
+                settingsBox("資料庫") {
+                    Button {
+                        viewModel.exportDatabase()
+                    } label: {
+                        Label("匯出 SQLite DB", systemImage: "square.and.arrow.down")
                     }
                 }
-            }
 
-            HStack {
-                Button {
-                    viewModel.refreshNow()
-                } label: {
-                    Label(viewModel.isRefreshing ? "更新中..." : "手動更新", systemImage: "arrow.clockwise")
+                settingsBox("AI Log") {
+                    Button {
+                        viewModel.openAIRequestLog()
+                    } label: {
+                        Label("在 Finder 顯示 AI Log", systemImage: "folder")
+                    }
+                    Text(AIRequestLogStore.logFileURL.path)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
                 }
-                .disabled(viewModel.isRefreshing)
-            }
 
-            Section("資料庫") {
-                Button {
-                    viewModel.exportDatabase()
-                } label: {
-                    Label("匯出 SQLite DB", systemImage: "square.and.arrow.down")
-                }
-            }
-
-            Section("AI Log") {
-                Button {
-                    viewModel.openAIRequestLog()
-                } label: {
-                    Label("開啟 AI Log", systemImage: "doc.text.magnifyingglass")
-                }
-                Text(AIRequestLogStore.logFileURL.path)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-            }
-
-            Section {
                 Button(role: .destructive) {
                     viewModel.quitApp()
                 } label: {
                     Label("結束程式", systemImage: "power")
                 }
             }
+            .padding()
         }
-        .formStyle(.grouped)
-        .padding()
+        .frame(width: 520, height: 560)
+    }
+
+    private var canAddSource: Bool {
+        !viewModel.newSourceURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var webSources: [Source] {
+        viewModel.snapshot.sources.filter { !AISource.isSentinelSource($0) }
+    }
+
+    private func addSourceAndRefocus() {
+        viewModel.addSource()
+        isSourceURLFocused = true
+    }
+
+    private func sourceURLBinding(_ source: Source) -> Binding<String> {
+        Binding(
+            get: { editingSourceURLs[source.id] ?? source.url.absoluteString },
+            set: { editingSourceURLs[source.id] = $0 }
+        )
+    }
+
+    private func commitSourceURL(_ source: Source) {
+        guard let edited = editingSourceURLs[source.id] else { return }
+        if viewModel.updateSourceURL(source, to: edited) {
+            editingSourceURLs[source.id] = nil
+        }
+    }
+
+    private func settingsBox<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                content()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } label: {
+            Text(title)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func labeledRow<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(alignment: .center, spacing: 10) {
+            Text(label)
+                .foregroundStyle(.secondary)
+                .frame(width: 120, alignment: .leading)
+            content()
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     private func binding(_ keyPath: WritableKeyPath<AppSettings, Int>) -> Binding<Int> {
@@ -911,6 +1052,36 @@ struct AIArticleView: View {
 
     private let levelOrder: [JLPTLevel] = [.n1, .n2, .n3, .n4, .n5, .unknown]
 
+    // Calendar 慣例：1 = 週日 … 7 = 週六。從週一開始排列較符合習慣。
+    private let weekdayOrder: [Int] = [2, 3, 4, 5, 6, 7, 1]
+
+    private func weekdaySymbol(_ weekday: Int) -> String {
+        let symbols = ["日", "一", "二", "三", "四", "五", "六"]
+        let index = max(1, min(7, weekday)) - 1
+        return "週" + symbols[index]
+    }
+
+    private var scheduleTimeBinding: Binding<Date> {
+        Binding(
+            get: {
+                let settings = viewModel.snapshot.settings
+                return Calendar.current.date(
+                    bySettingHour: settings.aiArticleScheduleHour,
+                    minute: settings.aiArticleScheduleMinute,
+                    second: 0,
+                    of: Date()
+                ) ?? Date()
+            },
+            set: { newValue in
+                let components = Calendar.current.dateComponents([.hour, .minute], from: newValue)
+                viewModel.setAIArticleScheduleTime(
+                    hour: components.hour ?? 9,
+                    minute: components.minute ?? 0
+                )
+            }
+        )
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
@@ -924,20 +1095,46 @@ struct AIArticleView: View {
 
             GroupBox("自動排程") {
                 VStack(alignment: .leading, spacing: 10) {
-                    Toggle("啟用週期產生", isOn: Binding(
+                    Toggle("啟用排程產生", isOn: Binding(
                         get: { viewModel.snapshot.settings.aiArticleEnabled },
                         set: { viewModel.setAIArticleEnabled($0) }
                     ))
 
-                    Stepper(
-                        "週期：\(viewModel.snapshot.settings.aiArticleIntervalHours) 小時",
-                        value: Binding(
-                            get: { viewModel.snapshot.settings.aiArticleIntervalHours },
-                            set: { viewModel.setAIArticleIntervalHours($0) }
-                        ),
-                        in: 1...168
-                    )
+                    HStack {
+                        Text("時間")
+                            .foregroundStyle(.secondary)
+                        DatePicker(
+                            "",
+                            selection: scheduleTimeBinding,
+                            displayedComponents: .hourAndMinute
+                        )
+                        .labelsHidden()
+                        .datePickerStyle(.stepperField)
+                    }
                     .disabled(!viewModel.snapshot.settings.aiArticleEnabled)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("星期")
+                            .foregroundStyle(.secondary)
+                        let selectedWeekdays = Set(viewModel.snapshot.settings.aiArticleWeekdays)
+                        FlowLayout(spacing: 6) {
+                            ForEach(weekdayOrder, id: \.self) { weekday in
+                                WeekdayChip(
+                                    title: weekdaySymbol(weekday),
+                                    isSelected: selectedWeekdays.contains(weekday)
+                                ) {
+                                    viewModel.toggleAIArticleWeekday(weekday)
+                                }
+                            }
+                        }
+                    }
+                    .disabled(!viewModel.snapshot.settings.aiArticleEnabled)
+
+                    if viewModel.snapshot.settings.aiArticleWeekdays.isEmpty {
+                        Text("尚未選擇任何星期，排程不會觸發。")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                    }
                 }
             }
 
@@ -1055,6 +1252,28 @@ struct LevelChip: View {
     var body: some View {
         Button(action: action) {
             Text(level.rawValue)
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(isSelected ? Color.accentColor.opacity(0.2) : Color.gray.opacity(0.12))
+                .foregroundColor(isSelected ? .accentColor : .primary)
+                .clipShape(Capsule())
+                .overlay(
+                    Capsule().stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+struct WeekdayChip: View {
+    let title: String
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
                 .font(.caption.weight(.semibold))
                 .padding(.horizontal, 10)
                 .padding(.vertical, 4)

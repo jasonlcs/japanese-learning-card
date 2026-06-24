@@ -90,7 +90,16 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         let data = try await performLoggedRequest(request, operation: "generateCards", model: settings.providerConfig.model)
         Self.debugLog("回應原始 body：\n\(String(decoding: data, as: UTF8.self))")
         let content = try Self.extractContent(from: data)
-        return try Self.decodeCards(from: content, sourceURL: document.url)
+        let cards = try Self.decodeCards(from: content, sourceURL: document.url)
+        await AIRequestLogStore.shared.appendEvent(
+            "llm.decode.completed",
+            operation: "generateCards",
+            output: [
+                "sourceURL": document.url.absoluteString,
+                "cardCount": "\(cards.count)"
+            ]
+        )
+        return cards
     }
 
     public func generateQuiz(cards: [LearningCard], settings: AppSettings) async throws -> [QuizQuestion] {
@@ -117,7 +126,13 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         let data = try await performLoggedRequest(request, operation: "generateQuiz", model: settings.providerConfig.model)
         Self.debugLog("回應原始 body：\n\(String(decoding: data, as: UTF8.self))")
         let content = try Self.extractContent(from: data)
-        return try Self.decodeQuiz(from: content, cards: cards)
+        let quizzes = try Self.decodeQuiz(from: content, cards: cards)
+        await AIRequestLogStore.shared.appendEvent(
+            "llm.decode.completed",
+            operation: "generateQuiz",
+            output: ["quizCount": "\(quizzes.count)"]
+        )
+        return quizzes
     }
 
     public func generateExampleReading(exampleJa: String, settings: AppSettings) async throws -> String {
@@ -157,7 +172,13 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         let data = try await performLoggedRequest(request, operation: "generateExampleReading", model: settings.providerConfig.model)
         Self.debugLog("回應原始 body：\n\(String(decoding: data, as: UTF8.self))")
         let content = try Self.extractContent(from: data)
-        return try Self.decodeExampleReading(from: content)
+        let reading = try Self.decodeExampleReading(from: content)
+        await AIRequestLogStore.shared.appendEvent(
+            "llm.decode.completed",
+            operation: "generateExampleReading",
+            output: ["exampleReading": reading]
+        )
+        return reading
     }
 
     public func generateArticle(theme: String, jlptLevels: [JLPTLevel], settings: AppSettings) async throws -> AIArticleDraft {
@@ -185,7 +206,17 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         let data = try await performLoggedRequest(request, operation: "generateArticle", model: settings.providerConfig.model)
         Self.debugLog("article 回應原始 body：\n\(String(decoding: data, as: UTF8.self))")
         let content = try Self.extractContent(from: data)
-        return try Self.decodeArticle(from: content, fallbackTheme: theme)
+        let draft = try Self.decodeArticle(from: content, fallbackTheme: theme)
+        await AIRequestLogStore.shared.appendEvent(
+            "llm.decode.completed",
+            operation: "generateArticle",
+            output: [
+                "theme": draft.theme,
+                "title": draft.title,
+                "textCharacters": "\(draft.text.count)"
+            ]
+        )
+        return draft
     }
 
     /// 解析 provider 的外層回應並取出 message.content；失敗時印出原始 body 方便除錯。
@@ -232,7 +263,13 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         let data = try await performLoggedRequest(request, operation: "listModels", model: settings.providerConfig.model)
 
         let decoded = try JSONDecoder().decode(ModelsResponse.self, from: data)
-        return decoded.data.map(\.id).sorted()
+        let models = decoded.data.map(\.id).sorted()
+        await AIRequestLogStore.shared.appendEvent(
+            "llm.decode.completed",
+            operation: "listModels",
+            output: ["modelCount": "\(models.count)"]
+        )
+        return models
     }
 
     private func performLoggedRequest(_ request: URLRequest, operation: String, model: String) async throws -> Data {
@@ -240,6 +277,12 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         request.timeoutInterval = Self.providerRequestTimeout
         let startedAt = Date()
         let requestBytes = request.httpBody?.count ?? 0
+        await Self.logRequestStart(
+            operation: operation,
+            request: request,
+            model: model,
+            requestBytes: requestBytes
+        )
 
         let data: Data
         let response: URLResponse
@@ -488,8 +531,12 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         let usage = decodeUsage(from: responseData)
         let completionTokens = usage?.completionTokens
         let entry = AIRequestLogEntry(
+            event: errorSummary == nil ? "llm.request.completed" : "llm.request.failed",
             operation: operation,
             endpoint: sanitizedEndpoint(for: request.url),
+            requestMethod: request.httpMethod,
+            requestHeaders: sanitizedHeaders(from: request),
+            responseBody: bodyString(from: responseData),
             model: model,
             statusCode: statusCode,
             durationMilliseconds: Int((duration * 1000).rounded()),
@@ -506,11 +553,57 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         await AIRequestLogStore.shared.append(entry)
     }
 
+    private static func logRequestStart(
+        operation: String,
+        request: URLRequest,
+        model: String,
+        requestBytes: Int
+    ) async {
+        let entry = AIRequestLogEntry(
+            event: "llm.request.start",
+            operation: operation,
+            endpoint: sanitizedEndpoint(for: request.url),
+            requestMethod: request.httpMethod,
+            requestHeaders: sanitizedHeaders(from: request),
+            requestBody: bodyString(from: request.httpBody ?? Data()),
+            model: model,
+            requestBytes: requestBytes,
+            timeoutSeconds: Int(request.timeoutInterval.rounded())
+        )
+        await AIRequestLogStore.shared.append(entry)
+    }
+
     private static func sanitizedEndpoint(for url: URL?) -> String {
         guard let url else { return "" }
         var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         components?.query = nil
         return components?.url?.absoluteString ?? url.absoluteString
+    }
+
+    private static func sanitizedHeaders(from request: URLRequest) -> [String: String] {
+        let sensitiveHeaders = [
+            "authorization",
+            "proxy-authorization",
+            "x-api-key",
+            "api-key",
+            "openai-organization",
+            "openai-project"
+        ]
+        return (request.allHTTPHeaderFields ?? [:]).reduce(into: [:]) { result, pair in
+            if sensitiveHeaders.contains(pair.key.lowercased()) {
+                result[pair.key] = "<redacted>"
+            } else {
+                result[pair.key] = pair.value
+            }
+        }
+    }
+
+    private static func bodyString(from data: Data) -> String? {
+        guard !data.isEmpty else { return nil }
+        let raw = String(decoding: data, as: UTF8.self)
+        let maxCharacters = 200_000
+        guard raw.count > maxCharacters else { return raw }
+        return String(raw.prefix(maxCharacters)) + "\n...[truncated \(raw.count - maxCharacters) characters]"
     }
 
     private static func decodeUsage(from data: Data) -> ChatCompletionResponse.Usage? {

@@ -87,11 +87,24 @@ public actor AppStore {
     }
 
     public func ensureAISentinelSource(extractionPrompt: String) {
-        guard !snapshot.sources.contains(where: { $0.id == AISource.sentinelSourceId }) else { return }
+        if let index = snapshot.sources.firstIndex(where: AISource.isSentinelSource) {
+            let existing = snapshot.sources[index]
+            snapshot.sources[index] = Source(
+                id: AISource.sentinelSourceId,
+                url: AISource.sentinelURL,
+                isEnabled: false,
+                extractionPrompt: extractionPrompt.isEmpty ? existing.extractionPrompt : extractionPrompt,
+                lastFetchedAt: existing.lastFetchedAt,
+                lastError: nil
+            )
+            try? persist()
+            return
+        }
+
         let source = Source(
             id: AISource.sentinelSourceId,
             url: AISource.sentinelURL,
-            isEnabled: true,
+            isEnabled: false,
             extractionPrompt: extractionPrompt
         )
         snapshot.sources.append(source)

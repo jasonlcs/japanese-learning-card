@@ -8,11 +8,13 @@ struct CoreChecks {
         try sourceValidatorBlocksSSRF()
         webCrawlerUsesCustomUserAgent()
         schedulerClampsIntervals()
+        schedulerComputesNextAIArticleFireDate()
         cardSelectorPrioritizesFreshThenOldestReviewingAndSkipsSkipped()
         htmlExtractorRemovesScriptsStylesTagsAndDecodesEntities()
         try openAICompatibleRequestAndCardDecoding()
         try exampleReadingDecoding()
         try await pipelineRefreshesEnabledSourcesWithMocks()
+        try await pipelineSkipsAISentinelWhenRefreshingSources()
         try await storePersistsQuizQuestions()
         try await storeMigratesLegacyDatabaseWhenNeeded()
         localDatabaseURLIsScopedByICloudIdentity()
@@ -74,6 +76,32 @@ struct CoreChecks {
         expect(policy.displayInterval(settings: settings) == 60, "display interval should clamp to 60 seconds")
         expect(policy.visibleDuration(settings: settings) == 3, "visible duration should clamp to 3 seconds")
         expect(policy.crawlInterval(settings: settings) == 3600, "crawl interval should clamp to 1 hour")
+    }
+
+    private static func schedulerComputesNextAIArticleFireDate() {
+        let policy = SchedulerPolicy()
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Taipei")!
+
+        // 2026-06-24 是星期三 (Calendar weekday 4)。
+        let now = calendar.date(from: DateComponents(year: 2026, month: 6, day: 24, hour: 8, minute: 0))!
+
+        // 今天稍晚的時刻、且今天有被選 → 應排在今天。
+        let todayLater = AppSettings(aiArticleScheduleHour: 21, aiArticleScheduleMinute: 30, aiArticleWeekdays: [4])
+        let fire1 = policy.nextAIArticleFireDate(settings: todayLater, after: now, calendar: calendar)
+        expect(fire1 != nil, "should find a fire date when today's weekday is selected and time is later")
+        let comps1 = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: fire1!)
+        expect(comps1.day == 24 && comps1.hour == 21 && comps1.minute == 30, "fire date should be today at the scheduled time")
+
+        // 今天較早的時刻已過 → 應跳到下一個被選的星期幾 (週五=6, 即 6/26)。
+        let timePassed = AppSettings(aiArticleScheduleHour: 7, aiArticleScheduleMinute: 0, aiArticleWeekdays: [6])
+        let fire2 = policy.nextAIArticleFireDate(settings: timePassed, after: now, calendar: calendar)!
+        let comps2 = calendar.dateComponents([.day, .hour], from: fire2)
+        expect(comps2.day == 26 && comps2.hour == 7, "fire date should roll to the next selected weekday")
+
+        // 沒有任何星期幾 → 不觸發。
+        let noDays = AppSettings(aiArticleWeekdays: [])
+        expect(policy.nextAIArticleFireDate(settings: noDays, after: now, calendar: calendar) == nil, "no weekdays should yield nil")
     }
 
     private static func cardSelectorPrioritizesFreshThenOldestReviewingAndSkipsSkipped() {
@@ -170,6 +198,35 @@ struct CoreChecks {
         expect(snapshot.cards[0].word == "電車", "mock card should be stored")
         expect(snapshot.sources[0].lastError == nil, "source should have no error")
         expect(snapshot.sources[0].lastFetchedAt != nil, "source fetch date should be set")
+    }
+
+    private static func pipelineSkipsAISentinelWhenRefreshingSources() async throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("store.json")
+        let store = await AppStore(fileURL: fileURL)
+        let sentinel = Source(
+            id: AISource.sentinelSourceId,
+            url: AISource.sentinelURL,
+            isEnabled: true,
+            extractionPrompt: AISource.sentinelExtractionPrompt
+        )
+        try await store.update { state in
+            state.sources = [sentinel]
+        }
+
+        let pipeline = LearningPipeline(
+            store: store,
+            crawler: FailingCrawler(),
+            llmClient: MockLLMClient(cardURL: AISource.sentinelURL)
+        )
+
+        await pipeline.refreshEnabledSources()
+        let snapshot = await store.read()
+
+        expect(snapshot.documents.isEmpty, "AI sentinel should not be crawled as a web source")
+        expect(snapshot.cards.isEmpty, "AI sentinel should not generate cards during source refresh")
+        expect(snapshot.sources[0].lastError == nil, "AI sentinel should not receive a crawler error during source refresh")
     }
 
     private static func storePersistsQuizQuestions() async throws {
@@ -492,6 +549,12 @@ private struct MockCrawler: Crawling {
 
     func crawl(source: Source) async throws -> CrawledDocument {
         document
+    }
+}
+
+private struct FailingCrawler: Crawling {
+    func crawl(source: Source) async throws -> CrawledDocument {
+        throw NSError(domain: "FailingCrawler", code: 1)
     }
 }
 

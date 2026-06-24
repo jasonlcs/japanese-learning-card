@@ -28,7 +28,7 @@ final class AppViewModel: ObservableObject {
     private let providerClient: OpenAICompatibleLLMClient
     private let schedulerPolicy = SchedulerPolicy()
     private let cardSelector = CardSelector()
-    private lazy var pipeline = LearningPipeline(store: store)
+    private lazy var pipeline = LearningPipeline(store: store, crawler: BrowserFallbackCrawler())
     private var displayTimer: Timer?
     private var crawlTimer: Timer?
     private var aiArticleTimer: Timer?
@@ -169,6 +169,25 @@ final class AppViewModel: ObservableObject {
         updateSettings(settings)
     }
 
+    func setAIArticleScheduleTime(hour: Int, minute: Int) {
+        var settings = snapshot.settings
+        settings.aiArticleScheduleHour = AppSettings.clampHour(hour)
+        settings.aiArticleScheduleMinute = AppSettings.clampMinute(minute)
+        updateSettings(settings)
+    }
+
+    func toggleAIArticleWeekday(_ weekday: Int) {
+        var settings = snapshot.settings
+        var weekdays = Set(settings.aiArticleWeekdays)
+        if weekdays.contains(weekday) {
+            weekdays.remove(weekday)
+        } else {
+            weekdays.insert(weekday)
+        }
+        settings.aiArticleWeekdays = AppSettings.normalizeWeekdays(Array(weekdays))
+        updateSettings(settings)
+    }
+
     func setAIArticleCustomTheme(_ theme: String) {
         aiArticleCustomTheme = theme
         var settings = snapshot.settings
@@ -200,6 +219,35 @@ final class AppViewModel: ObservableObject {
         storeUpdate { state in
             state.sources.removeAll { $0.id == source.id }
         }
+    }
+
+    /// 更新既有來源的網址；格式錯誤或重複時回傳 false 並設定 statusMessage。
+    @discardableResult
+    func updateSourceURL(_ source: Source, to rawURL: String) -> Bool {
+        let trimmed = rawURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed != source.url.absoluteString else { return true }
+        guard let url = URL(string: trimmed) else {
+            statusMessage = "網址格式不正確"
+            return false
+        }
+        do {
+            try SourceValidator().validate(url)
+        } catch {
+            statusMessage = error.localizedDescription
+            return false
+        }
+        if snapshot.sources.contains(where: { $0.id != source.id && $0.url == url }) {
+            statusMessage = "已有相同網址的來源"
+            return false
+        }
+        storeUpdate { state in
+            if let index = state.sources.firstIndex(where: { $0.id == source.id }) {
+                state.sources[index].url = url
+                state.sources[index].lastError = nil
+            }
+        }
+        statusMessage = "已更新網址"
+        return true
     }
 
     func toggleSource(_ source: Source) {
@@ -384,7 +432,14 @@ final class AppViewModel: ObservableObject {
     }
 
     func quitApp() {
-        NSApp.terminate(nil)
+        displayTimer?.invalidate()
+        crawlTimer?.invalidate()
+        aiArticleTimer?.invalidate()
+        autoCloseTask?.cancel()
+        requestClosePopover?()
+        DispatchQueue.main.async {
+            NSApp.terminate(nil)
+        }
     }
 
     func exportDatabase() {
@@ -419,8 +474,8 @@ final class AppViewModel: ObservableObject {
             do {
                 let logURL = try await AIRequestLogStore.shared.ensureLogFile()
                 await MainActor.run {
-                    NSWorkspace.shared.open(logURL)
-                    self.statusMessage = "已開啟 AI log：\(logURL.lastPathComponent)"
+                    NSWorkspace.shared.activateFileViewerSelecting([logURL])
+                    self.statusMessage = "已在 Finder 顯示 AI log：\(logURL.lastPathComponent)"
                 }
             } catch {
                 await MainActor.run {
@@ -517,10 +572,22 @@ final class AppViewModel: ObservableObject {
             Task { @MainActor in self?.refreshNow() }
         }
 
-        if snapshot.settings.aiArticleEnabled {
-            let interval = max(1, snapshot.settings.aiArticleIntervalHours) * 60 * 60
-            aiArticleTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(interval), repeats: true) { [weak self] _ in
-                Task { @MainActor in self?.generateAIArticleNow() }
+        scheduleNextAIArticleTimer()
+    }
+
+    /// 依排程時間 / 星期幾安排下一次觸發。觸發後會自行重新排程下一輪。
+    private func scheduleNextAIArticleTimer() {
+        aiArticleTimer?.invalidate()
+        aiArticleTimer = nil
+
+        guard snapshot.settings.aiArticleEnabled else { return }
+        guard let fireDate = schedulerPolicy.nextAIArticleFireDate(settings: snapshot.settings) else { return }
+
+        let interval = max(1, fireDate.timeIntervalSinceNow)
+        aiArticleTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                self?.generateAIArticleNow()
+                self?.scheduleNextAIArticleTimer()
             }
         }
     }

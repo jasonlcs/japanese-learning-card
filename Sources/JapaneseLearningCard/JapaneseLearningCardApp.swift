@@ -52,6 +52,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             viewModel.start()
         }
     }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        .terminateNow
+    }
 }
 
 @MainActor
@@ -74,7 +78,7 @@ final class MenuBarController: NSObject {
 
         popover.behavior = .transient
         popover.delegate = self
-        popover.contentSize = NSSize(width: 420, height: 560)
+        popover.contentSize = NSSize(width: 520, height: 560)
         popover.appearance = NSAppearance(named: .aqua)
         popover.contentViewController = NSHostingController(rootView: RootView(viewModel: viewModel))
 

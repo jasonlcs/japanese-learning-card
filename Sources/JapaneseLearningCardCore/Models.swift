@@ -77,6 +77,10 @@ public enum AISource {
     public static func makeExtractionPrompt(theme: String, levels: String) -> String {
         String(format: sentinelExtractionPrompt, theme, levels)
     }
+
+    public static func isSentinelSource(_ source: Source) -> Bool {
+        source.id == sentinelSourceId || source.url == sentinelURL
+    }
 }
 
 public enum VerbFormType: String, Codable, CaseIterable, Identifiable, Sendable {
@@ -386,6 +390,12 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var providerConfig: ProviderConfig
     public var aiArticleEnabled: Bool
     public var aiArticleIntervalHours: Int
+    /// 排程時間（時，0...23），搭配 aiArticleWeekdays 決定每日觸發時刻。
+    public var aiArticleScheduleHour: Int
+    /// 排程時間（分，0...59）。
+    public var aiArticleScheduleMinute: Int
+    /// 觸發的星期幾，使用 Calendar 慣例（1 = 週日 … 7 = 週六）。空陣列代表不觸發。
+    public var aiArticleWeekdays: [Int]
     public var aiArticleLevels: [JLPTLevel]
     public var aiArticleCustomTheme: String
 
@@ -397,6 +407,9 @@ public struct AppSettings: Codable, Equatable, Sendable {
         providerConfig: ProviderConfig = ProviderConfig(),
         aiArticleEnabled: Bool = false,
         aiArticleIntervalHours: Int = 12,
+        aiArticleScheduleHour: Int = 9,
+        aiArticleScheduleMinute: Int = 0,
+        aiArticleWeekdays: [Int] = [1, 2, 3, 4, 5, 6, 7],
         aiArticleLevels: [JLPTLevel] = JLPTLevel.allCases,
         aiArticleCustomTheme: String = ""
     ) {
@@ -407,8 +420,18 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.providerConfig = providerConfig
         self.aiArticleEnabled = aiArticleEnabled
         self.aiArticleIntervalHours = aiArticleIntervalHours
+        self.aiArticleScheduleHour = AppSettings.clampHour(aiArticleScheduleHour)
+        self.aiArticleScheduleMinute = AppSettings.clampMinute(aiArticleScheduleMinute)
+        self.aiArticleWeekdays = AppSettings.normalizeWeekdays(aiArticleWeekdays)
         self.aiArticleLevels = aiArticleLevels.isEmpty ? JLPTLevel.allCases : aiArticleLevels
         self.aiArticleCustomTheme = aiArticleCustomTheme
+    }
+
+    public static func clampHour(_ value: Int) -> Int { min(23, max(0, value)) }
+    public static func clampMinute(_ value: Int) -> Int { min(59, max(0, value)) }
+    /// 去重、過濾無效值並排序，星期幾以 Calendar 慣例（1...7）表示。
+    public static func normalizeWeekdays(_ values: [Int]) -> [Int] {
+        Array(Set(values.filter { (1...7).contains($0) })).sorted()
     }
 
     public init(from decoder: Decoder) throws {
@@ -420,6 +443,9 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.providerConfig = try container.decodeIfPresent(ProviderConfig.self, forKey: .providerConfig) ?? ProviderConfig()
         self.aiArticleEnabled = try container.decodeIfPresent(Bool.self, forKey: .aiArticleEnabled) ?? false
         self.aiArticleIntervalHours = try container.decodeIfPresent(Int.self, forKey: .aiArticleIntervalHours) ?? 12
+        self.aiArticleScheduleHour = AppSettings.clampHour(try container.decodeIfPresent(Int.self, forKey: .aiArticleScheduleHour) ?? 9)
+        self.aiArticleScheduleMinute = AppSettings.clampMinute(try container.decodeIfPresent(Int.self, forKey: .aiArticleScheduleMinute) ?? 0)
+        self.aiArticleWeekdays = AppSettings.normalizeWeekdays(try container.decodeIfPresent([Int].self, forKey: .aiArticleWeekdays) ?? [1, 2, 3, 4, 5, 6, 7])
         let decodedLevels = try container.decodeIfPresent([JLPTLevel].self, forKey: .aiArticleLevels) ?? JLPTLevel.allCases
         self.aiArticleLevels = decodedLevels.isEmpty ? JLPTLevel.allCases : decodedLevels
         self.aiArticleCustomTheme = try container.decodeIfPresent(String.self, forKey: .aiArticleCustomTheme) ?? ""
