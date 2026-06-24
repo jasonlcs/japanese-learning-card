@@ -225,7 +225,7 @@ struct CoreChecks {
         expect(snapshot.sources.first?.url == source.url, "computer B's source URL should survive computer A's update")
     }
 
-
+    private static func storeReloadsFromDiskWhenDatabaseChangesExternally() async throws {
         let fileURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
             .appendingPathComponent("store.sqlite")
