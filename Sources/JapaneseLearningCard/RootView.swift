@@ -669,6 +669,7 @@ struct HistoryView: View {
     enum HistoryMode: String, CaseIterable, Identifiable {
         case articles = "AI 文章"
         case cards = "複習卡片"
+        case quizzes = "考試紀錄"
         var id: String { rawValue }
     }
 
@@ -678,6 +679,27 @@ struct HistoryView: View {
         viewModel.snapshot.cards
             .filter { $0.lastShownAt != nil }
             .sorted { ($0.lastShownAt ?? .distantPast) > ($1.lastShownAt ?? .distantPast) }
+    }
+
+    private var completedQuizzes: [QuizQuestion] {
+        viewModel.snapshot.quizzes
+            .filter { $0.status != .pending }
+            .sorted { ($0.answeredAt ?? $0.createdAt) > ($1.answeredAt ?? $1.createdAt) }
+    }
+
+    private var quizCorrectCount: Int {
+        completedQuizzes.filter { $0.status == .correct }.count
+    }
+
+    private var quizIncorrectCount: Int {
+        completedQuizzes.filter { $0.status == .incorrect }.count
+    }
+
+    private var quizAccuracyText: String {
+        let answeredCount = quizCorrectCount + quizIncorrectCount
+        guard answeredCount > 0 else { return "尚無答題結果" }
+        let accuracy = Double(quizCorrectCount) / Double(answeredCount) * 100
+        return "\(Int(accuracy.rounded()))%"
     }
 
     var body: some View {
@@ -693,6 +715,8 @@ struct HistoryView: View {
                 articleList
             case .cards:
                 cardList
+            case .quizzes:
+                quizList
             }
         }
         .sheet(item: $selectedArticle) { article in
@@ -766,6 +790,118 @@ struct HistoryView: View {
                 ContentUnavailableView("還沒有複習紀錄", systemImage: "clock")
             }
         }
+    }
+
+    private var quizList: some View {
+        List {
+            if !completedQuizzes.isEmpty {
+                Section {
+                    HStack {
+                        QuizSummaryTile(title: "累積", value: "\(completedQuizzes.count)")
+                        QuizSummaryTile(title: "答對", value: "\(quizCorrectCount)")
+                        QuizSummaryTile(title: "答錯", value: "\(quizIncorrectCount)")
+                        QuizSummaryTile(title: "正確率", value: quizAccuracyText)
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+
+            Section {
+                ForEach(completedQuizzes) { quiz in
+                    DisclosureGroup {
+                        VStack(alignment: .leading, spacing: 8) {
+                            if let selectedAnswer = quiz.selectedAnswer {
+                                LabeledContent("你的答案", value: selectedAnswer)
+                            }
+                            LabeledContent("正解", value: quiz.correctAnswer)
+                            Text(quiz.explanationZh)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .font(.caption)
+                        .padding(.top, 6)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack {
+                                Label(quizResultText(quiz), systemImage: quizResultIcon(quiz))
+                                    .foregroundStyle(quizResultColor(quiz))
+                                Spacer()
+                                Text((quiz.answeredAt ?? quiz.createdAt).formatted(date: .numeric, time: .shortened))
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Text(quiz.sourceWord)
+                                .font(.headline)
+                            Text(quiz.question)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                    }
+                    .padding(.vertical, 3)
+                }
+            }
+        }
+        .overlay {
+            if completedQuizzes.isEmpty {
+                ContentUnavailableView("還沒有考試紀錄", systemImage: "checkmark.seal")
+            }
+        }
+    }
+
+    private func quizResultText(_ quiz: QuizQuestion) -> String {
+        switch quiz.status {
+        case .correct:
+            return "答對"
+        case .incorrect:
+            return "答錯"
+        case .skipped:
+            return "略過"
+        case .pending:
+            return "未作答"
+        }
+    }
+
+    private func quizResultIcon(_ quiz: QuizQuestion) -> String {
+        switch quiz.status {
+        case .correct:
+            return "checkmark.circle.fill"
+        case .incorrect:
+            return "xmark.circle.fill"
+        case .skipped:
+            return "forward.circle"
+        case .pending:
+            return "circle"
+        }
+    }
+
+    private func quizResultColor(_ quiz: QuizQuestion) -> Color {
+        switch quiz.status {
+        case .correct:
+            return .green
+        case .incorrect:
+            return .red
+        case .skipped:
+            return .secondary
+        case .pending:
+            return .secondary
+        }
+    }
+}
+
+private struct QuizSummaryTile: View {
+    var title: String
+    var value: String
+
+    var body: some View {
+        VStack(spacing: 3) {
+            Text(value)
+                .font(.headline)
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
     }
 }
 
