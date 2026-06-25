@@ -69,6 +69,16 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "✅ 版本設為 $VERSION（取自 tag $GITHUB_REF_NAME）"
 
+      - name: Inject Sparkle public key
+        run: |
+          PUBKEY="${{ secrets.SPARKLE_PUBLIC_KEY }}"
+          if [ -z "$PUBKEY" ]; then
+            echo "⚠️ 未設定 SPARKLE_PUBLIC_KEY secret，自動更新驗證將失效（沿用 placeholder）"
+            exit 0
+          fi
+          /usr/libexec/PlistBuddy -c "Set SUPublicEDKey $PUBKEY" Sources/JapaneseLearningCard/Info.plist
+          echo "✅ 已注入 Sparkle 公鑰"
+
       - name: Setup provisioning profile
         if: ${{ env.SIGNING_IDENTITY != '' }}
         run: |
@@ -118,6 +128,48 @@ jobs:
           name: "v${{ steps.version.outputs.version }}"
           files: .build/app/JapaneseLearningCard.dmg
           generate_release_notes: true
+
+      - name: Generate and publish Sparkle appcast
+        if: ${{ env.SIGNING_IDENTITY != '' }}
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
+            echo "⚠️ 未設定 SPARKLE_PRIVATE_KEY secret，略過 appcast 產生（無法自動更新）"
+            exit 0
+          fi
+
+          SPARKLE_VER="2.9.3"
+          REPO="${{ github.repository }}"
+          TAG="${{ github.ref_name }}"
+
+          echo "▸ 下載 Sparkle ${SPARKLE_VER} 工具..."
+          curl -fsSL "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VER}/Sparkle-${SPARKLE_VER}.tar.xz" -o sparkle.tar.xz
+          mkdir -p sparkle-tools && tar -xf sparkle.tar.xz -C sparkle-tools
+          GEN="$(find sparkle-tools -name generate_appcast -type f | head -1)"
+
+          # 把這次的 DMG 放進 archive 目錄；若 gh-pages 已有舊 appcast 就拉下來合併。
+          mkdir -p appcast-work
+          cp ".build/app/JapaneseLearningCard.dmg" "appcast-work/"
+          curl -fsSL "https://${REPO%%/*}.github.io/${REPO#*/}/appcast.xml" -o "appcast-work/appcast.xml" || true
+
+          echo "$SPARKLE_PRIVATE_KEY" > sparkle_ed_key
+          "$GEN" \
+            --ed-key-file sparkle_ed_key \
+            --download-url-prefix "https://github.com/${REPO}/releases/download/${TAG}/" \
+            appcast-work
+          rm -f sparkle_ed_key
+
+          mkdir -p public && cp appcast-work/appcast.xml public/appcast.xml
+          echo "✅ appcast.xml 產生完成"
+
+      - name: Deploy appcast to GitHub Pages
+        if: ${{ env.SIGNING_IDENTITY != '' && hashFiles('public/appcast.xml') != '' }}
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
+          keep_files: true
 
       - name: Cleanup keychain
         if: always()

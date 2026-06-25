@@ -6,6 +6,8 @@
 	<string>JapaneseLearningCard</string>
 	<key>CFBundleExecutable</key>
 	<string>JapaneseLearningCard</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>io.github.jasonlcs.japaneselearningcard</string>
 	<key>CFBundleName</key>
@@ -22,5 +24,14 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 jasonlcs.</string>
+	<!-- Sparkle 自動更新 -->
+	<key>SUFeedURL</key>
+	<string>https://jasonlcs.github.io/japanese-learning-card/appcast.xml</string>
+	<!-- EdDSA 公鑰：用 Sparkle 的 generate_keys 產生後填入（見 RELEASE.md） -->
+	<key>SUPublicEDKey</key>
+	<string>MGtZxo5/+AyMl7xmYcg1TSk/tnoKr4HhAe/kcuHc41A=</string>
+	<!-- sandboxed app 需要啟用安裝器 XPC service 才能自動安裝 -->
+	<key>SUEnableInstallerLauncherService</key>
+	<true/>
 </dict>
 </plist>

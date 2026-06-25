@@ -15,8 +15,9 @@ DMG_FINAL="$BUILD_DIR/$DMG_NAME"
 echo "▸ 編譯 release binary..."
 # Developer ID 簽名 → 開 iCloud 同步 (會去 call CKContainer, 需要 restricted entitlement)
 # ad-hoc 簽名 → 關 iCloud (沒 entitlement 的話 CKContainer.__allocating_init 會被 amfi kill)
+SIGNING_IDENTITY="${SIGNING_IDENTITY:-}"
 SWIFT_FLAGS=""
-if [ -n "${SIGNING_IDENTITY:-}" ]; then
+if [ -n "$SIGNING_IDENTITY" ]; then
     SWIFT_FLAGS="-Xswiftc -DICLOUD_ENABLED"
 fi
 swift build -c release --product "$PRODUCT" $SWIFT_FLAGS
@@ -36,6 +37,16 @@ if [ -d "$RESOURCES" ] && [ "$(find "$RESOURCES" -type f | wc -l | tr -d ' ')" !
     cp -R "$RESOURCES"/. "$APP_BUNDLE/Contents/Resources/"
 fi
 
+# 內嵌 Sparkle.framework (app 內自動更新)。
+SPARKLE_FRAMEWORK="$BIN_PATH/Sparkle.framework"
+if [ -d "$SPARKLE_FRAMEWORK" ]; then
+    echo "▸ 內嵌 Sparkle.framework..."
+    mkdir -p "$APP_BUNDLE/Contents/Frameworks"
+    cp -RP "$SPARKLE_FRAMEWORK" "$APP_BUNDLE/Contents/Frameworks/"
+else
+    echo "⚠️ 找不到 Sparkle.framework ($SPARKLE_FRAMEWORK)，自動更新將無法運作"
+fi
+
 # Developer ID Provisioning Profile (for restricted entitlements like CloudKit)
 PROVISIONING_PROFILE="${PROVISIONING_PROFILE:-${PRODUCT}_DeveloperID.provisionprofile}"
 if [ -n "$SIGNING_IDENTITY" ] && [ -f "$PROVISIONING_PROFILE" ]; then
@@ -49,7 +60,6 @@ fi
 # - Developer ID 簽名 → 完整版, 含 com.apple.developer.icloud-* (restricted)
 # - ad-hoc 簽名 → 精簡版, 不放 restricted entitlements (AMFI 會拒絕執行)
 ENTITLEMENT_ARG=""
-SIGNING_IDENTITY="${SIGNING_IDENTITY:-}"
 if [ -n "$SIGNING_IDENTITY" ]; then
     if [ -f "$ENTITLEMENTS" ]; then
         ENTITLEMENT_ARG="--entitlements $ENTITLEMENTS"
@@ -64,17 +74,44 @@ else
     fi
 fi
 
+# 簽名 ID: Developer ID 或 ad-hoc ("-")。ad-hoc 不能 --timestamp。
 if [ -n "$SIGNING_IDENTITY" ]; then
-    echo "▸ 使用 Developer ID 簽名 app: $SIGNING_IDENTITY"
-    codesign --deep --force --options runtime --timestamp \
-        $ENTITLEMENT_ARG \
-        --sign "$SIGNING_IDENTITY" "$APP_BUNDLE"
+    SIGN_ID="$SIGNING_IDENTITY"
+    TS_FLAG="--timestamp"
+    echo "▸ 使用 Developer ID 簽名: $SIGN_ID"
 else
-    echo "▸ 用 ad-hoc 簽名 app (加 hardened runtime)..."
-    # ad-hoc 簽名不能帶 restricted entitlements (AMFI 會直接 kill),
-    # 所以 iCloud 相關 entitlement 拿掉, app 才能跑起來。
-    # 想跑 iCloud 同步要 Developer ID 簽名版本。
-    codesign --force --options runtime $ENTITLEMENT_ARG -s - "$APP_BUNDLE" 2>/dev/null || true
+    SIGN_ID="-"
+    TS_FLAG=""
+    echo "▸ 用 ad-hoc 簽名 (加 hardened runtime)..."
+fi
+
+# Sparkle 不能用 codesign --deep；nested 元件要由內往外個別簽。
+# XPC services / helper 各自帶了自己的 entitlements，用 --preserve-metadata
+# 保留，不要套 app 的 entitlements。
+SPARKLE_V="$APP_BUNDLE/Contents/Frameworks/Sparkle.framework/Versions/B"
+if [ -d "$SPARKLE_V" ]; then
+    echo "▸ 簽名 Sparkle 內嵌元件..."
+    for comp in \
+        "$SPARKLE_V/XPCServices/Downloader.xpc" \
+        "$SPARKLE_V/XPCServices/Installer.xpc" \
+        "$SPARKLE_V/Autoupdate" \
+        "$SPARKLE_V/Updater.app"; do
+        [ -e "$comp" ] || continue
+        codesign --force --options runtime $TS_FLAG \
+            --preserve-metadata=entitlements \
+            --sign "$SIGN_ID" "$comp"
+    done
+    codesign --force --options runtime $TS_FLAG \
+        --sign "$SIGN_ID" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
+fi
+
+echo "▸ 簽名 app (不使用 --deep)..."
+# ad-hoc 簽名不能帶 restricted entitlements (AMFI 會直接 kill),
+# 所以 ad-hoc entitlements 精簡版不含 iCloud。想跑 iCloud 同步要 Developer ID 版。
+codesign --force --options runtime $TS_FLAG $ENTITLEMENT_ARG \
+    --sign "$SIGN_ID" "$APP_BUNDLE"
+
+if [ -z "$SIGNING_IDENTITY" ]; then
     # 清掉 quarantine / provenance xattr, 這樣 spctl 才不會擋
     xattr -cr "$APP_BUNDLE" 2>/dev/null || true
 fi

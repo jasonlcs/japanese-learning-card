@@ -64,6 +64,10 @@ final class AppViewModel: ObservableObject {
     private var lastSnapshotDataVersion: Int64?
     var requestShowPopover: (() -> Void)?
     var requestClosePopover: (() -> Void)?
+    /// 使用者按「立即檢查更新」時呼叫，由 AppDelegate 接到 Sparkle。
+    var requestCheckForUpdates: (() -> Void)?
+    /// 「自動檢查更新」開關變動時呼叫，橋接到 Sparkle 的排程檢查。
+    var setAutomaticUpdateChecks: ((Bool) -> Void)?
 
     init(store: AppStore, secretStore: SecretStore = KeychainStore()) {
         self.store = store

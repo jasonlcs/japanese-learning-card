@@ -12,6 +12,9 @@ let package = Package(
         .executable(name: "JapaneseLearningCardCoreChecks", targets: ["JapaneseLearningCardCoreChecks"]),
         .library(name: "JapaneseLearningCardCore", targets: ["JapaneseLearningCardCore"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0")
+    ],
     targets: [
         .target(
             name: "JapaneseLearningCardCore",
@@ -23,11 +26,15 @@ let package = Package(
         ),
         .executableTarget(
             name: "JapaneseLearningCard",
-            dependencies: ["JapaneseLearningCardCore"],
+            dependencies: [
+                "JapaneseLearningCardCore",
+                .product(name: "Sparkle", package: "Sparkle")
+            ],
             exclude: [
                 "Info.plist",
                 "JapaneseLearningCard.entitlements",
-                "JapaneseLearningCard.entitlements.ad-hoc"
+                "JapaneseLearningCard.entitlements.ad-hoc",
+                "Resources/AppIcon.icns"
             ],
             linkerSettings: [
                 .linkedFramework("AppKit"),
