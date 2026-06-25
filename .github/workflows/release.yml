@@ -65,9 +65,16 @@ jobs:
         id: version
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
+          # CFBundleVersion 必須是「單調遞增的 build number」，Sparkle 用它(不是
+          # CFBundleShortVersionString)判斷有沒有新版。把 x.y.z 轉成整數
+          # x*1000000 + y*1000 + z，例如 0.2.4 → 2004。比舊版硬寫的 1 大，
+          # 且每次發版遞增。
+          IFS='.' read -r MAJ MIN PAT <<< "$VERSION"
+          BUILD=$(( ${MAJ:-0} * 1000000 + ${MIN:-0} * 1000 + ${PAT:-0} ))
           /usr/libexec/PlistBuddy -c "Set CFBundleShortVersionString $VERSION" Sources/JapaneseLearningCard/Info.plist
+          /usr/libexec/PlistBuddy -c "Set CFBundleVersion $BUILD" Sources/JapaneseLearningCard/Info.plist
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "✅ 版本設為 $VERSION（取自 tag $GITHUB_REF_NAME）"
+          echo "✅ 版本設為 $VERSION (build $BUILD，取自 tag $GITHUB_REF_NAME)"
 
       - name: Inject Sparkle public key
         run: |
