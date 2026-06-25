@@ -11,4 +11,15 @@ enum UpdateChecker {
     static var currentVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
     }
+
+    /// 是否為本地開發建置。正式發行走 `swift build -c release`（見 build-app.sh），
+    /// 不會帶 DEBUG flag；本地 `swift build` / `swift run` 則會。
+    /// 本地版不啟動 Sparkle 自動更新，也不檢查更新，避免抓到正式 feed 的版本。
+    static var isLocalBuild: Bool {
+        #if DEBUG
+        return true
+        #else
+        return false
+        #endif
+    }
 }

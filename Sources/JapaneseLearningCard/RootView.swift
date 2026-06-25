@@ -595,21 +595,45 @@ private struct StyledLearningCard: View {
     }
 
     private var wordHero: some View {
-        VStack(spacing: 6) {
-            if !card.reading.isEmpty {
-                CopyableTextRow(text: card.reading, font: .callout.weight(.bold), color: .cardBlue)
+        let trimmedReading = card.reading.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedWord = card.word.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Only show the reading when it adds information beyond the headword
+        // (e.g. kanji words). For kana grammar patterns reading == word.
+        let showReading = !trimmedReading.isEmpty && trimmedReading != trimmedWord
+        let romanized = card.reading.romanizedJapaneseFallback
+        // The romaji fallback leaves kana untouched, so only render it when it
+        // actually differs from the reading we already displayed.
+        let showRomanized = showReading && !romanized.isEmpty && romanized != trimmedReading
+        // 一顆按鈕同時複製讀音與詞條（讀音與詞條相同時只複製一份）。
+        let copyText = showReading ? "\(trimmedReading) \(trimmedWord)" : trimmedWord
+        return VStack(spacing: 6) {
+            if showReading {
+                Text(card.reading)
+                    .font(.callout.weight(.bold))
+                    .foregroundStyle(Color.cardBlue)
+                    .textSelection(.enabled)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.5)
             }
-            CopyableTextRow(text: card.word, font: .system(size: kind == .grammar ? 32 : 42, weight: .black, design: .rounded), color: kind == .grammar ? .cardBlue : .primary)
-                .multilineTextAlignment(.center)
-                .lineLimit(2)
-                .minimumScaleFactor(0.55)
-            if !card.reading.isEmpty {
-                Text(card.reading.romanizedJapaneseFallback)
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(card.word)
+                    .font(.system(size: kind == .grammar ? 32 : 42, weight: .black, design: .rounded))
+                    .foregroundStyle(kind == .grammar ? Color.cardBlue : .primary)
+                    .textSelection(.enabled)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.4)
+                CopyButton(text: copyText)
+            }
+            if showRomanized {
+                Text(romanized)
                     .font(.callout.weight(.bold))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.5)
             }
         }
+        .padding(.horizontal, 18)
         .frame(maxWidth: .infinity)
         .overlay(alignment: .leading) {
             DecorativeStroke()
@@ -895,15 +919,24 @@ struct CopyableTextRow: View {
                 .foregroundStyle(color)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
-            Button {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(text, forType: .string)
-            } label: {
-                Image(systemName: "doc.on.doc")
-            }
-            .buttonStyle(.borderless)
-            .help("複製")
+            CopyButton(text: text)
         }
+    }
+}
+
+/// 統一的「複製到剪貼簿」按鈕，整張卡只保留一顆。
+struct CopyButton: View {
+    var text: String
+
+    var body: some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+        } label: {
+            Image(systemName: "doc.on.doc")
+        }
+        .buttonStyle(.borderless)
+        .help("複製")
     }
 }
 
@@ -1188,22 +1221,35 @@ struct SettingsView: View {
                 }
 
                 settingsBox("更新") {
-                    Toggle("自動檢查更新", isOn: $autoCheckUpdates)
-                        .help("背景定期檢查新版本，有更新時會提示你下載並安裝。")
-                        .onChange(of: autoCheckUpdates) { _, newValue in
-                            viewModel.setAutomaticUpdateChecks?(newValue)
+                    if UpdateChecker.isLocalBuild {
+                        HStack {
+                            Label("本地建置版本，已停用自動更新", systemImage: "hammer")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text("目前版本 \(UpdateChecker.currentVersion)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
                         }
-                    HStack {
-                        Button {
-                            viewModel.requestCheckForUpdates?()
-                        } label: {
-                            Label("立即檢查更新", systemImage: "arrow.down.circle")
+                    } else {
+                        Toggle("自動檢查更新", isOn: $autoCheckUpdates)
+                            .help("背景定期檢查新版本，有更新時會提示你下載並安裝。")
+                            .onChange(of: autoCheckUpdates) { _, newValue in
+                                viewModel.setAutomaticUpdateChecks?(newValue)
+                            }
+                        HStack {
+                            Button {
+                                viewModel.requestCheckForUpdates?()
+                            } label: {
+                                Label("立即檢查更新", systemImage: "arrow.down.circle")
+                            }
+                            Spacer()
+                            Text("目前版本 \(UpdateChecker.currentVersion)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
                         }
-                        Spacer()
-                        Text("目前版本 \(UpdateChecker.currentVersion)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
                     }
                 }
 

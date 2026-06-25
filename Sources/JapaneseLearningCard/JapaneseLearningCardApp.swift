@@ -53,12 +53,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             // Sparkle：app 內直接下載／安裝更新。把檢查更新與自動檢查開關
             // 接到 viewModel 的 closure，讓設定頁可以觸發。
-            let updater = AppUpdaterController()
-            self.updater = updater
-            updater.automaticallyChecksForUpdates =
-                UserDefaults.standard.bool(forKey: UpdateChecker.autoCheckDefaultsKey)
-            viewModel.requestCheckForUpdates = { updater.checkForUpdates() }
-            viewModel.setAutomaticUpdateChecks = { updater.automaticallyChecksForUpdates = $0 }
+            // 本地建置版不啟動 Sparkle，避免從正式 feed 抓到「更新」覆蓋掉開發版。
+            if !UpdateChecker.isLocalBuild {
+                let updater = AppUpdaterController()
+                self.updater = updater
+                updater.automaticallyChecksForUpdates =
+                    UserDefaults.standard.bool(forKey: UpdateChecker.autoCheckDefaultsKey)
+                viewModel.requestCheckForUpdates = { updater.checkForUpdates() }
+                viewModel.setAutomaticUpdateChecks = { updater.automaticallyChecksForUpdates = $0 }
+            }
 
             viewModel.start()
         }
