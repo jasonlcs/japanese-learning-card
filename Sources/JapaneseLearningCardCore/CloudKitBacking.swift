@@ -127,6 +127,11 @@ public final class CKContainerBacking: CloudKitBacking, @unchecked Sendable {
             _ = try await database.save(subscription)
         } catch let error as CKError where error.code == .serverRejectedRequest {
             return
+        } catch let error as CKError where error.code == .invalidArguments {
+            // Production container 不允許 client 端建立 query subscription
+            // ("attempting to create a subscription in a production container")。
+            // macOS 的 silent push 本來就不可靠, 前景輪詢已兜底, 視為正常略過。
+            return
         } catch let error as CKError {
             throw Self.translate(error)
         } catch {
