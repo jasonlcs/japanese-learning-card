@@ -27,7 +27,8 @@ let package = Package(
             exclude: [
                 "Info.plist",
                 "JapaneseLearningCard.entitlements",
-                "JapaneseLearningCard.entitlements.ad-hoc"
+                "JapaneseLearningCard.entitlements.ad-hoc",
+                "Resources/AppIcon.icns"
             ],
             linkerSettings: [
                 .linkedFramework("AppKit"),

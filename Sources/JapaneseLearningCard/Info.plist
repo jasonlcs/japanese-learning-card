@@ -6,6 +6,8 @@
 	<string>JapaneseLearningCard</string>
 	<key>CFBundleExecutable</key>
 	<string>JapaneseLearningCard</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>io.github.jasonlcs.japaneselearningcard</string>
 	<key>CFBundleName</key>

@@ -9,9 +9,9 @@ struct RootView: View {
         VStack(spacing: 0) {
             Picker("", selection: $viewModel.selectedTab) {
                 Label("卡片", systemImage: "rectangle.stack").tag(0)
+                Label("考題", systemImage: "checklist").tag(2)
                 Label("AI 文章", systemImage: "sparkles.rectangle.stack").tag(1)
                 Label("手動造卡", systemImage: "doc.text.magnifyingglass").tag(6)
-                Label("考題", systemImage: "checklist").tag(2)
                 Label("設定", systemImage: "gearshape").tag(4)
                 Label("歷史", systemImage: "clock").tag(5)
             }
