@@ -35,9 +35,13 @@ public actor SyncCoordinator {
     }
 
     /// 讀 local snapshot → 包 payload → 推到雲端, 成功後更新 synced base。
-    /// 撞 conflict 由 transport 自動 retry 一次, 這裡只負責 orchestrate。
+    /// 撞 conflict (雲端有更新版本) 時先 pull+merge 把雲端變更併進來, 再用合併
+    /// 後的結果重推一次, 避免直接覆蓋造成資料遺失。
     public func pushIfNeeded() async throws {
-        let snapshot = await store.read()
+        try await pushSnapshot(await store.read(), allowMergeRetry: true)
+    }
+
+    private func pushSnapshot(_ snapshot: AppSnapshot, allowMergeRetry: Bool) async throws {
         let payload = DatabasePayload(
             bundleVersion: bundleVersion,
             generatedAt: Date(),
@@ -48,6 +52,13 @@ public actor SyncCoordinator {
         do {
             try await transport.submit(payload)
         } catch {
+            // 撞 conflict: 雲端已有更新版本。先 pull+merge 把遠端變更併進本機,
+            // 再用合併後的結果重推一次 (只重試一次, 避免無限迴圈)。
+            if allowMergeRetry, Self.isConflict(error) {
+                try await pullAndMerge()
+                try await pushSnapshot(await store.read(), allowMergeRetry: false)
+                return
+            }
             throw SyncError.pushFailed(String(describing: error))
         }
 
@@ -57,6 +68,14 @@ public actor SyncCoordinator {
         } catch {
             print("syncedBase write failed after push: \(error)")
         }
+    }
+
+    private static func isConflict(_ error: Error) -> Bool {
+        guard case CloudKitTransport.TransportError.backing(let backingError) = error else {
+            return false
+        }
+        if case .conflict = backingError { return true }
+        return false
     }
 
     /// 從雲端拉最新一份, 跟 local + synced base 跑 3-way merge,
