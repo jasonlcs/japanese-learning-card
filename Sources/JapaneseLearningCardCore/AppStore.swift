@@ -45,6 +45,21 @@ public struct AppSnapshot: Codable, Equatable, Sendable {
         self.deletedArticles = deletedArticles
     }
 
+    /// 沒有任何使用者內容（只可能有預設的 sentinel source、沒有任何 tombstone）。
+    /// 用來當「不要把空資料 push 上雲端覆蓋」的安全網判斷。
+    public var isEffectivelyEmpty: Bool {
+        cards.isEmpty
+            && quizzes.isEmpty
+            && generatedArticles.isEmpty
+            && documents.isEmpty
+            && deletedSources.isEmpty
+            && deletedDocuments.isEmpty
+            && deletedCards.isEmpty
+            && deletedQuizzes.isEmpty
+            && deletedArticles.isEmpty
+            && sources.allSatisfy(AISource.isSentinelSource)
+    }
+
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.settings = try container.decodeIfPresent(AppSettings.self, forKey: .settings) ?? AppSettings()
@@ -95,6 +110,7 @@ public actor AppStore {
         do {
             try FileManager.default.createDirectory(at: databaseURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             if fileURL == nil {
+                try Self.migrateIdentityScopedStoreIfNeeded(to: databaseURL)
                 try Self.migrateLegacyDatabaseIfNeeded(to: databaseURL)
             }
             try open()
@@ -609,31 +625,42 @@ public actor AppStore {
         return localDatabaseURL()
     }
 
+    /// 本機 DB 路徑。統一用 store.sqlite —— 不再依「iCloud 身分雜湊」分檔，
+    /// 因為那個雜湊 (ubiquityIdentityToken 封存後取 hash) 並不穩定，會害每次
+    /// 啟動開到不同的空檔，造成資料看似被清空、甚至把空檔 push 上 CloudKit
+    /// 覆蓋雲端。帳號隔離交給 CloudKit（雲端本就分帳號）+ 3-way merge。
     private static func localDatabaseURL() -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser
-        return makeLocalDatabaseURL(base: base, identitySuffix: currentICloudIdentitySuffix())
+        return base
+            .appendingPathComponent("JapaneseLearningCard", isDirectory: true)
+            .appendingPathComponent("store.sqlite")
     }
 
-    /// 本機 fallback DB 路徑。登入 iCloud 時依帳號身分分檔，避免同一台 Mac
-    /// 切換 iCloud 帳號時兩個帳號共用同一個本機檔而互相串味。
-    /// 未登入 iCloud (identitySuffix 為 nil) 時沿用原本的 store.sqlite，不影響既有資料。
-    public static func makeLocalDatabaseURL(base: URL, identitySuffix: String?) -> URL {
-        let directory = base.appendingPathComponent("JapaneseLearningCard", isDirectory: true)
-        if let identitySuffix, !identitySuffix.isEmpty {
-            return directory.appendingPathComponent("store-\(identitySuffix).sqlite")
+    /// 從舊版「依 iCloud 身分雜湊分檔」(store-<hash>.sqlite) 遷移到統一的
+    /// store.sqlite。挑資料最完整（檔案最大）的一份複製過來，避免升級後從空白
+    /// 開始。只在 store.sqlite 還不存在時做一次；排除 synced base (store-synced.sqlite)。
+    public static func migrateIdentityScopedStoreIfNeeded(to canonicalURL: URL) throws {
+        let fm = FileManager.default
+        guard !fm.fileExists(atPath: canonicalURL.path) else { return }
+        let directory = canonicalURL.deletingLastPathComponent()
+        guard let entries = try? fm.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.fileSizeKey]
+        ) else { return }
+        let scoped = entries.filter { url in
+            let name = url.lastPathComponent
+            return name.hasPrefix("store-")
+                && name.hasSuffix(".sqlite")
+                && name != "store-synced.sqlite"
         }
-        return directory.appendingPathComponent("store.sqlite")
+        guard let best = scoped.max(by: { fileByteSize($0) < fileByteSize($1) }) else { return }
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        try fm.copyItem(at: best, to: canonicalURL)
     }
 
-    /// 目前登入的 iCloud 身分對應的檔名安全短雜湊；未登入回 nil。
-    /// 本機檔不會跨裝置同步，因此這裡用「本機 token」沒有跨裝置一致性的問題。
-    private static func currentICloudIdentitySuffix() -> String? {
-        guard let token = FileManager.default.ubiquityIdentityToken,
-              let data = try? NSKeyedArchiver.archivedData(withRootObject: token, requiringSecureCoding: true) else {
-            return nil
-        }
-        return String(ContentHash.sha256(data.base64EncodedString()).prefix(16))
+    private static func fileByteSize(_ url: URL) -> Int {
+        (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
     }
 
     public static func migrateLegacyDatabaseIfNeeded(to databaseURL: URL, legacyDatabaseURL: URL? = nil) throws {
