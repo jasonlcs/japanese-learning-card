@@ -26,6 +26,31 @@ final class AppViewModel: ObservableObject {
     @Published var aiArticleCustomTheme = ""
     @Published var selectedTab = 0
 
+    /// 簡報模式：手動開關。開著時暫停卡片自動彈出，直到使用者自己關掉
+    /// （持久化，重開 App 也記得）。
+    @Published var presentationModeEnabled = UserDefaults.standard.bool(forKey: AppViewModel.presentationModeKey) {
+        didSet { UserDefaults.standard.set(presentationModeEnabled, forKey: Self.presentationModeKey) }
+    }
+    /// 自動偵測到的簡報情境（接投影機鏡像 / 全螢幕播放），由 PresentationDetector 更新。
+    @Published private(set) var presentationAutoDetected = false
+
+    static let presentationModeKey = "presentationModeEnabled"
+
+    /// 暫停「依顯示頻率自動彈出單字卡」。使用者手動的開關，持久化，
+    /// 開著就一直暫停，直到自己按繼續。
+    @Published var autoDisplayPaused = UserDefaults.standard.bool(forKey: AppViewModel.autoDisplayPausedKey) {
+        didSet { UserDefaults.standard.set(autoDisplayPaused, forKey: Self.autoDisplayPausedKey) }
+    }
+    static let autoDisplayPausedKey = "autoDisplayPaused"
+
+    /// 簡報情境是否暫停中：手動簡報開關或自動偵測任一成立（給簡報按鈕顯示用）。
+    var isPresentationPaused: Bool { presentationModeEnabled || presentationAutoDetected }
+
+    /// 目前是否該暫停自動彈出：手動暫停或簡報情境任一成立（自動彈出的總閘門）。
+    var isAutoDisplaySuppressed: Bool { autoDisplayPaused || isPresentationPaused }
+
+    private let presentationDetector = PresentationDetector()
+
     // iCloud 同步狀態 (給 settings 頁詳細面板用)
     @Published private(set) var iCloudStatus: CloudKitAccountChecker.Result = .unknown(underlying: "尚未檢查")
     @Published private(set) var iCloudFingerprint: String?
@@ -88,6 +113,11 @@ final class AppViewModel: ObservableObject {
     }
 
     func start() {
+        // 自動偵測簡報情境，偵測到就暫停自動彈出，結束後自動恢復。
+        presentationDetector.onChange = { [weak self] presenting in
+            self?.presentationAutoDetected = presenting
+        }
+        presentationDetector.start()
         Task {
             await reload()
             await store.ensureAISentinelSource(extractionPrompt: AISource.sentinelExtractionPrompt)
@@ -307,6 +337,9 @@ final class AppViewModel: ObservableObject {
 
     func showNextCard() {
         let isAutoShow = !isPopoverVisible
+        // 暫停（手動暫停 / 簡報模式）只擋「自動彈出」，不影響使用者手動切下一張。
+        // 直接 return，不更新 lastShownAt / shownCount，避免把沒看到的卡算成看過。
+        if isAutoShow && isAutoDisplaySuppressed { return }
         if isAutoShow {
             selectedTab = 0
         }
