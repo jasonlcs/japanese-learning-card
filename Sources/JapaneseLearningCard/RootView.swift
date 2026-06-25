@@ -7,15 +7,19 @@ struct RootView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("", selection: $viewModel.selectedTab) {
-                Label("卡片", systemImage: "rectangle.stack").tag(0)
-                Label("考題", systemImage: "checklist").tag(2)
-                Label("AI 文章", systemImage: "sparkles.rectangle.stack").tag(1)
-                Label("手動造卡", systemImage: "doc.text.magnifyingglass").tag(6)
-                Label("設定", systemImage: "gearshape").tag(4)
-                Label("歷史", systemImage: "clock").tag(5)
+            HStack(spacing: 8) {
+                Picker("", selection: $viewModel.selectedTab) {
+                    Label("卡片", systemImage: "rectangle.stack").tag(0)
+                    Label("考題", systemImage: "checklist").tag(2)
+                    Label("造卡", systemImage: "sparkles.rectangle.stack").tag(1)
+                    Label("設定", systemImage: "gearshape").tag(4)
+                    Label("歷史", systemImage: "clock").tag(5)
+                }
+                .pickerStyle(.segmented)
+
+                AutoDisplayPauseToggle(viewModel: viewModel)
+                PresentationModeToggle(viewModel: viewModel)
             }
-            .pickerStyle(.segmented)
             .padding()
 
             Divider()
@@ -23,15 +27,13 @@ struct RootView: View {
             Group {
                 switch viewModel.selectedTab {
                 case 1:
-                    AIArticleView(viewModel: viewModel)
+                    CardMakerView(viewModel: viewModel)
                 case 2:
                     QuizView(viewModel: viewModel)
                 case 4:
                     SettingsView(viewModel: viewModel)
                 case 5:
                     HistoryView(viewModel: viewModel)
-                case 6:
-                    ManualCardView(viewModel: viewModel)
                 default:
                     CardView(viewModel: viewModel)
                 }
@@ -47,6 +49,53 @@ struct RootView: View {
                 viewModel.resumeAutoCloseAfterInteraction()
             }
         }
+    }
+}
+
+/// 暫停／繼續「依顯示頻率自動彈出單字卡」。純手動開關。
+struct AutoDisplayPauseToggle: View {
+    @ObservedObject var viewModel: AppViewModel
+
+    var body: some View {
+        Button {
+            viewModel.autoDisplayPaused.toggle()
+        } label: {
+            Image(systemName: viewModel.autoDisplayPaused ? "play.circle.fill" : "pause.circle")
+                .font(.system(size: 16))
+                .foregroundStyle(viewModel.autoDisplayPaused ? Color.cardOrange : .secondary)
+        }
+        .buttonStyle(.borderless)
+        .help(viewModel.autoDisplayPaused
+            ? "已暫停自動顯示單字卡，點一下繼續"
+            : "暫停自動顯示單字卡")
+        .accessibilityLabel("暫停自動顯示")
+    }
+}
+
+/// 簡報模式開關：按一下暫停卡片自動彈出（手動）。偵測到投影／全螢幕時也會亮起。
+struct PresentationModeToggle: View {
+    @ObservedObject var viewModel: AppViewModel
+
+    var body: some View {
+        Button {
+            viewModel.presentationModeEnabled.toggle()
+        } label: {
+            Image(systemName: viewModel.isPresentationPaused ? "moon.zzz.fill" : "moon.zzz")
+                .font(.system(size: 16))
+                .foregroundStyle(viewModel.isPresentationPaused ? Color.cardOrange : .secondary)
+        }
+        .buttonStyle(.borderless)
+        .help(helpText)
+        .accessibilityLabel("簡報模式")
+    }
+
+    private var helpText: String {
+        if viewModel.presentationAutoDetected && !viewModel.presentationModeEnabled {
+            return "偵測到簡報／投影中，已暫停自動彈出（結束後自動恢復）"
+        }
+        return viewModel.presentationModeEnabled
+            ? "簡報模式開啟中：已暫停自動彈出，點一下恢復"
+            : "簡報模式：暫停卡片自動彈出"
     }
 }
 
@@ -942,43 +991,58 @@ struct CopyButton: View {
 
 struct SettingsView: View {
     @ObservedObject var viewModel: AppViewModel
-    @State private var isSystemSettingsPresented = false
     @AppStorage(UpdateChecker.autoCheckDefaultsKey) private var autoCheckUpdates = false
     @FocusState private var isSourceURLFocused: Bool
     /// 既有來源網址的編輯緩衝區（key 為 Source.id），送出前不寫回資料。
     @State private var editingSourceURLs: [UUID: String] = [:]
+    /// 設定分類：用上方分段直接切換，不再藏在「系統設定」子頁裡。
+    @State private var section: SettingsSection = .sources
+
+    enum SettingsSection: String, CaseIterable, Identifiable {
+        case sources = "來源"
+        case display = "顯示"
+        case ai = "AI"
+        case data = "資料"
+        case system = "系統"
+        var id: String { rawValue }
+    }
 
     var body: some View {
-        if isSystemSettingsPresented {
-            systemSettingsView
-        } else {
-            sourceSettingsView
+        VStack(spacing: 0) {
+            Picker("", selection: $section) {
+                ForEach(SettingsSection.allCases) { item in
+                    Text(item.rawValue).tag(item)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding([.horizontal, .top])
+            .padding(.bottom, 4)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    if !viewModel.statusMessage.isEmpty {
+                        Label(viewModel.statusMessage, systemImage: viewModel.isValidatingProvider || viewModel.isRefreshing ? "hourglass" : "info.circle")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    switch section {
+                    case .sources: sourcesSection
+                    case .display: displaySection
+                    case .ai: aiSection
+                    case .data: dataSection
+                    case .system: systemSection
+                    }
+                }
+                .padding()
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
     }
 
-    private var sourceSettingsView: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("來源設定")
-                        .font(.headline)
-                    Spacer()
-                    Button {
-                        isSystemSettingsPresented = true
-                    } label: {
-                        Image(systemName: "gearshape")
-                    }
-                    .buttonStyle(.borderless)
-                    .help("系統設定")
-                }
-
-                if !viewModel.statusMessage.isEmpty {
-                    Label(viewModel.statusMessage, systemImage: viewModel.isValidatingProvider || viewModel.isRefreshing ? "hourglass" : "info.circle")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-
-                settingsBox("內容來源") {
+    @ViewBuilder
+    private var sourcesSection: some View {
+        settingsBox("內容來源") {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("卡片擷取指示")
                             .font(.caption)
@@ -1069,42 +1133,19 @@ struct SettingsView: View {
                     }
                     .disabled(viewModel.isRefreshing)
                 }
-            }
-            .padding()
-        }
     }
 
-    private var systemSettingsView: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Button {
-                        isSystemSettingsPresented = false
-                    } label: {
-                        Label("返回", systemImage: "chevron.backward")
-                    }
-                    .buttonStyle(.borderless)
-                    Spacer()
-                    Text("系統設定")
-                        .font(.headline)
-                    Spacer()
-                    Button("完成") {
-                        isSystemSettingsPresented = false
-                    }
-                }
-
-                if !viewModel.statusMessage.isEmpty {
-                    Label(viewModel.statusMessage, systemImage: viewModel.isValidatingProvider || viewModel.isRefreshing ? "hourglass" : "info.circle")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-
+    @ViewBuilder
+    private var displaySection: some View {
                 settingsBox("顯示") {
                     Stepper("顯示頻率：\(viewModel.snapshot.settings.displayIntervalMinutes) 分鐘", value: binding(\.displayIntervalMinutes), in: 1...1440)
                     Stepper("停留秒數：\(viewModel.snapshot.settings.visibleDurationSeconds) 秒", value: binding(\.visibleDurationSeconds), in: 3...300)
                     Stepper("爬文頻率：\(viewModel.snapshot.settings.crawlIntervalHours) 小時", value: binding(\.crawlIntervalHours), in: 1...168)
                 }
+    }
 
+    @ViewBuilder
+    private var aiSection: some View {
                 settingsBox("AI Provider") {
                     labeledRow("Provider") {
                         Picker("", selection: providerPresetBinding()) {
@@ -1170,7 +1211,10 @@ struct SettingsView: View {
                     .disabled(viewModel.isValidatingProvider)
                     .help("驗證成功才會把 API key 存入 Keychain；失敗則不變更。")
                 }
+    }
 
+    @ViewBuilder
+    private var dataSection: some View {
                 settingsBox("資料庫") {
                     Button {
                         viewModel.exportDatabase()
@@ -1207,7 +1251,10 @@ struct SettingsView: View {
                         Spacer()
                     }
                 }
+    }
 
+    @ViewBuilder
+    private var systemSection: some View {
                 settingsBox("AI Log") {
                     Button {
                         viewModel.openAIRequestLog()
@@ -1258,9 +1305,6 @@ struct SettingsView: View {
                 } label: {
                     Label("結束程式", systemImage: "power")
                 }
-            }
-            .padding()
-        }
     }
 
     private var canAddSource: Bool {
@@ -1816,6 +1860,33 @@ private struct QuizSummaryTile: View {
     }
 }
 
+/// 造卡頁：把「AI 文章」與「貼上造卡」收進同一個頁籤，用上方分段切換。
+struct CardMakerView: View {
+    @ObservedObject var viewModel: AppViewModel
+    @State private var mode: Mode = .aiArticle
+
+    enum Mode: Hashable { case aiArticle, manual }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("", selection: $mode) {
+                Label("AI 文章", systemImage: "sparkles.rectangle.stack").tag(Mode.aiArticle)
+                Label("貼上造卡", systemImage: "doc.text.magnifyingglass").tag(Mode.manual)
+            }
+            .pickerStyle(.segmented)
+            .padding([.horizontal, .top])
+            .padding(.bottom, 4)
+
+            switch mode {
+            case .aiArticle:
+                AIArticleView(viewModel: viewModel)
+            case .manual:
+                ManualCardView(viewModel: viewModel)
+            }
+        }
+    }
+}
+
 struct AIArticleView: View {
     @ObservedObject var viewModel: AppViewModel
     @State private var selectedArticle: GeneratedArticle?
@@ -1855,13 +1926,9 @@ struct AIArticleView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("AI 文章產生")
-                    .font(.title2.weight(.semibold))
-                Text("由 AI 撰寫指定 JLPT 等級的日文短文，再自動從中擷取單字卡。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            Text("由 AI 撰寫指定 JLPT 等級的日文短文，再自動從中擷取單字卡。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
             GroupBox("自動排程") {
                 VStack(alignment: .leading, spacing: 10) {
@@ -2020,13 +2087,9 @@ struct ManualCardView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("手動造卡")
-                        .font(.title2.weight(.semibold))
-                    Text("貼上一段日文文章，或一份單字／片語清單，AI 會理解內容後幫你產生單字卡。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                Text("貼上一段日文文章，或一份單字／片語清單，AI 會理解內容後幫你產生單字卡。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
                 GroupBox("文章或單字清單") {
                     TextEditor(text: $viewModel.manualCardInput)
