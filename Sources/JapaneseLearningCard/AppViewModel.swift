@@ -275,7 +275,14 @@ final class AppViewModel: ObservableObject {
     func reload() async {
         snapshot = await store.read()
         aiArticleCustomTheme = snapshot.settings.aiArticleCustomTheme
-        currentCard = cardSelector.nextCard(from: snapshot.cards)
+        if let currentCard,
+           let updatedCard = snapshot.cards.first(where: { $0.id == currentCard.id }),
+           updatedCard.status != .skipped,
+           updatedCard.status != .learned {
+            self.currentCard = updatedCard
+        } else {
+            currentCard = cardSelector.nextCard(from: snapshot.cards)
+        }
         if let existingQuiz = currentQuiz,
            let updatedQuiz = snapshot.quizzes.first(where: { $0.id == existingQuiz.id }),
            updatedQuiz.status != .pending {
@@ -295,12 +302,12 @@ final class AppViewModel: ObservableObject {
     }
 
     func showNextCard() {
-        currentCard = cardSelector.nextCard(from: snapshot.cards)
         let isAutoShow = !isPopoverVisible
         if isAutoShow {
             selectedTab = 0
         }
-        guard let card = currentCard else {
+        guard let selectedCard = cardSelector.nextCard(from: snapshot.cards) else {
+            currentCard = nil
             if isAutoShow {
                 requestShowPopover?()
             }
@@ -309,14 +316,20 @@ final class AppViewModel: ObservableObject {
 
         Task {
             try? await store.update { state in
-                if let index = state.cards.firstIndex(where: { $0.id == card.id }) {
+                if let index = state.cards.firstIndex(where: { $0.id == selectedCard.id }) {
                     state.cards[index].lastShownAt = Date()
+                    state.cards[index].shownCount += 1
                     if state.cards[index].status == .new {
                         state.cards[index].status = .reviewing
                     }
                 }
             }
-            await reload()
+            let updatedSnapshot = await store.read()
+            await MainActor.run {
+                snapshot = updatedSnapshot
+                currentCard = updatedSnapshot.cards.first { $0.id == selectedCard.id } ?? selectedCard
+                schedulePushDebounced()
+            }
             if isAutoShow {
                 requestShowPopover?()
             }

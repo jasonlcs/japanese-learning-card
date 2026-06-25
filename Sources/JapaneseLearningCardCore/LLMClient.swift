@@ -391,7 +391,9 @@ public struct OpenAICompatibleLLMClient: LLMClient {
                 jlptLevel 必須標註 N1、N2、N3、N4、N5 或 Unknown。
                 如果 partOfSpeech 是動詞，verbFormType 必須標註動詞型態；如果不是動詞，verbFormType 使用「非動詞」。
                 exampleReading 是必填欄位，必須把 exampleJa 整句完整轉成平假名讀音；漢字必須轉成正確平假名，助詞保留原本讀音，不要使用羅馬拼音。
-                請使用繁體中文解說。最多產生 5 張卡。
+                請同時挑選「單字／片語」與「文法句型」。若來源文字有可學習的文法，至少產生 1 張文法卡；整體最多 6 張卡。
+                \(allowedOutputWritingRules)
+                \(cardLayoutContentRules)
                 """),
                 .init(role: "user", content: """
                 使用者想抓取的範圍：
@@ -425,7 +427,10 @@ public struct OpenAICompatibleLLMClient: LLMClient {
                 如果 partOfSpeech 是動詞，verbFormType 必須標註動詞型態；如果不是動詞，verbFormType 使用「非動詞」。
                 exampleReading 是必填欄位，必須把 exampleJa 整句完整轉成平假名讀音；漢字必須轉成正確平假名，助詞保留原本讀音，不要使用羅馬拼音。
                 exampleJa 請自然地造句示範該單字；若輸入本身就是完整句子可直接沿用。
-                請使用繁體中文解說。最多產生 30 張卡。
+                若內容是文章，請同時挑選「單字／片語」與「文法句型」；若有可學習的文法，至少產生 1 張文法卡。
+                最多產生 30 張卡。
+                \(allowedOutputWritingRules)
+                \(cardLayoutContentRules)
                 """),
                 .init(role: "user", content: """
                 使用者的額外指示：
@@ -439,6 +444,35 @@ public struct OpenAICompatibleLLMClient: LLMClient {
             responseFormat: responseFormat(for: settings)
         )
     }
+
+    private static let cardLayoutContentRules = """
+    卡片內容必須符合以下版型規範：
+    1. 單字／片語卡：
+       - word 填單字或片語，不要加「〜」。
+       - partOfSpeech 填精確品詞，例如「名詞」「他動詞」「副詞」「連語」。
+       - grammarNoteZh 必須剛好使用下列標籤，每個標籤各一行，不可省略：
+         重點：用繁體中文說明語感、常見搭配或使用注意。
+         よく使う形：列出 2~3 個「包含此單字／片語的常見語形或搭配模板」，以「、」分隔。這不是使用場景，不要寫「會話中」「文章中」這類場合。名詞例：「〜の途中で、〜の途中に、〜している途中」；動詞例：「辞書形、て形、ない形」或常見搭配；形容詞例：「〜くなる、〜そうだ、〜すぎる」。
+         関連語：列出 2~3 個近義詞、反義詞或關聯詞，以「、」分隔，並可用繁體中文括號補充差異。
+    2. 文法句型卡：
+       - word 必須用「〜」標示句型，例如「〜つつある」「〜に従って」。
+       - reading 填平假名讀音或假名形式，例如「〜つつある」。
+       - partOfSpeech 必須填「文法句型」。
+       - verbFormType 必須填「非動詞」。
+       - grammarNoteZh 必須剛好使用下列標籤，每個標籤各一行，不可省略：
+         接續：寫出接續規則，例如「Vます形去ます + つつある」。
+         重點：用繁體中文說明意思、語氣、使用限制。
+         使用場景：列出 2~3 個常見使用場合，以「、」分隔。
+         類似表現：列出 2~3 個相近句型並說明差異，例如「〜ている：狀態持續；〜はじめる：動作開始」。
+    3. exampleJa 必須自然示範該 word，文法卡必須示範該句型；exampleZh 必須翻譯整句。
+    """
+
+    private static let allowedOutputWritingRules = """
+    文字規則：
+    - 中文欄位只能使用繁體中文，禁止簡體中文。
+    - 可使用英文、日文平假名、片假名、日文漢字，以及必要的數字與標點。
+    - 除非來源語句本身需要，避免混入其他語言；如需使用其他語言，只能少量出現在例子或補充說明。
+    """
 
     public static func quizRequestBody(cards: [LearningCard], settings: AppSettings) -> ChatCompletionRequest {
         let source = cards.prefix(12).map {
@@ -464,6 +498,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
                 你是日文學習測驗老師。只輸出 JSON，不要 Markdown。
                 JSON schema: {"quizzes":[{"cardId":"可省略","sourceWord":"...","question":"...","choices":["A","B","C","D"],"correctAnswer":"...","explanationZh":"..."}]}
                 題目要測單字意思、用法、助詞、文法或例句理解。請用繁體中文寫解析。每題必須剛好 4 個選項，correctAnswer 必須完全等於其中一個 choices。
+                \(allowedOutputWritingRules)
                 """),
                 .init(role: "user", content: """
                 請根據以下學習卡產生最多 5 題選擇題：
@@ -501,6 +536,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
                 全文 400~700 字，內容要自然、生活化，使用「です/ます」體。
                 文章中請刻意包含目標等級的字彙與文法點，讓學習者能從中擷取單字卡。
                 文章裡頭不要夾帶英文註解、羅馬拼音或翻譯。
+                若需要中文欄位或說明，必須使用繁體中文，禁止簡體中文。
                 """),
                 .init(role: "user", content: """
                 請寫一篇日文文章，主題：\(resolvedTheme)
