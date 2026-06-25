@@ -6,10 +6,10 @@
             <title>0.2.2</title>
             <pubDate>Thu, 25 Jun 2026 08:04:59 +0000</pubDate>
             <sparkle:version>1</sparkle:version>
-            <sparkle:shortVersionString>0.2.2</sparkle:shortVersionString>
+            <sparkle:shortVersionString>0.2.3</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/jasonlcs/japanese-learning-card/releases/download/v0.2.2/JapaneseLearningCard.dmg" length="4517090" type="application/octet-stream" sparkle:edSignature="HPMAGWJ7dZ/tORybxbhRanNOmOPKoHqx3m+jdNY5dpE3ttbhP6FePkaAs8XZe7MBLpsGpjON9pYuIWKAMCrtBw=="/>
+            <enclosure url="https://github.com/jasonlcs/japanese-learning-card/releases/download/v0.2.3/JapaneseLearningCard.dmg" length="4517299" type="application/octet-stream" sparkle:edSignature="leI/2P7Gm+j3GQo0HNDuYn5qkG6JLRhUFk7l38sLq5PTTnY6bqdBp1Vr8sYPc77WBVGhXRbnLB3SjZwMX7YeCA=="/>
         </item>
     </channel>
 </rss>
