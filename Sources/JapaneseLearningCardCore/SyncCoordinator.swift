@@ -38,7 +38,12 @@ public actor SyncCoordinator {
     /// 撞 conflict (雲端有更新版本) 時先 pull+merge 把雲端變更併進來, 再用合併
     /// 後的結果重推一次, 避免直接覆蓋造成資料遺失。
     public func pushIfNeeded() async throws {
-        try await pushSnapshot(await store.read(), allowMergeRetry: true)
+        let snapshot = await store.read()
+        // 安全網: local 完全沒有使用者內容時不要 push。這可避免本機 DB 因故
+        // 開成空檔 (例如過去身分雜湊分檔不穩定的 bug) 時, 把空資料覆蓋掉
+        // CloudKit 上既有的資料。空 local 應該靠 pull 還原, 而不是 push 出去。
+        if snapshot.isEffectivelyEmpty { return }
+        try await pushSnapshot(snapshot, allowMergeRetry: true)
     }
 
     private func pushSnapshot(_ snapshot: AppSnapshot, allowMergeRetry: Bool) async throws {

@@ -19,7 +19,7 @@ struct CoreChecks {
         try await pipelineSkipsAISentinelWhenRefreshingSources()
         try await storePersistsQuizQuestions()
         try await storeMigratesLegacyDatabaseWhenNeeded()
-        localDatabaseURLIsScopedByICloudIdentity()
+        try storeMigratesIdentityScopedStoreToCanonicalStore()
         try await storeReloadsFromDiskWhenDatabaseChangesExternally()
         try await storeForceReloadPicksUpAtomicFileReplace()
         try await storeUpdateMergesExternalChangesBeforeWriting()
@@ -45,6 +45,7 @@ struct CoreChecks {
         try await cloudKitTransportFetchDecodesPayload()
         try await appStoreAppliesMergedSnapshot()
         try await syncCoordinatorPushesLocalToCloud()
+        try await syncCoordinatorSkipsPushWhenLocalEmpty()
         try await syncCoordinatorPullsAndMergesRemoteChanges()
         try await syncCoordinatorMergesConflictingChanges()
         try await appStoreAutoDetectsDeletedSource()
@@ -304,21 +305,6 @@ struct CoreChecks {
         expect(snapshot.quizzes[0].question == "「駅」の意味は？", "quiz question should round trip")
     }
 
-    private static func localDatabaseURLIsScopedByICloudIdentity() {
-        let base = URL(fileURLWithPath: "/tmp/base")
-
-        // 未登入 iCloud：沿用原本的 store.sqlite，不影響既有資料。
-        let anonymous = AppStore.makeLocalDatabaseURL(base: base, identitySuffix: nil)
-        expect(anonymous.lastPathComponent == "store.sqlite", "no iCloud identity should use the legacy store.sqlite path")
-
-        // 不同 iCloud 身分 → 不同檔，互不共用。
-        let userA = AppStore.makeLocalDatabaseURL(base: base, identitySuffix: "aaaa1111")
-        let userB = AppStore.makeLocalDatabaseURL(base: base, identitySuffix: "bbbb2222")
-        expect(userA.lastPathComponent == "store-aaaa1111.sqlite", "identity A should get its own local file")
-        expect(userA != userB, "different iCloud identities must not share the same local database file")
-        expect(userA != anonymous, "an identity-scoped file must differ from the anonymous one")
-    }
-
     private static func storeMigratesLegacyDatabaseWhenNeeded() async throws {
         let tempDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
@@ -331,6 +317,31 @@ struct CoreChecks {
 
         try AppStore.migrateLegacyDatabaseIfNeeded(to: targetDatabaseURL, legacyDatabaseURL: legacyDatabaseURL)
         expect(FileManager.default.fileExists(atPath: targetDatabaseURL.path), "migration should be idempotent")
+    }
+
+    /// 舊版「依 iCloud 身分雜湊分檔」(store-<hash>.sqlite) 要能遷移到統一的
+    /// store.sqlite：挑檔案最大(資料最完整)的一份，且忽略 synced base。
+    private static func storeMigratesIdentityScopedStoreToCanonicalStore() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try Data("a".utf8).write(to: dir.appendingPathComponent("store-aaaa1111.sqlite"))
+        try Data("bbbbbbbb".utf8).write(to: dir.appendingPathComponent("store-bbbb2222.sqlite"))
+        // synced base 雖然最大也必須被忽略, 不能拿它當主 DB。
+        try Data("synced-base-should-be-ignored".utf8).write(to: dir.appendingPathComponent("store-synced.sqlite"))
+
+        let canonical = dir.appendingPathComponent("store.sqlite")
+        try AppStore.migrateIdentityScopedStoreIfNeeded(to: canonical)
+
+        expect(FileManager.default.fileExists(atPath: canonical.path), "canonical store.sqlite should be created from a scoped file")
+        let migrated = try Data(contentsOf: canonical)
+        expect(String(decoding: migrated, as: UTF8.self) == "bbbbbbbb", "should migrate the largest non-synced scoped store")
+
+        // 冪等: 再跑一次不應覆蓋已存在的 store.sqlite。
+        try AppStore.migrateIdentityScopedStoreIfNeeded(to: canonical)
+        let again = try Data(contentsOf: canonical)
+        expect(String(decoding: again, as: UTF8.self) == "bbbbbbbb", "re-running migration must be idempotent")
     }
 
     private static func storeUpdateMergesExternalChangesBeforeWriting() async throws {
@@ -1027,6 +1038,25 @@ struct CoreChecks {
         // synced base 也應該被更新
         let baseBytes = try harness.syncedBase.loadSync()
         expect(baseBytes != nil, "synced base should be written after successful push")
+    }
+
+    /// 安全網: local 完全沒有使用者內容時不可 push，避免空檔覆蓋雲端資料。
+    private static func syncCoordinatorSkipsPushWhenLocalEmpty() async throws {
+        let harness = try await makeTestSyncHarness()
+        defer { try? FileManager.default.removeItem(at: harness.dir) }
+
+        // 不寫入任何內容 → store 是空的。
+        let coordinator = SyncCoordinator(
+            transport: harness.transport,
+            store: harness.store,
+            syncedBase: harness.syncedBase,
+            conflictStore: harness.conflictStore
+        )
+        try await coordinator.pushIfNeeded()
+
+        let snap = harness.backing.snapshot()
+        expect(snap.saveCount == 0, "empty local must not push to cloud")
+        expect(snap.stored == nil, "cloud must stay untouched when local is empty")
     }
 
     private static func syncCoordinatorPullsAndMergesRemoteChanges() async throws {
