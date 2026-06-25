@@ -224,6 +224,7 @@ public struct LearningCard: Codable, Identifiable, Equatable, Sendable {
     public var status: CardStatus
     public var createdAt: Date
     public var lastShownAt: Date?
+    public var shownCount: Int
     public var updatedAt: Date
 
     public init(
@@ -242,6 +243,7 @@ public struct LearningCard: Codable, Identifiable, Equatable, Sendable {
         status: CardStatus = .new,
         createdAt: Date = Date(),
         lastShownAt: Date? = nil,
+        shownCount: Int = 0,
         updatedAt: Date = Date()
     ) {
         self.id = id
@@ -259,6 +261,7 @@ public struct LearningCard: Codable, Identifiable, Equatable, Sendable {
         self.status = status
         self.createdAt = createdAt
         self.lastShownAt = lastShownAt
+        self.shownCount = shownCount
         self.updatedAt = updatedAt
     }
 
@@ -279,6 +282,7 @@ public struct LearningCard: Codable, Identifiable, Equatable, Sendable {
         self.status = try container.decodeIfPresent(CardStatus.self, forKey: .status) ?? .new
         self.createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         self.lastShownAt = try container.decodeIfPresent(Date.self, forKey: .lastShownAt)
+        self.shownCount = try container.decodeIfPresent(Int.self, forKey: .shownCount) ?? 0
         self.updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
     }
 }
@@ -437,6 +441,9 @@ public struct GeneratedArticle: Codable, Identifiable, Equatable, Sendable {
 }
 
 public struct AppSettings: Codable, Equatable, Sendable {
+    public static let legacyDefaultExtractionPrompt = "請從網頁文字中挑選適合日文學習的自然日文句子與重要單字。"
+    public static let currentDefaultExtractionPrompt = "請從網頁文字中挑選適合日文學習的自然日文句子、重要單字／片語，以及可學習的文法句型。"
+
     public var displayIntervalMinutes: Int
     public var visibleDurationSeconds: Int
     public var crawlIntervalHours: Int
@@ -458,7 +465,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         displayIntervalMinutes: Int = 30,
         visibleDurationSeconds: Int = 20,
         crawlIntervalHours: Int = 6,
-        defaultExtractionPrompt: String = "請從網頁文字中挑選適合日文學習的自然日文句子與重要單字。",
+        defaultExtractionPrompt: String = Self.currentDefaultExtractionPrompt,
         providerConfig: ProviderConfig = ProviderConfig(),
         aiArticleEnabled: Bool = false,
         aiArticleIntervalHours: Int = 12,
@@ -472,7 +479,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.displayIntervalMinutes = displayIntervalMinutes
         self.visibleDurationSeconds = visibleDurationSeconds
         self.crawlIntervalHours = crawlIntervalHours
-        self.defaultExtractionPrompt = defaultExtractionPrompt
+        self.defaultExtractionPrompt = Self.normalizedDefaultExtractionPrompt(defaultExtractionPrompt)
         self.providerConfig = providerConfig
         self.aiArticleEnabled = aiArticleEnabled
         self.aiArticleIntervalHours = aiArticleIntervalHours
@@ -486,6 +493,10 @@ public struct AppSettings: Codable, Equatable, Sendable {
 
     public static func clampHour(_ value: Int) -> Int { min(23, max(0, value)) }
     public static func clampMinute(_ value: Int) -> Int { min(59, max(0, value)) }
+    public static func normalizedDefaultExtractionPrompt(_ value: String) -> String {
+        value == legacyDefaultExtractionPrompt ? currentDefaultExtractionPrompt : value
+    }
+
     /// 去重、過濾無效值並排序，星期幾以 Calendar 慣例（1...7）表示。
     public static func normalizeWeekdays(_ values: [Int]) -> [Int] {
         Array(Set(values.filter { (1...7).contains($0) })).sorted()
@@ -496,7 +507,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.displayIntervalMinutes = try container.decodeIfPresent(Int.self, forKey: .displayIntervalMinutes) ?? 30
         self.visibleDurationSeconds = try container.decodeIfPresent(Int.self, forKey: .visibleDurationSeconds) ?? 20
         self.crawlIntervalHours = try container.decodeIfPresent(Int.self, forKey: .crawlIntervalHours) ?? 6
-        self.defaultExtractionPrompt = try container.decodeIfPresent(String.self, forKey: .defaultExtractionPrompt) ?? "請從網頁文字中挑選適合日文學習的自然日文句子與重要單字。"
+        let decodedExtractionPrompt = try container.decodeIfPresent(String.self, forKey: .defaultExtractionPrompt) ?? Self.currentDefaultExtractionPrompt
+        self.defaultExtractionPrompt = Self.normalizedDefaultExtractionPrompt(decodedExtractionPrompt)
         self.providerConfig = try container.decodeIfPresent(ProviderConfig.self, forKey: .providerConfig) ?? ProviderConfig()
         self.aiArticleEnabled = try container.decodeIfPresent(Bool.self, forKey: .aiArticleEnabled) ?? false
         self.aiArticleIntervalHours = try container.decodeIfPresent(Int.self, forKey: .aiArticleIntervalHours) ?? 12

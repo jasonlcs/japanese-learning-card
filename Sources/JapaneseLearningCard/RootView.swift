@@ -344,63 +344,14 @@ struct CardView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             if let card = viewModel.currentCard {
-                VStack(alignment: .leading, spacing: 8) {
-                    CopyableTextRow(text: card.word, font: .system(size: 36, weight: .bold))
-                    CopyableTextRow(text: card.reading, font: .title3, color: .secondary)
-                    HStack(spacing: 6) {
-                        CardBadge(text: card.partOfSpeech)
-                        if card.jlptLevel != .unknown {
-                            CardBadge(text: card.jlptLevel.rawValue)
-                        }
-                        if card.verbFormType != .notVerb && card.verbFormType != .unknown {
-                            CardBadge(text: card.verbFormType.rawValue)
-                        }
-                    }
-                }
-
-                GroupBox("中文意思") {
-                    Text(card.meaningZh).frame(maxWidth: .infinity, alignment: .leading)
-                }
-
-                GroupBox("文法解說") {
-                    Text(card.grammarNoteZh).frame(maxWidth: .infinity, alignment: .leading)
-                }
-
-                GroupBox("例句") {
-                    VStack(alignment: .leading, spacing: 6) {
-                        CopyableTextRow(text: card.exampleJa, font: .headline)
-                        if !card.exampleReading.isEmpty {
-                            CopyableTextRow(text: card.exampleReading, font: .subheadline, color: .secondary)
-                        } else {
-                            Button {
-                                viewModel.fillCurrentExampleReading()
-                            } label: {
-                                Label(viewModel.isGeneratingExampleReading ? "補平假名中..." : "補平假名", systemImage: "wand.and.stars")
-                            }
-                            .disabled(viewModel.isGeneratingExampleReading)
-                        }
-                        Text(card.exampleZh).foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-
-                Link(card.sourceUrl.host() ?? card.sourceUrl.absoluteString, destination: card.sourceUrl)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                Spacer()
-
-                HStack {
-                    Button("略過") { viewModel.markCurrentCard(.skipped) }
-                    Button("已學會") { viewModel.markCurrentCard(.learned) }
-                    Spacer()
-                    Button {
-                        viewModel.showNextCard()
-                    } label: {
-                        Label("下一張", systemImage: "arrow.right")
-                    }
-                    .keyboardShortcut(.defaultAction)
-                }
+                StyledLearningCard(
+                    card: card,
+                    isGeneratingExampleReading: viewModel.isGeneratingExampleReading,
+                    fillExampleReading: viewModel.fillCurrentExampleReading,
+                    skipCard: { viewModel.markCurrentCard(.skipped) },
+                    learnCard: { viewModel.markCurrentCard(.learned) },
+                    nextCard: viewModel.showNextCard
+                )
             } else {
                 ContentUnavailableView(
                     "還沒有學習卡",
@@ -417,6 +368,477 @@ struct CardView: View {
             }
         }
         .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+private enum LearningCardLayoutKind {
+    case vocabulary
+    case grammar
+
+    init(card: LearningCard) {
+        let word = card.word.trimmingCharacters(in: .whitespacesAndNewlines)
+        let partOfSpeech = card.partOfSpeech.trimmingCharacters(in: .whitespacesAndNewlines)
+        if word.contains("〜") || word.contains("~") || partOfSpeech.contains("文法") || partOfSpeech.contains("句型") {
+            self = .grammar
+        } else {
+            self = .vocabulary
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .vocabulary: "單字卡"
+        case .grammar: "文法卡"
+        }
+    }
+
+    var icon: String { "book" }
+}
+
+private struct StyledLearningCard: View {
+    var card: LearningCard
+    var isGeneratingExampleReading: Bool
+    var fillExampleReading: () -> Void
+    var skipCard: () -> Void
+    var learnCard: () -> Void
+    var nextCard: () -> Void
+
+    private var kind: LearningCardLayoutKind { LearningCardLayoutKind(card: card) }
+    private var noteSections: CardNoteSections { CardNoteSections(note: card.grammarNoteZh) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            cardHeader
+
+            switch kind {
+            case .vocabulary:
+                vocabularyLayout
+            case .grammar:
+                grammarLayout
+            }
+
+            cardFooter
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(
+            RoundedRectangle(cornerRadius: 18)
+                .fill(Color(nsColor: .textBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18)
+                .stroke(Color.cardBlue.opacity(0.42), lineWidth: 2)
+        )
+    }
+
+    private var cardHeader: some View {
+        HStack(spacing: 0) {
+            Text(card.jlptLevel == .unknown ? "JLPT" : "JLPT \(card.jlptLevel.rawValue)")
+                .font(.system(size: 15, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(
+                    UnevenRoundedRectangle(
+                        topLeadingRadius: 10,
+                        bottomLeadingRadius: 10,
+                        bottomTrailingRadius: 0,
+                        topTrailingRadius: 0
+                    )
+                    .fill(Color.cardBlue)
+                )
+
+            Label(kind.title, systemImage: kind.icon)
+                .font(.system(size: 14, weight: .bold, design: .rounded))
+                .foregroundStyle(Color.cardBlue)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    UnevenRoundedRectangle(
+                        topLeadingRadius: 0,
+                        bottomLeadingRadius: 0,
+                        bottomTrailingRadius: 10,
+                        topTrailingRadius: 10
+                    )
+                    .fill(Color.white)
+                )
+                .overlay(
+                    UnevenRoundedRectangle(
+                        topLeadingRadius: 0,
+                        bottomLeadingRadius: 0,
+                        bottomTrailingRadius: 10,
+                        topTrailingRadius: 10
+                    )
+                    .stroke(Color.cardBlue, lineWidth: 1.5)
+                )
+
+            Spacer()
+
+            Text("#\(card.id.uuidString.prefix(3))")
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+                .foregroundStyle(Color.cardBlue)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color.cardBlue.opacity(0.55), style: StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
+                )
+        }
+    }
+
+    private var vocabularyLayout: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 10) {
+                wordHero
+                    .frame(maxWidth: .infinity, minHeight: 112)
+
+                Divider()
+                    .frame(height: 105)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    CardInfoPanel(title: "意味", systemImage: "lightbulb", tint: .cardOrange) {
+                        Text(card.meaningZh)
+                            .font(.body.weight(.semibold))
+                            .lineLimit(2)
+                        if let point = noteSections.point {
+                            Divider().overlay(Color.cardOrange.opacity(0.45))
+                            Text(point)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                    }
+
+                    CardInfoPanel(title: "品詞", systemImage: "tag.fill", tint: .cardGreen) {
+                        Text(card.partOfSpeech.isEmpty ? "未分類" : card.partOfSpeech)
+                            .font(.body.weight(.semibold))
+                            .lineLimit(1)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+            }
+
+            examplePanel(tint: .cardPink, title: "例文")
+
+            HStack(alignment: .top, spacing: 8) {
+                CardInfoPanel(title: "よく使う形", systemImage: "checkmark.circle.fill", tint: .cardBlue) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        ForEach(commonForms.prefix(3), id: \.self) { form in
+                            UsageLine(text: form)
+                        }
+                    }
+                }
+
+                CardInfoPanel(title: "関連語", systemImage: "star.fill", tint: .cardGreen) {
+                    Text(noteSections.relatedWords ?? "例文與解說中延伸記憶")
+                        .font(.callout)
+                        .lineLimit(2)
+                }
+            }
+        }
+    }
+
+    private var grammarLayout: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 10) {
+                wordHero
+                    .frame(maxWidth: .infinity, minHeight: 105)
+
+                CardInfoPanel(title: "意味", systemImage: "lightbulb", tint: .cardOrange) {
+                    Text(card.meaningZh)
+                        .font(.body.weight(.semibold))
+                        .lineLimit(2)
+                    if let point = noteSections.point {
+                        Divider().overlay(Color.cardOrange.opacity(0.45))
+                        Text(point)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+            }
+
+            HStack(alignment: .top, spacing: 8) {
+                CardInfoPanel(title: "接続", systemImage: "gearshape.fill", tint: .cardPink) {
+                    Text(connectionText)
+                        .font(.body.weight(.semibold))
+                        .lineLimit(2)
+                }
+
+                CardInfoPanel(title: "ポイント", systemImage: "exclamationmark.circle.fill", tint: .cardPink) {
+                    Text(noteSections.point ?? "注意句型前後的接續與語氣。")
+                        .font(.callout)
+                        .lineLimit(2)
+                }
+            }
+
+            examplePanel(tint: .cardBlue, title: "例文")
+
+            HStack(alignment: .top, spacing: 8) {
+                CardInfoPanel(title: "よく使う場面", systemImage: "checkmark.circle.fill", tint: .cardGreen) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        ForEach(usageScenes.prefix(2), id: \.self) { scene in
+                            UsageLine(text: scene)
+                        }
+                    }
+                }
+
+                CardInfoPanel(title: "類似表現との差", systemImage: "star.fill", tint: .cardOrange) {
+                    Text(noteSections.similarExpressions ?? "和近義句型比較時，先看接續與語氣差異。")
+                        .font(.callout)
+                        .lineLimit(2)
+                }
+            }
+        }
+    }
+
+    private var wordHero: some View {
+        VStack(spacing: 6) {
+            if !card.reading.isEmpty {
+                CopyableTextRow(text: card.reading, font: .callout.weight(.bold), color: .cardBlue)
+            }
+            CopyableTextRow(text: card.word, font: .system(size: kind == .grammar ? 32 : 42, weight: .black, design: .rounded), color: kind == .grammar ? .cardBlue : .primary)
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .minimumScaleFactor(0.55)
+            if !card.reading.isEmpty {
+                Text(card.reading.romanizedJapaneseFallback)
+                    .font(.callout.weight(.bold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .overlay(alignment: .leading) {
+            DecorativeStroke()
+                .foregroundStyle(Color.cardBlue)
+                .padding(.leading, 6)
+        }
+        .overlay(alignment: .trailing) {
+            DecorativeStroke()
+                .scaleEffect(x: -1, y: 1)
+                .foregroundStyle(Color.cardBlue)
+                .padding(.trailing, 6)
+        }
+    }
+
+    private var cardFooter: some View {
+        HStack(spacing: 8) {
+            Link(destination: card.sourceUrl) {
+                Label(card.sourceUrl.host() ?? card.sourceUrl.absoluteString, systemImage: "link")
+                    .font(.caption)
+                    .lineLimit(1)
+            }
+            .foregroundStyle(.secondary)
+
+            Text("出現 \(card.shownCount) 次")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Spacer(minLength: 8)
+
+            Button {
+                skipCard()
+            } label: {
+                Label("略過", systemImage: "forward")
+            }
+
+            Button {
+                learnCard()
+            } label: {
+                Label("已學會", systemImage: "checkmark")
+            }
+
+            Button {
+                nextCard()
+            } label: {
+                Label("下一張", systemImage: "arrow.right")
+            }
+            .keyboardShortcut(.defaultAction)
+            .buttonStyle(.borderedProminent)
+        }
+        .controlSize(.small)
+        .padding(.top, 2)
+    }
+
+    private var connectionText: String {
+        if let connection = noteSections.connection {
+            return connection
+        }
+        if card.word.contains("〜") || card.word.contains("~") {
+            return "\(card.word) の前後の接続"
+        } else if card.verbFormType != .notVerb && card.verbFormType != .unknown {
+            return "\(card.verbFormType.rawValue) + \(card.word)"
+        } else {
+            return "\(card.partOfSpeech.isEmpty ? "語句" : card.partOfSpeech) + \(card.word)"
+        }
+    }
+
+    private var commonForms: [String] {
+        if let commonForms = noteSections.commonForms {
+            return commonForms.cardListItems
+        }
+        var forms = [card.word]
+        if card.verbFormType != .notVerb && card.verbFormType != .unknown {
+            forms.append(card.verbFormType.rawValue)
+        }
+        if !card.reading.isEmpty {
+            forms.append(card.reading)
+        }
+        return forms
+    }
+
+    private var usageScenes: [String] {
+        noteSections.usageScenes?.cardListItems ?? [
+            "文章、會話或考題中辨認句型",
+            "搭配例句一起記憶語氣"
+        ]
+    }
+
+    private func examplePanel(tint: Color, title: String) -> some View {
+        CardInfoPanel(title: title, systemImage: "pencil", tint: tint) {
+            VStack(alignment: .leading, spacing: 8) {
+                CopyableTextRow(text: card.exampleJa, font: .headline)
+                    .lineLimit(2)
+                if !card.exampleReading.isEmpty {
+                    CopyableTextRow(text: card.exampleReading, font: .subheadline, color: .secondary)
+                        .lineLimit(1)
+                } else {
+                    Button {
+                        fillExampleReading()
+                    } label: {
+                        Label(isGeneratingExampleReading ? "補平假名中..." : "補平假名", systemImage: "wand.and.stars")
+                    }
+                    .disabled(isGeneratingExampleReading)
+                }
+                Text(card.exampleZh)
+                    .foregroundStyle(.secondary)
+                    .font(.callout)
+                    .lineLimit(2)
+            }
+        }
+    }
+}
+
+private struct CardNoteSections {
+    var connection: String?
+    var point: String?
+    var usageScenes: String?
+    var similarExpressions: String?
+    var commonForms: String?
+    var relatedWords: String?
+
+    init(note: String) {
+        let trimmedNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedNote.isEmpty else { return }
+
+        var activeKey: WritableKeyPath<CardNoteSections, String?>?
+        for rawLine in trimmedNote.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty else { continue }
+
+            if let match = Self.match(line: line) {
+                activeKey = match.keyPath
+                append(match.value, to: match.keyPath)
+            } else if let activeKey {
+                append(line, to: activeKey)
+            } else {
+                append(line, to: \.point)
+            }
+        }
+    }
+
+    private static func match(line: String) -> (keyPath: WritableKeyPath<CardNoteSections, String?>, value: String)? {
+        let labels: [(String, WritableKeyPath<CardNoteSections, String?>)] = [
+            ("接續", \.connection),
+            ("接続", \.connection),
+            ("重點", \.point),
+            ("ポイント", \.point),
+            ("使用場景", \.usageScenes),
+            ("よく使う場面", \.usageScenes),
+            ("類似表現", \.similarExpressions),
+            ("類似表現との差", \.similarExpressions),
+            ("常用形", \.commonForms),
+            ("よく使う形", \.commonForms),
+            ("よく使う", \.commonForms),
+            ("相關語", \.relatedWords),
+            ("関連語", \.relatedWords)
+        ]
+
+        for (label, keyPath) in labels {
+            for separator in ["：", ":"] {
+                let prefix = "\(label)\(separator)"
+                if line.hasPrefix(prefix) {
+                    let value = String(line.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                    return (keyPath, value)
+                }
+            }
+        }
+        return nil
+    }
+
+    private mutating func append(_ value: String, to keyPath: WritableKeyPath<CardNoteSections, String?>) {
+        guard !value.isEmpty else { return }
+        if let existing = self[keyPath: keyPath], !existing.isEmpty {
+            self[keyPath: keyPath] = "\(existing)\n\(value)"
+        } else {
+            self[keyPath: keyPath] = value
+        }
+    }
+}
+
+private struct CardInfoPanel<Content: View>: View {
+    var title: String
+    var systemImage: String
+    var tint: Color
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(title, systemImage: systemImage)
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(tint.gradient, in: Capsule())
+
+            content
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(9)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(tint.opacity(0.22), lineWidth: 1)
+        )
+    }
+}
+
+private struct UsageLine: View {
+    var text: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Circle()
+                .fill(Color.cardBlue)
+                .frame(width: 5, height: 5)
+            Text(text)
+                .font(.callout.weight(.medium))
+                .lineLimit(1)
+        }
+    }
+}
+
+private struct DecorativeStroke: View {
+    var body: some View {
+        VStack(spacing: 5) {
+            Capsule().frame(width: 13, height: 2.5).rotationEffect(.degrees(28))
+            Capsule().frame(width: 16, height: 2.5)
+            Capsule().frame(width: 13, height: 2.5).rotationEffect(.degrees(-28))
+        }
     }
 }
 
@@ -430,6 +852,34 @@ struct CardBadge: View {
             .padding(.vertical, 4)
             .background(.blue.opacity(0.12))
             .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+private extension Color {
+    static let cardBlue = Color(red: 0.05, green: 0.34, blue: 0.68)
+    static let cardOrange = Color(red: 0.96, green: 0.61, blue: 0.05)
+    static let cardPink = Color(red: 0.93, green: 0.27, blue: 0.45)
+    static let cardGreen = Color(red: 0.25, green: 0.68, blue: 0.28)
+}
+
+private extension String {
+    var romanizedJapaneseFallback: String {
+        let value = trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return "" }
+        return value
+            .replacingOccurrences(of: "ー", with: "-")
+            .replacingOccurrences(of: " ", with: " ")
+    }
+
+    var cardListItems: [String] {
+        split(whereSeparator: { character in
+            character == "\n" || character == "、" || character == "，" || character == ";"
+        })
+        .map { item in
+            item.trimmingCharacters(in: CharacterSet(charactersIn: " -•・\t"))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        .filter { !$0.isEmpty }
     }
 }
 
@@ -1188,7 +1638,7 @@ struct HistoryView: View {
                     Text(card.status.rawValue).font(.caption)
                 }
                 if let lastShownAt = card.lastShownAt {
-                    Text("複習：\(lastShownAt.formatted())")
+                    Text("複習：\(lastShownAt.formatted()) · 出現 \(card.shownCount) 次")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

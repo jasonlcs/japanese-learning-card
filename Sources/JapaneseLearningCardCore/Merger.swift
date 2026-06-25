@@ -281,7 +281,8 @@ public enum Merger {
             }
             // 兩邊都跟 base 不同
             if isShallowCardDiff(l, r) {
-                let newer = (l.lastShownAt ?? .distantPast) >= (r.lastShownAt ?? .distantPast) ? l : r
+                var newer = (l.lastShownAt ?? .distantPast) >= (r.lastShownAt ?? .distantPast) ? l : r
+                newer.shownCount = max(l.shownCount, r.shownCount)
                 merged.append(newer)
                 continue
             }
@@ -301,7 +302,7 @@ public enum Merger {
     }
 
     private static func isShallowCardDiff(_ a: LearningCard, _ b: LearningCard) -> Bool {
-        // 內容欄位相同, 只有 lastShownAt / status / updatedAt 變動 →
+        // 內容欄位相同, 只有 lastShownAt / shownCount / status / updatedAt 變動 →
         // 視為「兩台各自複習了同一張卡」, 不算衝突.
         return a.word == b.word
             && a.reading == b.reading
