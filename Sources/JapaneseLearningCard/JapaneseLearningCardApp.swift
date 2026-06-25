@@ -42,6 +42,7 @@ enum AppMenuFactory {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuBarController: MenuBarController?
+    private var updater: AppUpdaterController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Task { @MainActor in
@@ -49,13 +50,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let viewModel = AppViewModel(store: store)
             let controller = MenuBarController(viewModel: viewModel)
             self.menuBarController = controller
-            viewModel.start()
-        }
 
-        Task { @MainActor in
-            // 啟動稍後再檢查，避免和開窗、初始化搶資源。
-            try? await Task.sleep(for: .seconds(3))
-            await UpdateChecker.shared.autoCheckIfNeeded()
+            // Sparkle：app 內直接下載／安裝更新。把檢查更新與自動檢查開關
+            // 接到 viewModel 的 closure，讓設定頁可以觸發。
+            let updater = AppUpdaterController()
+            self.updater = updater
+            updater.automaticallyChecksForUpdates =
+                UserDefaults.standard.bool(forKey: UpdateChecker.autoCheckDefaultsKey)
+            viewModel.requestCheckForUpdates = { updater.checkForUpdates() }
+            viewModel.setAutomaticUpdateChecks = { updater.automaticallyChecksForUpdates = $0 }
+
+            viewModel.start()
         }
     }
 
@@ -106,11 +111,6 @@ final class MenuBarController: NSObject {
         popover.contentSize = NSSize(width: 520, height: 560)
         popover.appearance = NSAppearance(named: .aqua)
         popover.contentViewController = NSHostingController(rootView: RootView(viewModel: viewModel))
-
-        UpdateChecker.prepareToPresentAlert = { [weak self] in
-            self?.popover.performClose(nil)
-            NSApp.activate(ignoringOtherApps: true)
-        }
 
         viewModel.requestShowPopover = { [weak self] in
             self?.showPopover()

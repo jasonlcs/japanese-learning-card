@@ -1189,15 +1189,18 @@ struct SettingsView: View {
 
                 settingsBox("更新") {
                     Toggle("自動檢查更新", isOn: $autoCheckUpdates)
-                        .help("啟動時若有新版本會跳出提示（每小時最多檢查一次）。")
+                        .help("背景定期檢查新版本，有更新時會提示你下載並安裝。")
+                        .onChange(of: autoCheckUpdates) { _, newValue in
+                            viewModel.setAutomaticUpdateChecks?(newValue)
+                        }
                     HStack {
                         Button {
-                            Task { await UpdateChecker.shared.checkForUpdates(showUpToDate: true) }
+                            viewModel.requestCheckForUpdates?()
                         } label: {
                             Label("立即檢查更新", systemImage: "arrow.down.circle")
                         }
                         Spacer()
-                        Text("目前版本 \(UpdateChecker.shared.currentVersion)")
+                        Text("目前版本 \(UpdateChecker.currentVersion)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
