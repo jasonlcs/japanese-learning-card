@@ -3,6 +3,15 @@
     <channel>
         <title>JapaneseLearningCard</title>
         <item>
+            <title>0.2.8</title>
+            <pubDate>Thu, 25 Jun 2026 14:58:43 +0000</pubDate>
+            <sparkle:version>2008</sparkle:version>
+            <sparkle:shortVersionString>0.2.8</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/jasonlcs/japanese-learning-card/releases/download/v0.2.8/JapaneseLearningCard.dmg" length="4555311" type="application/octet-stream" sparkle:edSignature="3gpmRliRYBGSKrlkC0H1uplkBsWYnzeggRfVVvbqNkvoAeOOaTLANihHaaMRBYlgaHT8c278x0+yjWrJNptdBg=="/>
+        </item>
+        <item>
             <title>0.2.7</title>
             <pubDate>Thu, 25 Jun 2026 12:05:51 +0000</pubDate>
             <sparkle:version>2007</sparkle:version>
@@ -19,15 +28,6 @@
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
             <enclosure url="https://github.com/jasonlcs/japanese-learning-card/releases/download/v0.2.6/JapaneseLearningCard.dmg" length="4526193" type="application/octet-stream" sparkle:edSignature="o9q6ChbobpzFPd+0O3SmRLNTVPvlJ2GM3uN+KxgXgpE0YLqEl/SOtapOjKFTmTtTp9/h1Dd66mU+GVoPJoTmCg=="/>
-        </item>
-        <item>
-            <title>0.2.5</title>
-            <pubDate>Thu, 25 Jun 2026 09:34:30 +0000</pubDate>
-            <sparkle:version>2005</sparkle:version>
-            <sparkle:shortVersionString>0.2.5</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/jasonlcs/japanese-learning-card/releases/download/v0.2.5/JapaneseLearningCard.dmg" length="4525907" type="application/octet-stream" sparkle:edSignature="Sr2rKXkYoQ+oljlYm+btz97egim7aXIT1Dixzv0ACexcbkehec10Y9leCpmbO9arN40k6woGCC0C8C/Vfp0nCg=="/>
         </item>
     </channel>
 </rss>
