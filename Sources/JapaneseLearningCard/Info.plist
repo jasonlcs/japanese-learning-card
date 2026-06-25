@@ -29,7 +29,7 @@
 	<string>https://jasonlcs.github.io/japanese-learning-card/appcast.xml</string>
 	<!-- EdDSA 公鑰：用 Sparkle 的 generate_keys 產生後填入（見 RELEASE.md） -->
 	<key>SUPublicEDKey</key>
-	<string>__SPARKLE_PUBLIC_KEY__</string>
+	<string>MGtZxo5/+AyMl7xmYcg1TSk/tnoKr4HhAe/kcuHc41A=</string>
 	<!-- sandboxed app 需要啟用安裝器 XPC service 才能自動安裝 -->
 	<key>SUEnableInstallerLauncherService</key>
 	<true/>
