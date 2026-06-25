@@ -43,6 +43,14 @@ if [ -d "$SPARKLE_FRAMEWORK" ]; then
     echo "▸ 內嵌 Sparkle.framework..."
     mkdir -p "$APP_BUNDLE/Contents/Frameworks"
     cp -RP "$SPARKLE_FRAMEWORK" "$APP_BUNDLE/Contents/Frameworks/"
+    # SwiftPM 不會自動加「bundle 內找 framework」的 rpath，手工組 bundle 時
+    # 必須補上 @executable_path/../Frameworks，否則 dyld 找不到 Sparkle 會直接 abort。
+    # 在簽名前改 binary 才不會破壞簽章。
+    if ! otool -l "$APP_BUNDLE/Contents/MacOS/$PRODUCT" | grep -q "@executable_path/../Frameworks"; then
+        echo "▸ 補上 @executable_path/../Frameworks rpath..."
+        install_name_tool -add_rpath "@executable_path/../Frameworks" \
+            "$APP_BUNDLE/Contents/MacOS/$PRODUCT"
+    fi
 else
     echo "⚠️ 找不到 Sparkle.framework ($SPARKLE_FRAMEWORK)，自動更新將無法運作"
 fi
