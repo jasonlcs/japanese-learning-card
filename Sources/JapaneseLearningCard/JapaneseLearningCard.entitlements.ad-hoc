@@ -13,5 +13,9 @@
 	<true/>
 	<key>com.apple.security.network.client</key>
 	<true/>
+	<!-- 允許載入內嵌的 Sparkle.framework：ad-hoc 簽名沒有 Team ID，
+	     否則 library validation 會以「不同 Team ID」拒絕載入。 -->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
 </dict>
 </plist>
