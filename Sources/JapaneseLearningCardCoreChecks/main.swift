@@ -10,7 +10,7 @@ struct CoreChecks {
         webCrawlerUsesCustomUserAgent()
         schedulerClampsIntervals()
         schedulerComputesNextAIArticleFireDate()
-        cardSelectorPrioritizesFreshThenOldestReviewingAndSkipsSkipped()
+        cardSelectorRandomlyChoosesReviewableCardsOnly()
         htmlExtractorRemovesScriptsStylesTagsAndDecodesEntities()
         try openAICompatibleRequestAndCardDecoding()
         try manualCardsRequestAndN5Retention()
@@ -131,7 +131,7 @@ struct CoreChecks {
         expect(policy.nextAIArticleFireDate(settings: noDays, after: now, calendar: calendar) == nil, "no weekdays should yield nil")
     }
 
-    private static func cardSelectorPrioritizesFreshThenOldestReviewingAndSkipsSkipped() {
+    private static func cardSelectorRandomlyChoosesReviewableCardsOnly() {
         let selector = CardSelector()
         let url = URL(string: "https://example.com")!
         let old = Date(timeIntervalSince1970: 100)
@@ -139,11 +139,15 @@ struct CoreChecks {
         let skipped = card("飛ばす", status: .skipped, createdAt: old, lastShownAt: nil, url: url)
         let reviewingRecent = card("最近", status: .reviewing, createdAt: old, lastShownAt: recent, url: url)
         let fresh = card("新しい", status: .new, createdAt: recent, lastShownAt: nil, url: url)
-
-        expect(selector.nextCard(from: [skipped, reviewingRecent, fresh])?.word == "新しい", "fresh new card should be selected first")
-
         let reviewingOld = card("古い", status: .reviewing, createdAt: old, lastShownAt: old, url: url)
-        expect(selector.nextCard(from: [skipped, reviewingRecent, reviewingOld])?.word == "古い", "oldest reviewing card should be selected")
+
+        let candidates = [skipped, reviewingRecent, fresh, reviewingOld]
+        for _ in 0..<20 {
+            let selected = selector.nextCard(from: candidates)
+            expect(selected != nil, "reviewable cards should be selected")
+            expect(selected?.status != .skipped, "skipped cards should not be selected")
+            expect(selected?.status != .learned, "learned cards should not be selected")
+        }
 
         let learned = card("学習済み", status: .learned, createdAt: old, lastShownAt: old, url: url)
         expect(selector.nextCard(from: [skipped, learned]) == nil, "learned cards should not be selected")
@@ -1435,4 +1439,3 @@ private struct MockLLMClient: LLMClient {
         )
     }
 }
-
