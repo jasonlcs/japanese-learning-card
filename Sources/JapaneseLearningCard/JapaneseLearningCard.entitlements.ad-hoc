@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+		Ad-hoc 簽名用, 只放 sandbox 安全的 entitlement。
+		不放 com.apple.developer.icloud-* 是因為 AMFI 會拒絕執行
+		ad-hoc signed app with restricted entitlements, 直接 kill。
+		想跑 iCloud 同步要 Developer ID 簽名版本 (build-app.sh 帶
+		SIGNING_IDENTITY 環境變數)。
+	-->
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
+</dict>
+</plist>

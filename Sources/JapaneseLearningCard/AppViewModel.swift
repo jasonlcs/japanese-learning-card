@@ -89,13 +89,23 @@ final class AppViewModel: ObservableObject {
             await store.ensureAISentinelSource(extractionPrompt: AISource.sentinelExtractionPrompt)
             await reload()
             scheduleTimers()
+            #if ICLOUD_ENABLED
             await bootstrapICloudSync()
+            #else
+            // 沒有 iCloud entitlement 的 build (ad-hoc / swift run) 不啟動
+            // CloudKit, 否則 CKContainer.__allocating_init 會被 amfi kill。
+            // 給 UI 一個明確的狀態, 不要讓 iCloud 區塊永遠顯示「尚未檢查」。
+            iCloudStatus = .unknown(underlying: "本 build 未含 iCloud entitlement, 需 Developer ID 簽名")
+            #endif
         }
     }
 
     /// 開機時啟動 iCloud 同步流程: 檢查帳號、註冊訂閱、第一次 pull/push。
     /// 沒 iCloud entitlement 或帳號不可用時整段 no-op, app 退回純本地模式。
+    /// 只在 build 時有 `ICLOUD_ENABLED` flag 才會編進 binary (build-app.sh
+    /// 只有 Developer ID 簽名才會傳 `-D ICLOUD_ENABLED`)。
     private func bootstrapICloudSync() async {
+        #if ICLOUD_ENABLED
         let info = await accountChecker.info()
         iCloudStatus = info.status
         iCloudFingerprint = CloudKitAccountChecker.displayFingerprint(info.userRecordName)
@@ -124,6 +134,7 @@ final class AppViewModel: ObservableObject {
 
         // 第一次 pull (雲端有就 merge, 沒就 push 上去)
         await performSync()
+        #endif
     }
 
     /// snapshot 變化時觸發 push。debounce 500ms 避免短時間多次寫入。

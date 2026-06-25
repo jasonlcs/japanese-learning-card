@@ -69,6 +69,17 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "✅ 版本設為 $VERSION（取自 tag $GITHUB_REF_NAME）"
 
+      - name: Setup provisioning profile
+        if: ${{ env.SIGNING_IDENTITY != '' }}
+        run: |
+          PP_BASE64="${{ secrets.DEVELOPER_PROVISIONING_PROFILE_BASE64 }}"
+          if [ -n "$PP_BASE64" ]; then
+            echo "$PP_BASE64" | base64 -d > "JapaneseLearningCard_DeveloperID.provisionprofile"
+            echo "✅ Provisioning profile 已就緒"
+          else
+            echo "⚠️ 未設定 DEVELOPER_PROVISIONING_PROFILE_BASE64 secret"
+          fi
+
       - name: Build .app and DMG
         run: |
           chmod +x build-app.sh
