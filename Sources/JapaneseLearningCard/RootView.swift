@@ -46,7 +46,7 @@ struct RootView: View {
                 }
             }
         }
-        .frame(minWidth: 520, minHeight: 560)
+        .frame(minWidth: 520)
         .background(Color(nsColor: .windowBackgroundColor))
         .scrollContentBackground(.hidden)
         .onHover { inside in
@@ -398,36 +398,42 @@ struct CardView: View {
     @ObservedObject var viewModel: AppViewModel
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                if let card = viewModel.currentCard {
-                    StyledLearningCard(
-                        card: card,
-                        timerState: viewModel.visibleCardTimerState,
-                        isGeneratingExampleReading: viewModel.isGeneratingExampleReading,
-                        fillExampleReading: viewModel.fillCurrentExampleReading,
-                        skipCard: { viewModel.markCurrentCard(.skipped) },
-                        learnCard: { viewModel.markCurrentCard(.learned) },
-                        nextCard: viewModel.showNextCard
-                    )
-                } else {
-                    ContentUnavailableView(
-                        "還沒有學習卡",
-                        systemImage: "sparkles",
-                        description: Text("新增網址與 API key 後，按立即更新產生第一批卡片。")
-                    )
-                    Button {
-                        viewModel.refreshNow()
-                    } label: {
-                        Label(viewModel.isRefreshing ? "更新中..." : "立即更新", systemImage: "arrow.clockwise")
-                    }
-                    .disabled(viewModel.isRefreshing)
+        VStack(alignment: .leading, spacing: 16) {
+            if let card = viewModel.currentCard {
+                StyledLearningCard(
+                    card: card,
+                    isGeneratingExampleReading: viewModel.isGeneratingExampleReading,
+                    fillExampleReading: viewModel.fillCurrentExampleReading,
+                    skipCard: { viewModel.markCurrentCard(.skipped) },
+                    learnCard: { viewModel.markCurrentCard(.learned) },
+                    nextCard: viewModel.showNextCard
+                )
+            } else {
+                ContentUnavailableView(
+                    "還沒有學習卡",
+                    systemImage: "sparkles",
+                    description: Text("新增網址與 API key 後，按立即更新產生第一批卡片。")
+                )
+                Button {
+                    viewModel.refreshNow()
+                } label: {
+                    Label(viewModel.isRefreshing ? "更新中..." : "立即更新", systemImage: "arrow.clockwise")
                 }
+                .disabled(viewModel.isRefreshing)
+                Spacer()
             }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
+        .padding(12)
+        .padding(.bottom, viewModel.currentCard == nil ? 0 : 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .overlay(alignment: .bottom) {
+            if viewModel.currentCard != nil {
+                CardTimerLightBar(timerState: viewModel.visibleCardTimerState)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 3)
+                    .allowsHitTesting(false)
+            }
+        }
     }
 }
 
@@ -493,7 +499,6 @@ private enum LearningCardLayoutKind {
 
 private struct StyledLearningCard: View {
     var card: LearningCard
-    var timerState: VisibleCardTimerState
     var isGeneratingExampleReading: Bool
     var fillExampleReading: () -> Void
     var skipCard: () -> Void
@@ -526,12 +531,6 @@ private struct StyledLearningCard: View {
             RoundedRectangle(cornerRadius: 18)
                 .stroke(Color.cardBlue.opacity(0.42), lineWidth: 2)
         )
-        .overlay(alignment: .bottom) {
-            CardTimerLightBar(timerState: timerState)
-                .padding(.horizontal, 14)
-                .padding(.bottom, 4)
-                .allowsHitTesting(false)
-        }
     }
 
     private var cardHeader: some View {
@@ -708,7 +707,7 @@ private struct StyledLearningCard: View {
                     .minimumScaleFactor(0.5)
             }
             Text(card.word)
-                .font(.system(size: kind == .grammar ? 32 : 42, weight: .black, design: .rounded))
+                .font(.system(size: kind == .grammar ? 30 : 38, weight: .black, design: .rounded))
                 .foregroundStyle(kind == .grammar ? Color.cardBlue : .primary)
                 .textSelection(.enabled)
                 .multilineTextAlignment(.center)
