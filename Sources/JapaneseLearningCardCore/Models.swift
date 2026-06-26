@@ -446,6 +446,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
 
     public var displayIntervalMinutes: Int
     public var visibleDurationSeconds: Int
+    public var quickReviewDurationMinutes: Int
+    public var quickReviewCardIntervalSeconds: Int
     public var crawlIntervalHours: Int
     public var defaultExtractionPrompt: String
     public var providerConfig: ProviderConfig
@@ -464,6 +466,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public init(
         displayIntervalMinutes: Int = 30,
         visibleDurationSeconds: Int = 20,
+        quickReviewDurationMinutes: Int = 3,
+        quickReviewCardIntervalSeconds: Int = 20,
         crawlIntervalHours: Int = 6,
         defaultExtractionPrompt: String = Self.currentDefaultExtractionPrompt,
         providerConfig: ProviderConfig = ProviderConfig(),
@@ -478,6 +482,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
     ) {
         self.displayIntervalMinutes = displayIntervalMinutes
         self.visibleDurationSeconds = visibleDurationSeconds
+        self.quickReviewDurationMinutes = max(1, quickReviewDurationMinutes)
+        self.quickReviewCardIntervalSeconds = max(5, quickReviewCardIntervalSeconds)
         self.crawlIntervalHours = crawlIntervalHours
         self.defaultExtractionPrompt = Self.normalizedDefaultExtractionPrompt(defaultExtractionPrompt)
         self.providerConfig = providerConfig
@@ -506,6 +512,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.displayIntervalMinutes = try container.decodeIfPresent(Int.self, forKey: .displayIntervalMinutes) ?? 30
         self.visibleDurationSeconds = try container.decodeIfPresent(Int.self, forKey: .visibleDurationSeconds) ?? 20
+        self.quickReviewDurationMinutes = max(1, try container.decodeIfPresent(Int.self, forKey: .quickReviewDurationMinutes) ?? 3)
+        self.quickReviewCardIntervalSeconds = max(5, try container.decodeIfPresent(Int.self, forKey: .quickReviewCardIntervalSeconds) ?? 20)
         self.crawlIntervalHours = try container.decodeIfPresent(Int.self, forKey: .crawlIntervalHours) ?? 6
         let decodedExtractionPrompt = try container.decodeIfPresent(String.self, forKey: .defaultExtractionPrompt) ?? Self.currentDefaultExtractionPrompt
         self.defaultExtractionPrompt = Self.normalizedDefaultExtractionPrompt(decodedExtractionPrompt)

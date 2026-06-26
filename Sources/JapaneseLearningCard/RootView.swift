@@ -19,8 +19,15 @@ struct RootView: View {
 
                 AutoDisplayPauseToggle(viewModel: viewModel)
                 PresentationModeToggle(viewModel: viewModel)
+                if viewModel.selectedTab == 0 {
+                    QuickReviewControls(viewModel: viewModel)
+                }
             }
-            .padding()
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+            .padding(.bottom, 8)
+            .fixedSize(horizontal: false, vertical: true)
+            .layoutPriority(1)
 
             Divider()
 
@@ -391,33 +398,72 @@ struct CardView: View {
     @ObservedObject var viewModel: AppViewModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            if let card = viewModel.currentCard {
-                StyledLearningCard(
-                    card: card,
-                    isGeneratingExampleReading: viewModel.isGeneratingExampleReading,
-                    fillExampleReading: viewModel.fillCurrentExampleReading,
-                    skipCard: { viewModel.markCurrentCard(.skipped) },
-                    learnCard: { viewModel.markCurrentCard(.learned) },
-                    nextCard: viewModel.showNextCard
-                )
-            } else {
-                ContentUnavailableView(
-                    "還沒有學習卡",
-                    systemImage: "sparkles",
-                    description: Text("新增網址與 API key 後，按立即更新產生第一批卡片。")
-                )
-                Button {
-                    viewModel.refreshNow()
-                } label: {
-                    Label(viewModel.isRefreshing ? "更新中..." : "立即更新", systemImage: "arrow.clockwise")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                if let card = viewModel.currentCard {
+                    StyledLearningCard(
+                        card: card,
+                        timerState: viewModel.visibleCardTimerState,
+                        isGeneratingExampleReading: viewModel.isGeneratingExampleReading,
+                        fillExampleReading: viewModel.fillCurrentExampleReading,
+                        skipCard: { viewModel.markCurrentCard(.skipped) },
+                        learnCard: { viewModel.markCurrentCard(.learned) },
+                        nextCard: viewModel.showNextCard
+                    )
+                } else {
+                    ContentUnavailableView(
+                        "還沒有學習卡",
+                        systemImage: "sparkles",
+                        description: Text("新增網址與 API key 後，按立即更新產生第一批卡片。")
+                    )
+                    Button {
+                        viewModel.refreshNow()
+                    } label: {
+                        Label(viewModel.isRefreshing ? "更新中..." : "立即更新", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(viewModel.isRefreshing)
                 }
-                .disabled(viewModel.isRefreshing)
-                Spacer()
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+private struct QuickReviewControls: View {
+    @ObservedObject var viewModel: AppViewModel
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if viewModel.isQuickReviewActive {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    Text(Self.durationText(viewModel.quickReviewSessionState.remainingSeconds(at: context.date)))
+                        .font(.caption.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(Color.cardBlue)
+                        .frame(minWidth: 48, alignment: .trailing)
+                }
+
+                Button {
+                    viewModel.stopQuickReview()
+                } label: {
+                    Label("停止", systemImage: "stop.fill")
+                }
+                .controlSize(.small)
+            } else {
+                Button {
+                    viewModel.startQuickReview()
+                } label: {
+                    Label("快速複習", systemImage: "timer")
+                }
+                .controlSize(.small)
             }
         }
-        .padding()
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private static func durationText(_ seconds: TimeInterval) -> String {
+        let totalSeconds = max(0, Int(seconds.rounded(.up)))
+        return String(format: "%02d:%02d", totalSeconds / 60, totalSeconds % 60)
     }
 }
 
@@ -447,6 +493,7 @@ private enum LearningCardLayoutKind {
 
 private struct StyledLearningCard: View {
     var card: LearningCard
+    var timerState: VisibleCardTimerState
     var isGeneratingExampleReading: Bool
     var fillExampleReading: () -> Void
     var skipCard: () -> Void
@@ -457,7 +504,7 @@ private struct StyledLearningCard: View {
     private var noteSections: CardNoteSections { CardNoteSections(note: card.grammarNoteZh) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
+        VStack(alignment: .leading, spacing: 7) {
             cardHeader
 
             switch kind {
@@ -469,7 +516,7 @@ private struct StyledLearningCard: View {
 
             cardFooter
         }
-        .padding(12)
+        .padding(10)
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .background(
             RoundedRectangle(cornerRadius: 18)
@@ -479,6 +526,12 @@ private struct StyledLearningCard: View {
             RoundedRectangle(cornerRadius: 18)
                 .stroke(Color.cardBlue.opacity(0.42), lineWidth: 2)
         )
+        .overlay(alignment: .bottom) {
+            CardTimerLightBar(timerState: timerState)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 4)
+                .allowsHitTesting(false)
+        }
     }
 
     private var cardHeader: some View {
@@ -523,27 +576,17 @@ private struct StyledLearningCard: View {
                 )
 
             Spacer()
-
-            Text("#\(card.id.uuidString.prefix(3))")
-                .font(.system(size: 13, weight: .bold, design: .rounded))
-                .foregroundStyle(Color.cardBlue)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 4)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color.cardBlue.opacity(0.55), style: StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
-                )
         }
     }
 
     private var vocabularyLayout: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .center, spacing: 10) {
                 wordHero
-                    .frame(maxWidth: .infinity, minHeight: 112)
+                    .frame(maxWidth: .infinity, minHeight: 96)
 
                 Divider()
-                    .frame(height: 105)
+                    .frame(height: 92)
 
                 VStack(alignment: .leading, spacing: 8) {
                     CardInfoPanel(title: "意味", systemImage: "lightbulb", tint: .cardOrange) {
@@ -589,10 +632,10 @@ private struct StyledLearningCard: View {
     }
 
     private var grammarLayout: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .center, spacing: 10) {
                 wordHero
-                    .frame(maxWidth: .infinity, minHeight: 105)
+                    .frame(maxWidth: .infinity, minHeight: 94)
 
                 CardInfoPanel(title: "意味", systemImage: "lightbulb", tint: .cardOrange) {
                     Text(card.meaningZh)
@@ -664,16 +707,14 @@ private struct StyledLearningCard: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.5)
             }
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(card.word)
-                    .font(.system(size: kind == .grammar ? 32 : 42, weight: .black, design: .rounded))
-                    .foregroundStyle(kind == .grammar ? Color.cardBlue : .primary)
-                    .textSelection(.enabled)
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
-                    .minimumScaleFactor(0.4)
-                CopyButton(text: copyText)
-            }
+            Text(card.word)
+                .font(.system(size: kind == .grammar ? 32 : 42, weight: .black, design: .rounded))
+                .foregroundStyle(kind == .grammar ? Color.cardBlue : .primary)
+                .textSelection(.enabled)
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .minimumScaleFactor(0.4)
+                .padding(.horizontal, 24)
             if showRomanized {
                 Text(romanized)
                     .font(.callout.weight(.bold))
@@ -694,6 +735,11 @@ private struct StyledLearningCard: View {
                 .scaleEffect(x: -1, y: 1)
                 .foregroundStyle(Color.cardBlue)
                 .padding(.trailing, 6)
+        }
+        .overlay(alignment: .topTrailing) {
+            CopyButton(text: copyText)
+                .padding(.top, 2)
+                .padding(.trailing, 10)
         }
     }
 
@@ -717,23 +763,29 @@ private struct StyledLearningCard: View {
             } label: {
                 Label("略過", systemImage: "forward")
             }
+            .controlSize(.small)
 
             Button {
                 learnCard()
             } label: {
                 Label("已學會", systemImage: "checkmark")
             }
+            .controlSize(.small)
 
             Button {
                 nextCard()
             } label: {
                 Label("下一張", systemImage: "arrow.right")
+                    .font(.callout.weight(.semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
             }
             .keyboardShortcut(.defaultAction)
             .buttonStyle(.borderedProminent)
+            .controlSize(.regular)
         }
-        .controlSize(.small)
         .padding(.top, 2)
+        .padding(.bottom, 12)
     }
 
     private var connectionText: String {
@@ -912,6 +964,36 @@ private struct DecorativeStroke: View {
             Capsule().frame(width: 16, height: 2.5)
             Capsule().frame(width: 13, height: 2.5).rotationEffect(.degrees(-28))
         }
+    }
+}
+
+private struct CardTimerLightBar: View {
+    var timerState: VisibleCardTimerState
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
+            GeometryReader { proxy in
+                let fraction = timerState.remainingFraction(at: context.date)
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.cardBlue.opacity(0.12))
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [.cardGreen, .cardOrange, .cardPink],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: proxy.size.width * fraction)
+                        .shadow(color: Color.cardOrange.opacity(timerState.isActive ? 0.45 : 0.15), radius: 5)
+                }
+            }
+            .opacity(timerState.isActive ? 1 : 0.35)
+            .accessibilityLabel("卡片停留時間")
+            .accessibilityValue("\(Int(timerState.duration * timerState.remainingFraction(at: context.date))) 秒")
+        }
+        .frame(height: 5)
     }
 }
 
@@ -1140,6 +1222,8 @@ struct SettingsView: View {
                 settingsBox("顯示") {
                     Stepper("顯示頻率：\(viewModel.snapshot.settings.displayIntervalMinutes) 分鐘", value: binding(\.displayIntervalMinutes), in: 1...1440)
                     Stepper("停留秒數：\(viewModel.snapshot.settings.visibleDurationSeconds) 秒", value: binding(\.visibleDurationSeconds), in: 3...300)
+                    Stepper("快速複習時間：\(viewModel.snapshot.settings.quickReviewDurationMinutes) 分鐘", value: binding(\.quickReviewDurationMinutes), in: 1...30)
+                    Stepper("快速換卡：\(viewModel.snapshot.settings.quickReviewCardIntervalSeconds) 秒", value: binding(\.quickReviewCardIntervalSeconds), in: 5...120)
                     Stepper("爬文頻率：\(viewModel.snapshot.settings.crawlIntervalHours) 小時", value: binding(\.crawlIntervalHours), in: 1...168)
                 }
     }
@@ -1246,8 +1330,10 @@ struct SettingsView: View {
                                 systemImage: "arrow.clockwise.icloud"
                             )
                         }
-                        .disabled(viewModel.iCloudIsSyncing)
-                        .help("從 iCloud 拉最新一份回來, 跟本機做 3-way merge")
+                        .disabled(viewModel.iCloudIsSyncing || !viewModel.isICloudSyncAvailable)
+                        .help(viewModel.isICloudSyncAvailable
+                            ? "從 iCloud 拉最新一份回來, 跟本機做 3-way merge"
+                            : "本機 / UI 驗證 build 已停用 iCloud 同步")
                         Spacer()
                     }
                 }

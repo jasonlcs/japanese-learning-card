@@ -13,10 +13,11 @@ enum UpdateChecker {
     }
 
     /// 是否為本地開發建置。正式發行走 `swift build -c release`（見 build-app.sh），
-    /// 不會帶 DEBUG flag；本地 `swift build` / `swift run` 則會。
+    /// 不會帶 DEBUG / LOCAL_BUILD flag；本地 `swift build` / `swift run` 或
+    /// UI 驗證用 `build-app.sh` 則會。
     /// 本地版不啟動 Sparkle 自動更新，也不檢查更新，避免抓到正式 feed 的版本。
     static var isLocalBuild: Bool {
-        #if DEBUG
+        #if DEBUG || LOCAL_BUILD
         return true
         #else
         return false

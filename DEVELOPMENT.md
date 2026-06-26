@@ -49,12 +49,18 @@ chmod +x build-app.sh
 - `JapaneseLearningCard.app`
 - `JapaneseLearningCard.dmg`
 
-未設定 `SIGNING_IDENTITY` 時會使用 ad-hoc 簽名，適合本機測試。
+未設定 `SIGNING_IDENTITY` 時會使用 ad-hoc 簽名，適合本機測試；此模式會帶 `LOCAL_BUILD`，停用 Sparkle 版本檢查與 iCloud / CloudKit 同步，避免驗證畫面時影響雲端資料。
 
 ## Developer ID 簽名
 
 ```bash
 SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./build-app.sh
+```
+
+若只是要用 Developer ID 簽名驗證本機畫面，但不想啟動 iCloud 同步，可明確指定：
+
+```bash
+LOCAL_BUILD=1 SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./build-app.sh
 ```
 
 腳本會使用 hardened runtime：

@@ -13,14 +13,29 @@ DMG_NAME="$PRODUCT.dmg"
 DMG_FINAL="$BUILD_DIR/$DMG_NAME"
 
 echo "▸ 編譯 release binary..."
-# Developer ID 簽名 → 開 iCloud 同步 (會去 call CKContainer, 需要 restricted entitlement)
-# ad-hoc 簽名 → 關 iCloud (沒 entitlement 的話 CKContainer.__allocating_init 會被 amfi kill)
+# 預設本機 ad-hoc build 是 UI 驗證版:
+# - 停用 Sparkle 版本檢查
+# - 停用 iCloud / CloudKit 同步，避免影響雲端資料
+# 正式 Developer ID release 才開 iCloud 同步。
 SIGNING_IDENTITY="${SIGNING_IDENTITY:-}"
-SWIFT_FLAGS=""
-if [ -n "$SIGNING_IDENTITY" ]; then
-    SWIFT_FLAGS="-Xswiftc -DICLOUD_ENABLED"
+LOCAL_BUILD="${LOCAL_BUILD:-}"
+if [ -z "$LOCAL_BUILD" ]; then
+    if [ -n "$SIGNING_IDENTITY" ]; then
+        LOCAL_BUILD="0"
+    else
+        LOCAL_BUILD="1"
+    fi
 fi
-swift build -c release --product "$PRODUCT" $SWIFT_FLAGS
+
+SWIFT_FLAGS=()
+if [ "$LOCAL_BUILD" = "1" ]; then
+    SWIFT_FLAGS+=("-Xswiftc" "-DLOCAL_BUILD")
+    echo "▸ 本機 / UI 驗證 build：停用 Sparkle 更新檢查與 iCloud 同步"
+elif [ -n "$SIGNING_IDENTITY" ]; then
+    SWIFT_FLAGS+=("-Xswiftc" "-DICLOUD_ENABLED")
+    echo "▸ 正式簽名 build：啟用 iCloud 同步"
+fi
+swift build -c release --product "$PRODUCT" "${SWIFT_FLAGS[@]}"
 
 echo "▸ 建立 .app bundle..."
 rm -rf "$APP_BUNDLE"

@@ -3,6 +3,43 @@ import AppKit
 import Foundation
 import JapaneseLearningCardCore
 
+struct VisibleCardTimerState: Equatable {
+    var duration: TimeInterval
+    var deadline: Date?
+    var pausedRemainingSeconds: TimeInterval?
+
+    var isActive: Bool {
+        deadline != nil || pausedRemainingSeconds != nil
+    }
+
+    func remainingFraction(at date: Date = Date()) -> Double {
+        guard duration > 0 else { return 0 }
+        let remaining = if let deadline {
+            max(0, deadline.timeIntervalSince(date))
+        } else {
+            max(0, pausedRemainingSeconds ?? duration)
+        }
+        return min(1, max(0, remaining / duration))
+    }
+}
+
+struct QuickReviewSessionState: Equatable {
+    var duration: TimeInterval
+    var endDate: Date?
+    var pausedRemainingSeconds: TimeInterval?
+
+    var isActive: Bool {
+        endDate != nil || pausedRemainingSeconds != nil
+    }
+
+    func remainingSeconds(at date: Date = Date()) -> TimeInterval {
+        if let endDate {
+            return max(0, endDate.timeIntervalSince(date))
+        }
+        return max(0, pausedRemainingSeconds ?? duration)
+    }
+}
+
 @MainActor
 final class AppViewModel: ObservableObject {
     @Published var snapshot = AppSnapshot()
@@ -25,6 +62,17 @@ final class AppViewModel: ObservableObject {
     @Published var manualCardInstruction = ""
     @Published var aiArticleCustomTheme = ""
     @Published var selectedTab = 0
+    @Published private(set) var visibleCardTimerState = VisibleCardTimerState(
+        duration: 20,
+        deadline: nil,
+        pausedRemainingSeconds: nil
+    )
+    @Published private(set) var quickReviewSessionState = QuickReviewSessionState(
+        duration: 180,
+        endDate: nil,
+        pausedRemainingSeconds: nil
+    )
+    @Published private(set) var isQuickReviewActive = false
 
     /// 簡報模式：手動開關。開著時暫停卡片自動彈出，直到使用者自己關掉
     /// （持久化，重開 App 也記得）。
@@ -65,6 +113,14 @@ final class AppViewModel: ObservableObject {
         iCloudConflicts.filter { !$0.isResolved }.count
     }
 
+    var isICloudSyncAvailable: Bool {
+        #if ICLOUD_ENABLED && !LOCAL_BUILD
+        return syncCoordinator != nil
+        #else
+        return false
+        #endif
+    }
+
     private let store: AppStore
     private let secretStore: SecretStore
     private let providerClient: OpenAICompatibleLLMClient
@@ -76,8 +132,26 @@ final class AppViewModel: ObservableObject {
     private var aiArticleTimer: Timer?
     private var autoCloseTask: Task<Void, Never>?
     private var autoCloseGeneration = 0
-    private var autoCloseRemainingSeconds: TimeInterval?
-    private var autoCloseDeadline: Date?
+    private var autoCloseRemainingSeconds: TimeInterval? {
+        didSet { updateVisibleCardTimerState() }
+    }
+    private var autoCloseDeadline: Date? {
+        didSet { updateVisibleCardTimerState() }
+    }
+    private var quickReviewTask: Task<Void, Never>?
+    private var quickReviewGeneration = 0
+    private var quickReviewSessionRemainingSeconds: TimeInterval? {
+        didSet { updateQuickReviewSessionState() }
+    }
+    private var quickReviewSessionEndDate: Date? {
+        didSet { updateQuickReviewSessionState() }
+    }
+    private var quickReviewCardRemainingSeconds: TimeInterval? {
+        didSet { updateVisibleCardTimerState() }
+    }
+    private var quickReviewCardDeadline: Date? {
+        didSet { updateVisibleCardTimerState() }
+    }
     nonisolated(unsafe) private var sleepWakeObservers: [NSObjectProtocol] = []
     private var isSuspended = false
     private let accountChecker = CloudKitAccountChecker()
@@ -123,13 +197,13 @@ final class AppViewModel: ObservableObject {
             await store.ensureAISentinelSource(extractionPrompt: AISource.sentinelExtractionPrompt)
             await reload()
             scheduleTimers()
-            #if ICLOUD_ENABLED
+            #if ICLOUD_ENABLED && !LOCAL_BUILD
             await bootstrapICloudSync()
             #else
             // 沒有 iCloud entitlement 的 build (ad-hoc / swift run) 不啟動
             // CloudKit, 否則 CKContainer.__allocating_init 會被 amfi kill。
             // 給 UI 一個明確的狀態, 不要讓 iCloud 區塊永遠顯示「尚未檢查」。
-            iCloudStatus = .unknown(underlying: "本 build 未含 iCloud entitlement, 需 Developer ID 簽名")
+            iCloudStatus = .unknown(underlying: "本地 / UI 驗證 build 已停用 iCloud 同步")
             #endif
         }
     }
@@ -137,9 +211,10 @@ final class AppViewModel: ObservableObject {
     /// 開機時啟動 iCloud 同步流程: 檢查帳號、註冊訂閱、第一次 pull/push。
     /// 沒 iCloud entitlement 或帳號不可用時整段 no-op, app 退回純本地模式。
     /// 只在 build 時有 `ICLOUD_ENABLED` flag 才會編進 binary (build-app.sh
-    /// 只有 Developer ID 簽名才會傳 `-D ICLOUD_ENABLED`)。
+    /// 正式 Developer ID release 才會傳 `-D ICLOUD_ENABLED`；`LOCAL_BUILD`
+    /// 一律停用同步。
     private func bootstrapICloudSync() async {
-        #if ICLOUD_ENABLED
+        #if ICLOUD_ENABLED && !LOCAL_BUILD
         let info = await accountChecker.info()
         iCloudStatus = info.status
         iCloudFingerprint = CloudKitAccountChecker.displayFingerprint(info.userRecordName)
@@ -183,7 +258,11 @@ final class AppViewModel: ObservableObject {
 
     /// 從雲端拉一次 (前景 / 定時 / 啟動都會叫)。
     func performPull() async {
+        #if LOCAL_BUILD
+        return
+        #else
         await performSync(direction: .pull)
+        #endif
     }
 
     private enum SyncDirection { case push, pull, both }
@@ -308,6 +387,7 @@ final class AppViewModel: ObservableObject {
 
     func reload() async {
         snapshot = await store.read()
+        updateVisibleCardTimerState()
         aiArticleCustomTheme = snapshot.settings.aiArticleCustomTheme
         if let currentCard,
            let updatedCard = snapshot.cards.first(where: { $0.id == currentCard.id }),
@@ -370,7 +450,11 @@ final class AppViewModel: ObservableObject {
             if isAutoShow {
                 requestShowPopover?()
             }
-            scheduleAutoClose()
+            if isQuickReviewActive {
+                resetQuickReviewCardTimerForNewCard()
+            } else {
+                resetAutoCloseForNewCard()
+            }
         }
     }
 
@@ -778,12 +862,147 @@ final class AppViewModel: ObservableObject {
 
     func scheduleAutoClose() {
         guard isPopoverVisible else { return }
+        guard !isQuickReviewActive else { return }
         let duration = autoCloseRemainingSeconds ?? schedulerPolicy.visibleDuration(settings: snapshot.settings)
         scheduleAutoClose(after: duration)
     }
 
+    func startQuickReview() {
+        guard !snapshot.cards.filter({ $0.status != .skipped && $0.status != .learned }).isEmpty else {
+            statusMessage = "目前沒有可複習的卡片"
+            return
+        }
+
+        selectedTab = 0
+        isQuickReviewActive = true
+        statusMessage = "快速複習中"
+        autoCloseTask?.cancel()
+        autoCloseGeneration += 1
+        autoCloseDeadline = nil
+        autoCloseRemainingSeconds = nil
+
+        let sessionDuration = TimeInterval(max(1, snapshot.settings.quickReviewDurationMinutes) * 60)
+        let cardDuration = TimeInterval(max(5, snapshot.settings.quickReviewCardIntervalSeconds))
+        quickReviewTask?.cancel()
+        quickReviewGeneration += 1
+        quickReviewSessionEndDate = nil
+        quickReviewSessionRemainingSeconds = sessionDuration
+        quickReviewCardDeadline = nil
+        quickReviewCardRemainingSeconds = cardDuration
+
+        if currentCard == nil {
+            showNextCard()
+        } else if !isUserInteracting {
+            resumeQuickReviewTimers()
+        }
+    }
+
+    func stopQuickReview() {
+        finishQuickReview(message: "快速複習已結束")
+    }
+
+    private func resetAutoCloseForNewCard() {
+        guard isPopoverVisible else { return }
+        let duration = schedulerPolicy.visibleDuration(settings: snapshot.settings)
+        autoCloseTask?.cancel()
+        autoCloseGeneration += 1
+        autoCloseDeadline = nil
+        autoCloseRemainingSeconds = duration
+        if !isUserInteracting {
+            scheduleAutoClose(after: duration)
+        }
+    }
+
+    private func resetQuickReviewCardTimerForNewCard() {
+        guard isQuickReviewActive else { return }
+        quickReviewTask?.cancel()
+        quickReviewGeneration += 1
+        quickReviewCardDeadline = nil
+        quickReviewCardRemainingSeconds = TimeInterval(max(5, snapshot.settings.quickReviewCardIntervalSeconds))
+        if !isUserInteracting {
+            resumeQuickReviewTimers()
+        }
+    }
+
+    private func resumeQuickReviewTimers() {
+        guard isQuickReviewActive else { return }
+        let now = Date()
+        let sessionRemaining = quickReviewSessionRemainingSeconds
+            ?? quickReviewSessionEndDate.map { max(0, $0.timeIntervalSince(now)) }
+            ?? TimeInterval(max(1, snapshot.settings.quickReviewDurationMinutes) * 60)
+        guard sessionRemaining > 0 else {
+            finishQuickReview(message: "快速複習時間到")
+            return
+        }
+
+        let cardRemaining = quickReviewCardRemainingSeconds
+            ?? quickReviewCardDeadline.map { max(0, $0.timeIntervalSince(now)) }
+            ?? TimeInterval(max(5, snapshot.settings.quickReviewCardIntervalSeconds))
+
+        quickReviewSessionEndDate = now.addingTimeInterval(sessionRemaining)
+        quickReviewSessionRemainingSeconds = sessionRemaining
+        quickReviewCardDeadline = now.addingTimeInterval(cardRemaining)
+        quickReviewCardRemainingSeconds = cardRemaining
+        scheduleQuickReviewTask(after: min(sessionRemaining, cardRemaining))
+    }
+
+    private func pauseQuickReviewTimers() {
+        guard isQuickReviewActive else { return }
+        let now = Date()
+        if let quickReviewSessionEndDate {
+            quickReviewSessionRemainingSeconds = max(0.1, quickReviewSessionEndDate.timeIntervalSince(now))
+        }
+        if let quickReviewCardDeadline {
+            quickReviewCardRemainingSeconds = max(0.1, quickReviewCardDeadline.timeIntervalSince(now))
+        }
+        quickReviewTask?.cancel()
+        quickReviewGeneration += 1
+        quickReviewSessionEndDate = nil
+        quickReviewCardDeadline = nil
+    }
+
+    private func scheduleQuickReviewTask(after duration: TimeInterval) {
+        quickReviewTask?.cancel()
+        quickReviewGeneration += 1
+        let generation = quickReviewGeneration
+        quickReviewTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(duration))
+            await MainActor.run {
+                guard let self,
+                      generation == self.quickReviewGeneration,
+                      self.isQuickReviewActive,
+                      !self.isUserInteracting
+                else { return }
+
+                let now = Date()
+                if let endDate = self.quickReviewSessionEndDate, endDate <= now {
+                    self.finishQuickReview(message: "快速複習時間到")
+                    return
+                }
+
+                if let deadline = self.quickReviewCardDeadline, deadline <= now {
+                    self.showNextCard()
+                } else {
+                    self.resumeQuickReviewTimers()
+                }
+            }
+        }
+    }
+
+    private func finishQuickReview(message: String) {
+        isQuickReviewActive = false
+        quickReviewTask?.cancel()
+        quickReviewGeneration += 1
+        quickReviewSessionEndDate = nil
+        quickReviewSessionRemainingSeconds = nil
+        quickReviewCardDeadline = nil
+        quickReviewCardRemainingSeconds = nil
+        statusMessage = message
+    }
+
     private func scheduleAutoClose(after duration: TimeInterval) {
         guard isPopoverVisible else { return }
+        guard !isQuickReviewActive else { return }
         guard duration > 0 else {
             requestClosePopover?()
             return
@@ -808,9 +1027,35 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    private func updateVisibleCardTimerState() {
+        if isQuickReviewActive {
+            visibleCardTimerState = VisibleCardTimerState(
+                duration: TimeInterval(max(5, snapshot.settings.quickReviewCardIntervalSeconds)),
+                deadline: quickReviewCardDeadline,
+                pausedRemainingSeconds: quickReviewCardDeadline == nil ? quickReviewCardRemainingSeconds : nil
+            )
+            return
+        }
+
+        visibleCardTimerState = VisibleCardTimerState(
+            duration: schedulerPolicy.visibleDuration(settings: snapshot.settings),
+            deadline: autoCloseDeadline,
+            pausedRemainingSeconds: autoCloseDeadline == nil ? autoCloseRemainingSeconds : nil
+        )
+    }
+
+    private func updateQuickReviewSessionState() {
+        quickReviewSessionState = QuickReviewSessionState(
+            duration: TimeInterval(max(1, snapshot.settings.quickReviewDurationMinutes) * 60),
+            endDate: quickReviewSessionEndDate,
+            pausedRemainingSeconds: quickReviewSessionEndDate == nil ? quickReviewSessionRemainingSeconds : nil
+        )
+    }
+
     func pauseAutoCloseForInteraction() {
         guard !isUserInteracting else { return }
         isUserInteracting = true
+        pauseQuickReviewTimers()
         if let deadline = autoCloseDeadline {
             autoCloseRemainingSeconds = max(0.1, deadline.timeIntervalSinceNow)
         } else if autoCloseRemainingSeconds == nil {
@@ -824,6 +1069,7 @@ final class AppViewModel: ObservableObject {
     func resumeAutoCloseAfterInteraction() {
         guard isUserInteracting else { return }
         isUserInteracting = false
+        resumeQuickReviewTimers()
         scheduleAutoClose()
     }
 
@@ -844,6 +1090,7 @@ final class AppViewModel: ObservableObject {
     func popoverDidClose() {
         isPopoverVisible = false
         isUserInteracting = false
+        finishQuickReview(message: "")
         autoCloseTask?.cancel()
         autoCloseGeneration += 1
         autoCloseRemainingSeconds = nil
@@ -912,6 +1159,7 @@ final class AppViewModel: ObservableObject {
     private func pauseTimers() {
         guard !isSuspended else { return }
         isSuspended = true
+        finishQuickReview(message: "")
         displayTimer?.invalidate()
         crawlTimer?.invalidate()
         aiArticleTimer?.invalidate()
