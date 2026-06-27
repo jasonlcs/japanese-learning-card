@@ -3,6 +3,15 @@
     <channel>
         <title>JapaneseLearningCard</title>
         <item>
+            <title>0.2.11</title>
+            <pubDate>Sat, 27 Jun 2026 04:02:50 +0000</pubDate>
+            <sparkle:version>2011</sparkle:version>
+            <sparkle:shortVersionString>0.2.11</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/jasonlcs/japanese-learning-card/releases/download/v0.2.11/JapaneseLearningCard.dmg" length="4648240" type="application/octet-stream" sparkle:edSignature="dCNaQ05asDsDzJY/CACFux2XInfe83hlsBmM7NuuFe7r9LHw7n7JZUzlgT82mZtQhaAVomVx8YzVzh4cw3eJAA=="/>
+        </item>
+        <item>
             <title>0.2.10</title>
             <pubDate>Fri, 26 Jun 2026 05:25:37 +0000</pubDate>
             <sparkle:version>2010</sparkle:version>
@@ -19,15 +28,6 @@
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
             <enclosure url="https://github.com/jasonlcs/japanese-learning-card/releases/download/v0.2.9/JapaneseLearningCard.dmg" length="4581613" type="application/octet-stream" sparkle:edSignature="bBuewiwdImQNEMS1+g7zqakN4JwFI0+ehWF9wbsvWRt0obK6HSDFvKXC9tPFVW1HWyjHejCtEtj0BQFfHd7FCg=="/>
-        </item>
-        <item>
-            <title>0.2.8</title>
-            <pubDate>Thu, 25 Jun 2026 14:58:43 +0000</pubDate>
-            <sparkle:version>2008</sparkle:version>
-            <sparkle:shortVersionString>0.2.8</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/jasonlcs/japanese-learning-card/releases/download/v0.2.8/JapaneseLearningCard.dmg" length="4555311" type="application/octet-stream" sparkle:edSignature="3gpmRliRYBGSKrlkC0H1uplkBsWYnzeggRfVVvbqNkvoAeOOaTLANihHaaMRBYlgaHT8c278x0+yjWrJNptdBg=="/>
         </item>
     </channel>
 </rss>
