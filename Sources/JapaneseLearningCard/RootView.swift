@@ -1298,6 +1298,61 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var dataSection: some View {
+                settingsBox("資料儲存模式") {
+                    storageModeRow()
+                    storageLocationRow()
+                    storageHealthRow()
+                    HStack {
+                        Button {
+                            viewModel.switchStorageMode(.localOnly)
+                        } label: {
+                            Label("改存本機", systemImage: "internaldrive")
+                        }
+                        .disabled(viewModel.isMigratingStorage || viewModel.storageSettings.mode == .localOnly)
+
+                        Button {
+                            viewModel.chooseICloudDriveFolderAndMigrate()
+                        } label: {
+                            Label("選 iCloud Drive 資料夾", systemImage: "folder.badge.gearshape")
+                        }
+                        .disabled(viewModel.isMigratingStorage)
+
+                        Button {
+                            viewModel.switchStorageMode(.cloudKit)
+                        } label: {
+                            Label("使用 CloudKit", systemImage: "icloud")
+                        }
+                        .disabled(viewModel.isMigratingStorage || viewModel.storageSettings.mode == .cloudKit)
+                    }
+                    .buttonStyle(.bordered)
+
+                    if viewModel.storageSettings.mode == .iCloudDriveFolder,
+                       let path = viewModel.storageSettings.iCloudDriveFolderPath,
+                       !UserDataStoreFactory.appearsInsideICloudDrive(URL(fileURLWithPath: path, isDirectory: true)) {
+                        Label("目前資料夾看起來不在 iCloud Drive 內，macOS 不會自動同步這個位置。", systemImage: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                }
+
+                settingsBox("批次重生既有卡片") {
+                    Text("使用已儲存的文章內容與目前 prompt 重新產生結構化欄位，只更新缺少新版欄位的舊卡，並保留既有複習狀態。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Button {
+                            viewModel.backfillExistingCards()
+                        } label: {
+                            Label(viewModel.isBackfillingCards ? "重生中..." : "批次重生舊卡", systemImage: "wand.and.stars")
+                        }
+                        .disabled(viewModel.isBackfillingCards)
+                        Spacer()
+                        Text("待補齊 \(viewModel.snapshot.cards.filter(\.needsStructuredBackfill).count) 張")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 settingsBox("資料庫") {
                     Button {
                         viewModel.exportDatabase()
@@ -1332,7 +1387,7 @@ struct SettingsView: View {
                         .disabled(viewModel.iCloudIsSyncing || !viewModel.isICloudSyncAvailable)
                         .help(viewModel.isICloudSyncAvailable
                             ? "從 iCloud 拉最新一份回來, 跟本機做 3-way merge"
-                            : "本機 / UI 驗證 build 已停用 iCloud 同步")
+                            : "目前建置或儲存模式未啟用 CloudKit 同步")
                         Spacer()
                     }
                 }
@@ -1538,6 +1593,62 @@ struct SettingsView: View {
         formatter.unitsStyle = .full
         formatter.locale = Locale(identifier: "zh_TW")
         return formatter.localizedString(for: date, relativeTo: Date())
+    }
+
+    @ViewBuilder
+    private func storageModeRow() -> some View {
+        labeledRow("目前模式") {
+            HStack {
+                Image(systemName: storageModeIcon(viewModel.storageSettings.mode))
+                Text(viewModel.storageSettings.mode.displayName)
+                if viewModel.isMigratingStorage {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                Spacer()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func storageLocationRow() -> some View {
+        labeledRow("資料位置") {
+            Text(storageLocationText())
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+                .textSelection(.enabled)
+        }
+    }
+
+    @ViewBuilder
+    private func storageHealthRow() -> some View {
+        if let health = viewModel.storageHealth {
+            labeledRow("狀態") {
+                Label(health.message, systemImage: health.isWritable ? "checkmark.circle" : "xmark.octagon")
+                    .font(.caption)
+                    .foregroundStyle(health.isWritable ? .green : .red)
+            }
+        }
+    }
+
+    private func storageModeIcon(_ mode: StorageMode) -> String {
+        switch mode {
+        case .localOnly: return "internaldrive"
+        case .iCloudDriveFolder: return "folder"
+        case .cloudKit: return "icloud"
+        }
+    }
+
+    private func storageLocationText() -> String {
+        switch viewModel.storageSettings.mode {
+        case .localOnly:
+            return viewModel.storageSettings.localDataPath ?? UserDataStoreFactory.defaultLocalFolder().path
+        case .iCloudDriveFolder:
+            return viewModel.storageSettings.iCloudDriveFolderPath ?? UserDataStoreFactory.defaultICloudDriveFolder().path
+        case .cloudKit:
+            return AppStore.localDatabaseURL().path
+        }
     }
 
     // MARK: - Conflict list

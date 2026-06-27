@@ -185,6 +185,12 @@ public actor AppStore {
         databaseURL
     }
 
+    public func replaceSnapshot(_ newSnapshot: AppSnapshot) throws {
+        snapshot = newSnapshot
+        try persist()
+        lastDataVersion = currentDataVersion()
+    }
+
     static let maxUpdateAttempts = 5
 
     public func update(_ mutate: @Sendable (inout AppSnapshot) -> Void) throws {
@@ -452,7 +458,12 @@ public actor AppStore {
             documents: try loadRows(table: "crawled_documents", orderBy: "fetched_at DESC"),
             cards: try loadRows(table: "learning_cards", orderBy: "word"),
             quizzes: try loadRows(table: "quiz_questions", orderBy: "created_at DESC"),
-            generatedArticles: try loadRows(table: "generated_articles", orderBy: "generated_at DESC")
+            generatedArticles: try loadRows(table: "generated_articles", orderBy: "generated_at DESC"),
+            deletedSources: try loadState(key: "deletedSources") ?? [],
+            deletedDocuments: try loadState(key: "deletedDocuments") ?? [],
+            deletedCards: try loadState(key: "deletedCards") ?? [],
+            deletedQuizzes: try loadState(key: "deletedQuizzes") ?? [],
+            deletedArticles: try loadState(key: "deletedArticles") ?? []
         )
     }
 
@@ -470,6 +481,11 @@ public actor AppStore {
     /// 把整份快照寫入各表(整表覆蓋)。呼叫端負責開啟/提交交易。
     private func writeSnapshotTables(_ snapshot: AppSnapshot) throws {
         try replaceState(key: "settings", value: snapshot.settings)
+        try replaceState(key: "deletedSources", value: snapshot.deletedSources)
+        try replaceState(key: "deletedDocuments", value: snapshot.deletedDocuments)
+        try replaceState(key: "deletedCards", value: snapshot.deletedCards)
+        try replaceState(key: "deletedQuizzes", value: snapshot.deletedQuizzes)
+        try replaceState(key: "deletedArticles", value: snapshot.deletedArticles)
         try replaceTable("sources", values: snapshot.sources) { source in
             [
                 source.id.uuidString,
@@ -620,7 +636,7 @@ public actor AppStore {
         return try decoder.decode(AppSnapshot.self, from: data)
     }
 
-    private static func defaultDatabaseURL() -> URL {
+    public static func defaultDatabaseURL() -> URL {
         // 走 CloudKit payload 同步後, 本機就是唯一來源, 直接用本地路徑。
         return localDatabaseURL()
     }
@@ -629,7 +645,7 @@ public actor AppStore {
     /// 因為那個雜湊 (ubiquityIdentityToken 封存後取 hash) 並不穩定，會害每次
     /// 啟動開到不同的空檔，造成資料看似被清空、甚至把空檔 push 上 CloudKit
     /// 覆蓋雲端。帳號隔離交給 CloudKit（雲端本就分帳號）+ 3-way merge。
-    private static func localDatabaseURL() -> URL {
+    public static func localDatabaseURL() -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser
         return base

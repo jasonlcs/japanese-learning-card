@@ -46,8 +46,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Task { @MainActor in
-            let store = await AppStore()
-            let viewModel = AppViewModel(store: store)
+            let storageSettings = StorageSettingsStore.load()
+            let store = await AppStore(fileURL: UserDataStoreFactory.databaseURL(for: storageSettings))
+            let viewModel = AppViewModel(store: store, storageSettings: storageSettings)
             let controller = MenuBarController(viewModel: viewModel)
             self.menuBarController = controller
 

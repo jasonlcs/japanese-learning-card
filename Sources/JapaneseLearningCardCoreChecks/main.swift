@@ -17,7 +17,10 @@ struct CoreChecks {
         try exampleReadingDecoding()
         try await pipelineRefreshesEnabledSourcesWithMocks()
         try await pipelineSkipsAISentinelWhenRefreshingSources()
+        try await pipelineBackfillsIncompleteCardsFromStoredDocuments()
         try await storePersistsQuizQuestions()
+        try await storageFactorySelectsDatabaseURLByMode()
+        try await sqliteUserDataStoreRoundTripsSnapshotInFolder()
         try await storeMigratesLegacyDatabaseWhenNeeded()
         try storeMigratesIdentityScopedStoreToCanonicalStore()
         try await storeReloadsFromDiskWhenDatabaseChangesExternally()
@@ -283,6 +286,66 @@ struct CoreChecks {
         expect(snapshot.sources[0].lastError == nil, "AI sentinel should not receive a crawler error during source refresh")
     }
 
+    private static func pipelineBackfillsIncompleteCardsFromStoredDocuments() async throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("store.sqlite")
+        let store = await AppStore(fileURL: fileURL)
+        let source = Source(url: URL(string: "https://example.com/article")!)
+        let document = CrawledDocument(
+            sourceId: source.id,
+            url: source.url,
+            title: "Stored",
+            plainText: "電車に乗ります。",
+            contentHash: "stored-doc"
+        )
+        let oldId = UUID()
+        let oldLastShownAt = Date(timeIntervalSince1970: 123)
+        let oldCard = LearningCard(
+            id: oldId,
+            word: "電車",
+            reading: "",
+            partOfSpeech: "",
+            meaningZh: "old",
+            grammarNoteZh: "",
+            jlptLevel: .unknown,
+            verbFormType: .unknown,
+            exampleJa: "古い例",
+            exampleReading: "",
+            exampleZh: "",
+            sourceUrl: source.url,
+            status: .reviewing,
+            createdAt: Date(timeIntervalSince1970: 10),
+            lastShownAt: oldLastShownAt,
+            shownCount: 7
+        )
+        try await store.update { state in
+            state.sources = [source]
+            state.documents = [document]
+            state.cards = [oldCard]
+        }
+
+        let pipeline = LearningPipeline(
+            store: store,
+            crawler: FailingCrawler(),
+            llmClient: MockLLMClient(cardURL: source.url)
+        )
+
+        let outcome = await pipeline.backfillExistingCards()
+        let snapshot = await store.read()
+        let card = snapshot.cards[0]
+
+        expect(outcome.updatedCards == 1, "backfill should update one incomplete card")
+        expect(snapshot.cards.count == 1, "backfill should not duplicate existing cards")
+        expect(card.id == oldId, "backfill should preserve existing card identity")
+        expect(card.status == .reviewing, "backfill should preserve review status")
+        expect(card.lastShownAt == oldLastShownAt, "backfill should preserve review timestamp")
+        expect(card.shownCount == 7, "backfill should preserve shown count")
+        expect(card.grammarNoteZh == "交通工具名詞。", "backfill should copy regenerated grammar note")
+        expect(card.exampleReading == "でんしゃにのります。", "backfill should copy regenerated example reading")
+        expect(card.jlptLevel == .n4, "backfill should copy regenerated JLPT level")
+    }
+
     private static func storePersistsQuizQuestions() async throws {
         let fileURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
@@ -303,6 +366,33 @@ struct CoreChecks {
         let snapshot = await reloaded.read()
         expect(snapshot.quizzes.count == 1, "quiz should persist in SQLite")
         expect(snapshot.quizzes[0].question == "「駅」の意味は？", "quiz question should round trip")
+    }
+
+    private static func storageFactorySelectsDatabaseURLByMode() async throws {
+        let tempDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let local = StorageSettings(mode: .localOnly, localDataPath: tempDirectory.appendingPathComponent("local").path)
+        let drive = StorageSettings(mode: .iCloudDriveFolder, iCloudDriveFolderPath: tempDirectory.appendingPathComponent("drive").path)
+        let cloud = StorageSettings(mode: .cloudKit)
+
+        expect(UserDataStoreFactory.databaseURL(for: local).path.hasSuffix("/local/store.sqlite"), "local mode should use local folder")
+        expect(UserDataStoreFactory.databaseURL(for: drive).path.hasSuffix("/drive/store.sqlite"), "iCloud Drive mode should use selected folder")
+        expect(UserDataStoreFactory.databaseURL(for: cloud) == AppStore.localDatabaseURL(), "CloudKit mode should keep existing local backing store")
+    }
+
+    private static func sqliteUserDataStoreRoundTripsSnapshotInFolder() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let settings = StorageSettings(mode: .iCloudDriveFolder, iCloudDriveFolderPath: folder.path)
+        let dataStore = await UserDataStoreFactory.create(settings: settings)
+        let source = makeSource(url: "https://folder.example.com")
+        try await dataStore.saveSnapshot(makeSnapshot(sources: [source]))
+
+        let reloaded = await UserDataStoreFactory.create(settings: settings)
+        let snapshot = try await reloaded.loadSnapshot()
+        let health = try await reloaded.getHealth()
+
+        expect(snapshot.sources.count == 1, "folder data store should persist snapshot")
+        expect(snapshot.sources[0].url.absoluteString == "https://folder.example.com", "folder data store should round trip source")
+        expect(health.isWritable, "folder data store should report writable health")
     }
 
     private static func storeMigratesLegacyDatabaseWhenNeeded() async throws {
@@ -1441,6 +1531,7 @@ private struct MockLLMClient: LLMClient {
                 jlptLevel: .n4,
                 verbFormType: .notVerb,
                 exampleJa: "電車に乗ります。",
+                exampleReading: "でんしゃにのります。",
                 exampleZh: "搭電車。",
                 sourceUrl: cardURL
             )
