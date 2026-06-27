@@ -17,6 +17,20 @@ public enum ManualCardOutcome: Sendable {
     case failed(String)
 }
 
+public struct CardBackfillOutcome: Equatable, Sendable {
+    public var processedDocuments: Int
+    public var updatedCards: Int
+    public var skippedDocuments: Int
+    public var failures: [String]
+
+    public init(processedDocuments: Int = 0, updatedCards: Int = 0, skippedDocuments: Int = 0, failures: [String] = []) {
+        self.processedDocuments = processedDocuments
+        self.updatedCards = updatedCards
+        self.skippedDocuments = skippedDocuments
+        self.failures = failures
+    }
+}
+
 public actor LearningPipeline {
     private let store: AppStore
     private let crawler: Crawling
@@ -35,6 +49,90 @@ public actor LearningPipeline {
                 await refreshEnabledSourcesWithTrace()
             }
         }
+    }
+
+    public func backfillExistingCards(limitToIncompleteCards: Bool = true) async -> CardBackfillOutcome {
+        let traceId = UUID().uuidString
+        return await AITraceContext.$traceId.withValue(traceId) {
+            await AITraceContext.$flow.withValue("backfillExistingCards") {
+                await backfillExistingCardsWithTrace(limitToIncompleteCards: limitToIncompleteCards)
+            }
+        }
+    }
+
+    private func backfillExistingCardsWithTrace(limitToIncompleteCards: Bool) async -> CardBackfillOutcome {
+        let startedAt = Date()
+        let snapshot = await store.read()
+        var outcome = CardBackfillOutcome()
+        await AIRequestLogStore.shared.appendEvent(
+            "flow.start",
+            operation: "backfillExistingCards",
+            message: "Regenerate stored documents with current prompt to backfill structured card fields.",
+            input: [
+                "documentCount": "\(snapshot.documents.count)",
+                "limitToIncompleteCards": "\(limitToIncompleteCards)"
+            ]
+        )
+
+        for document in snapshot.documents {
+            let existingCards = snapshot.cards.filter { $0.sourceUrl == document.url }
+            let candidates = limitToIncompleteCards ? existingCards.filter(\.needsStructuredBackfill) : existingCards
+            guard !candidates.isEmpty else {
+                outcome.skippedDocuments += 1
+                continue
+            }
+
+            let sourcePrompt = snapshot.sources.first(where: { $0.id == document.sourceId })?.extractionPrompt
+            let prompt = (sourcePrompt?.isEmpty == false) ? sourcePrompt! : snapshot.settings.defaultExtractionPrompt
+            do {
+                let generated = try await llmClient.generateCards(document: document, sourcePrompt: prompt, settings: snapshot.settings)
+                let updatedCount = try await mergeBackfilledCards(generated, for: document, oldCards: candidates)
+                outcome.processedDocuments += 1
+                outcome.updatedCards += updatedCount
+            } catch {
+                outcome.failures.append("\(document.title): \(error.localizedDescription)")
+                try? await store.update { state in
+                    if let index = state.sources.firstIndex(where: { $0.id == document.sourceId }) {
+                        state.sources[index].lastError = error.localizedDescription
+                    }
+                }
+            }
+        }
+
+        await AIRequestLogStore.shared.appendEvent(
+            "flow.completed",
+            operation: "backfillExistingCards",
+            output: [
+                "processedDocuments": "\(outcome.processedDocuments)",
+                "updatedCards": "\(outcome.updatedCards)",
+                "skippedDocuments": "\(outcome.skippedDocuments)",
+                "failureCount": "\(outcome.failures.count)"
+            ],
+            durationMilliseconds: Self.durationMilliseconds(since: startedAt)
+        )
+        return outcome
+    }
+
+    private func mergeBackfilledCards(_ generated: [LearningCard], for document: CrawledDocument, oldCards: [LearningCard]) async throws -> Int {
+        guard !generated.isEmpty else { return 0 }
+        let generatedByKey = Dictionary(grouping: generated, by: Self.backfillKey)
+        let generatedByWord = Dictionary(grouping: generated, by: Self.normalizedWord)
+        let replacements = Dictionary(uniqueKeysWithValues: oldCards.compactMap { oldCard -> (UUID, LearningCard)? in
+            let key = Self.backfillKey(oldCard)
+            let replacement = generatedByKey[key]?.first ?? generatedByWord[Self.normalizedWord(oldCard)]?.first
+            guard let replacement else { return nil }
+            let merged = oldCard.mergingStructuredFields(from: replacement, sourceURL: document.url)
+            return merged == oldCard ? nil : (oldCard.id, merged)
+        })
+        guard !replacements.isEmpty else { return 0 }
+        try await store.update { state in
+            for index in state.cards.indices {
+                if let replacement = replacements[state.cards[index].id] {
+                    state.cards[index] = replacement
+                }
+            }
+        }
+        return replacements.count
     }
 
     private func refreshEnabledSourcesWithTrace() async {
@@ -351,5 +449,42 @@ public actor LearningPipeline {
 
     private static func durationMilliseconds(since startedAt: Date) -> Int {
         Int((max(Date().timeIntervalSince(startedAt), 0) * 1000).rounded())
+    }
+
+    private static func backfillKey(_ card: LearningCard) -> String {
+        "\(normalizedWord(card))|\(card.reading.trimmingCharacters(in: .whitespacesAndNewlines))"
+    }
+
+    private static func normalizedWord(_ card: LearningCard) -> String {
+        card.word.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+public extension LearningCard {
+    var needsStructuredBackfill: Bool {
+        reading.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || partOfSpeech.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || meaningZh.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || grammarNoteZh.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || jlptLevel == .unknown
+            || verbFormType == .unknown
+            || exampleJa.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || exampleReading.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || exampleZh.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    func mergingStructuredFields(from regenerated: LearningCard, sourceURL: URL) -> LearningCard {
+        var merged = self
+        merged.reading = regenerated.reading
+        merged.partOfSpeech = regenerated.partOfSpeech
+        merged.meaningZh = regenerated.meaningZh
+        merged.grammarNoteZh = regenerated.grammarNoteZh
+        merged.jlptLevel = regenerated.jlptLevel
+        merged.verbFormType = regenerated.verbFormType
+        merged.exampleJa = regenerated.exampleJa
+        merged.exampleReading = regenerated.exampleReading
+        merged.exampleZh = regenerated.exampleZh
+        merged.sourceUrl = sourceURL
+        return merged
     }
 }

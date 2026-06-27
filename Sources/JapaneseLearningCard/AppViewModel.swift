@@ -73,6 +73,10 @@ final class AppViewModel: ObservableObject {
         pausedRemainingSeconds: nil
     )
     @Published private(set) var isQuickReviewActive = false
+    @Published var storageSettings: StorageSettings
+    @Published private(set) var storageHealth: DataStoreHealth?
+    @Published private(set) var isMigratingStorage = false
+    @Published private(set) var isBackfillingCards = false
 
     /// 簡報模式：手動開關。開著時暫停卡片自動彈出，直到使用者自己關掉
     /// （持久化，重開 App 也記得）。
@@ -115,18 +119,18 @@ final class AppViewModel: ObservableObject {
 
     var isICloudSyncAvailable: Bool {
         #if ICLOUD_ENABLED && !LOCAL_BUILD
-        return syncCoordinator != nil
+        return storageSettings.mode == .cloudKit && syncCoordinator != nil
         #else
         return false
         #endif
     }
 
-    private let store: AppStore
+    private var store: AppStore
     private let secretStore: SecretStore
     private let providerClient: OpenAICompatibleLLMClient
     private let schedulerPolicy = SchedulerPolicy()
     private let cardSelector = CardSelector()
-    private lazy var pipeline = LearningPipeline(store: store, crawler: BrowserFallbackCrawler())
+    private var pipeline: LearningPipeline
     private var displayTimer: Timer?
     private var crawlTimer: Timer?
     private var aiArticleTimer: Timer?
@@ -168,16 +172,14 @@ final class AppViewModel: ObservableObject {
     /// 「自動檢查更新」開關變動時呼叫，橋接到 Sparkle 的排程檢查。
     var setAutomaticUpdateChecks: ((Bool) -> Void)?
 
-    init(store: AppStore, secretStore: SecretStore = KeychainStore()) {
+    init(store: AppStore, secretStore: SecretStore = KeychainStore(), storageSettings: StorageSettings = StorageSettingsStore.load()) {
         self.store = store
         self.secretStore = secretStore
         self.providerClient = OpenAICompatibleLLMClient(secretStore: secretStore)
+        self.storageSettings = storageSettings
+        self.pipeline = LearningPipeline(store: store, crawler: BrowserFallbackCrawler(), llmClient: self.providerClient)
         registerSleepWakeObservers()
-        // iCloud Drive 從別台 Mac 把 store.sqlite 整檔換掉時，讓 UI 跟著重讀。
-        let onChange: @Sendable () -> Void = { [weak self] in
-            Task { @MainActor in await self?.reload() }
-        }
-        Task { await store.setOnExternalChange(onChange) }
+        attachExternalChangeHandler(to: store)
     }
 
     deinit {
@@ -196,9 +198,14 @@ final class AppViewModel: ObservableObject {
             await reload()
             await store.ensureAISentinelSource(extractionPrompt: AISource.sentinelExtractionPrompt)
             await reload()
+            await updateStorageHealth()
             scheduleTimers()
             #if ICLOUD_ENABLED && !LOCAL_BUILD
-            await bootstrapICloudSync()
+            if storageSettings.mode == .cloudKit {
+                await bootstrapICloudSync()
+            } else {
+                iCloudStatus = .unknown(underlying: "\(storageSettings.mode.displayName) 模式未啟用 CloudKit 同步")
+            }
             #else
             // 沒有 iCloud entitlement 的 build (ad-hoc / swift run) 不啟動
             // CloudKit, 否則 CKContainer.__allocating_init 會被 amfi kill。
@@ -248,6 +255,7 @@ final class AppViewModel: ObservableObject {
 
     /// snapshot 變化時觸發 push。debounce 500ms 避免短時間多次寫入。
     private func schedulePushDebounced() {
+        guard storageSettings.mode == .cloudKit else { return }
         pushDebounceTask?.cancel()
         pushDebounceTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 500_000_000)
@@ -258,6 +266,7 @@ final class AppViewModel: ObservableObject {
 
     /// 從雲端拉一次 (前景 / 定時 / 啟動都會叫)。
     func performPull() async {
+        guard storageSettings.mode == .cloudKit else { return }
         #if LOCAL_BUILD
         return
         #else
@@ -415,6 +424,86 @@ final class AppViewModel: ObservableObject {
         schedulePushDebounced()
     }
 
+    func chooseICloudDriveFolderAndMigrate() {
+        let panel = NSOpenPanel()
+        panel.title = "選擇 iCloud Drive 資料夾"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = UserDataStoreFactory.defaultICloudDriveFolder().deletingLastPathComponent()
+        guard panel.runModal() == .OK, let folder = panel.url else { return }
+        switchStorageMode(.iCloudDriveFolder, folder: folder)
+    }
+
+    func switchStorageMode(_ mode: StorageMode, folder: URL? = nil) {
+        guard !isMigratingStorage else { return }
+        isMigratingStorage = true
+        statusMessage = "資料遷移中..."
+        let currentSettings = storageSettings
+        Task {
+            do {
+                let currentSnapshot = await store.read()
+                var nextSettings = currentSettings
+                nextSettings.mode = mode
+                switch mode {
+                case .localOnly:
+                    nextSettings.localDataPath = UserDataStoreFactory.defaultLocalFolder().path
+                case .iCloudDriveFolder:
+                    let selected = folder ?? UserDataStoreFactory.defaultICloudDriveFolder()
+                    nextSettings.iCloudDriveFolderPath = selected.path
+                case .cloudKit:
+                    break
+                }
+
+                let nextStoreURL = UserDataStoreFactory.databaseURL(for: nextSettings)
+                try FileManager.default.createDirectory(at: nextStoreURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                let nextStore = await AppStore(fileURL: nextStoreURL)
+                try await nextStore.replaceSnapshot(currentSnapshot)
+                let verified = await nextStore.read()
+                guard verified.cards.count == currentSnapshot.cards.count,
+                      verified.sources.count == currentSnapshot.sources.count,
+                      verified.documents.count == currentSnapshot.documents.count else {
+                    throw NSError(domain: "JapaneseLearningCard.StorageMigration", code: 1, userInfo: [
+                        NSLocalizedDescriptionKey: "遷移驗證失敗：目標資料筆數不一致"
+                    ])
+                }
+
+                await MainActor.run {
+                    self.applyActiveStore(nextStore, settings: nextSettings)
+                    StorageSettingsStore.save(nextSettings)
+                    self.isMigratingStorage = false
+                    self.statusMessage = "已切換到 \(mode.displayName)"
+                }
+                await updateStorageHealth()
+                await reload()
+            } catch {
+                await MainActor.run {
+                    self.isMigratingStorage = false
+                    self.statusMessage = "資料遷移失敗：\(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    func backfillExistingCards() {
+        guard !isBackfillingCards else { return }
+        isBackfillingCards = true
+        statusMessage = "批次重生既有卡片中..."
+        Task {
+            let outcome = await pipeline.backfillExistingCards(limitToIncompleteCards: true)
+            await MainActor.run {
+                self.isBackfillingCards = false
+                if outcome.failures.isEmpty {
+                    self.statusMessage = "已補齊 \(outcome.updatedCards) 張卡片，處理 \(outcome.processedDocuments) 份文件"
+                } else {
+                    self.statusMessage = "已補齊 \(outcome.updatedCards) 張卡片，失敗 \(outcome.failures.count) 份"
+                }
+            }
+            await reload()
+        }
+    }
+
     func showNextCard() {
         let isAutoShow = !isPopoverVisible
         // 暫停（手動暫停 / 簡報模式）只擋「自動彈出」，不影響使用者手動切下一張。
@@ -570,10 +659,12 @@ final class AppViewModel: ObservableObject {
         updateSettings(settings)
     }
 
-    func addSource() {
-        guard let url = URL(string: newSourceURL.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+    @discardableResult
+    func addSource(_ rawURL: String? = nil) -> Bool {
+        let sourceURL = rawURL ?? newSourceURL
+        guard let url = URL(string: sourceURL.trimmingCharacters(in: .whitespacesAndNewlines)) else {
             statusMessage = "網址格式不正確"
-            return
+            return false
         }
 
         do {
@@ -585,8 +676,10 @@ final class AppViewModel: ObservableObject {
             }
             newSourceURL = ""
             statusMessage = "已新增來源"
+            return true
         } catch {
             statusMessage = error.localizedDescription
+            return false
         }
     }
 
@@ -1176,6 +1269,43 @@ final class AppViewModel: ObservableObject {
         guard isSuspended else { return }
         isSuspended = false
         scheduleTimers()
+    }
+
+    private func applyActiveStore(_ newStore: AppStore, settings: StorageSettings) {
+        syncCoordinator = nil
+        pushDebounceTask?.cancel()
+        syncPollTimer?.invalidate()
+        syncPollTimer = nil
+        store = newStore
+        storageSettings = settings
+        pipeline = LearningPipeline(store: newStore, crawler: BrowserFallbackCrawler(), llmClient: providerClient)
+        attachExternalChangeHandler(to: newStore)
+        #if ICLOUD_ENABLED && !LOCAL_BUILD
+        if settings.mode == .cloudKit {
+            Task { await bootstrapICloudSync() }
+        } else {
+            iCloudStatus = .unknown(underlying: "\(settings.mode.displayName) 模式未啟用 CloudKit 同步")
+            iCloudFingerprint = nil
+            iCloudLastErrorMessage = nil
+            iCloudIsSyncing = false
+        }
+        #endif
+    }
+
+    private func attachExternalChangeHandler(to store: AppStore) {
+        let onChange: @Sendable () -> Void = { [weak self] in
+            Task { @MainActor in await self?.reload() }
+        }
+        Task { await store.setOnExternalChange(onChange) }
+    }
+
+    private func updateStorageHealth() async {
+        let url = await store.exportableDatabaseURL()
+        let dataStore = SQLiteUserDataStore(store: store, location: url)
+        let health = try? await dataStore.getHealth()
+        await MainActor.run {
+            self.storageHealth = health
+        }
     }
 
     private func storeUpdate(_ mutate: @escaping @Sendable (inout AppSnapshot) -> Void) {
