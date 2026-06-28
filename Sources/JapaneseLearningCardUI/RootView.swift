@@ -1233,7 +1233,7 @@ struct SettingsView: View {
                                     Image(systemName: "antenna.radiowaves.left.and.right")
                                 }
                                 .disabled(!canAddSource)
-                                .help("驗證連線並測試 AI 解析(會消耗 API token)")
+                                .help("驗證連線並測試 AI 解析;成功會把卡片加入資料庫(會消耗 API token)")
                             }
                             Button {
                                 addSourceAndRefocus()
@@ -1285,7 +1285,7 @@ struct SettingsView: View {
                                     Image(systemName: "antenna.radiowaves.left.and.right")
                                 }
                                 .buttonStyle(.borderless)
-                                .help("驗證連線並測試 AI 解析(會消耗 API token)")
+                                .help("驗證連線並測試 AI 解析;成功會把卡片加入資料庫(會消耗 API token)")
                             }
                             Button {
                                 viewModel.removeSource(source)
@@ -1610,19 +1610,20 @@ struct SettingsView: View {
                     .foregroundStyle(color)
             }
             if let aiSummary = diagnostic.aiParseSummary {
-                let aiColor: Color = diagnostic.aiParseError != nil
-                    ? .red
-                    : ((diagnostic.aiParsedCardCount ?? 0) > 0 ? .green : .orange)
+                let style: (color: Color, icon: String) = {
+                    if diagnostic.aiParseError != nil { return (.red, "xmark.octagon.fill") }
+                    if diagnostic.aiParseDuplicate { return (.secondary, "doc.on.doc") }
+                    if (diagnostic.aiParsedCardCount ?? 0) > 0 { return (.green, "sparkles") }
+                    return (.orange, "exclamationmark.triangle.fill")
+                }()
                 Label {
                     Text(aiSummary)
                         .font(.caption)
-                        .foregroundStyle(aiColor)
+                        .foregroundStyle(style.color)
                         .fixedSize(horizontal: false, vertical: true)
                 } icon: {
-                    Image(systemName: diagnostic.aiParseError != nil
-                        ? "xmark.octagon.fill"
-                        : ((diagnostic.aiParsedCardCount ?? 0) > 0 ? "sparkles" : "exclamationmark.triangle.fill"))
-                        .foregroundStyle(aiColor)
+                    Image(systemName: style.icon)
+                        .foregroundStyle(style.color)
                 }
             }
             if let suggestion = diagnostic.suggestion {
