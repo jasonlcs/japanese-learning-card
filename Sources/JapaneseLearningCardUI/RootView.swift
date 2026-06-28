@@ -10,7 +10,7 @@ extension Color {
     /// Window / page background (macOS: windowBackgroundColor, iOS: systemBackground).
     static var platformWindowBackground: Color {
         #if os(macOS)
-        Color.platformWindowBackground
+        Color(nsColor: .windowBackgroundColor)
         #else
         Color(.systemBackground)
         #endif
@@ -18,7 +18,7 @@ extension Color {
     /// Text-field / editor background (macOS: textBackgroundColor, iOS: secondarySystemBackground).
     static var platformTextBackground: Color {
         #if os(macOS)
-        Color.platformTextBackground
+        Color(nsColor: .textBackgroundColor)
         #else
         Color(.secondarySystemBackground)
         #endif
@@ -26,7 +26,7 @@ extension Color {
     /// Hairline separator (macOS: separatorColor, iOS: separator).
     static var platformSeparator: Color {
         #if os(macOS)
-        Color.platformSeparator
+        Color(nsColor: .separatorColor)
         #else
         Color(.separator)
         #endif

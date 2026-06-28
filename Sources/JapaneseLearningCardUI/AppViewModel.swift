@@ -448,7 +448,9 @@ final class AppViewModel: ObservableObject {
         guard panel.runModal() == .OK, let folder = panel.url else { return }
         switchStorageMode(.iCloudDriveFolder, folder: folder)
         #else
-        // iOS: switch to the default iCloud Drive folder directly (no folder picker on iOS).
+        // iOS: UIDocumentPickerViewController could be used here, but for simplicity
+        // we switch directly to the default iCloud Drive folder.  A folder picker
+        // can be added in a future iteration.
         switchStorageMode(.iCloudDriveFolder, folder: UserDataStoreFactory.defaultICloudDriveFolder())
         #endif
     }
