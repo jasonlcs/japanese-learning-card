@@ -142,16 +142,18 @@ public enum ProviderPreset: String, Codable, CaseIterable, Identifiable, Sendabl
     case openAI
     case openCodeGo
     case openCodeZen
+    case googleAIStudio
     case custom
 
     public var id: String { rawValue }
 
     /// 各 preset 預設是否要求結構化輸出。OpenAI 官方支援，預設開；
     /// 其他第三方/本地 endpoint 不一定支援，預設關以免回 400。
+    /// Gemma 透過 Google 的 OpenAI 相容層不保證支援 response_format，預設關。
     public var defaultStructuredOutput: StructuredOutputMode {
         switch self {
         case .openAI: .jsonObject
-        case .openCodeGo, .openCodeZen, .custom: .off
+        case .openCodeGo, .openCodeZen, .googleAIStudio, .custom: .off
         }
     }
 
@@ -163,6 +165,8 @@ public enum ProviderPreset: String, Codable, CaseIterable, Identifiable, Sendabl
             "OpenCode Go"
         case .openCodeZen:
             "OpenCode Zen"
+        case .googleAIStudio:
+            "Google AI Studio (Gemma)"
         case .custom:
             "Custom"
         }
@@ -176,6 +180,9 @@ public enum ProviderPreset: String, Codable, CaseIterable, Identifiable, Sendabl
             URL(string: "https://opencode.ai/zen/go/v1")!
         case .openCodeZen:
             URL(string: "https://opencode.ai/zen/v1")!
+        case .googleAIStudio:
+            // Google AI Studio / Gemini API 的 OpenAI 相容端點。
+            URL(string: "https://generativelanguage.googleapis.com/v1beta/openai")!
         case .custom:
             URL(string: "https://api.openai.com/v1")!
         }
@@ -189,8 +196,21 @@ public enum ProviderPreset: String, Codable, CaseIterable, Identifiable, Sendabl
             "glm-5.2"
         case .openCodeZen:
             "deepseek-v4-flash"
+        case .googleAIStudio:
+            // Gemma 4 小而快、有免費額度(A4B = 活躍約 4B 參數)。
+            "gemma-4-26b-a4b-it"
         case .custom:
             "gpt-4.1-mini"
+        }
+    }
+
+    /// 是否只提供精選的 `fallbackModels` 作為可選模型，不展開 `/models` 的完整清單。
+    /// Google AI Studio 會回傳大量模型(含每日額度極低的 Gemini Flash 等)，這裡只給
+    /// 免費額度寬鬆的 Gemma；驗證時仍會打 `/models` 確認 API key 有效。
+    public var usesCuratedModelList: Bool {
+        switch self {
+        case .googleAIStudio: true
+        case .openAI, .openCodeGo, .openCodeZen, .custom: false
         }
     }
 
@@ -202,6 +222,11 @@ public enum ProviderPreset: String, Codable, CaseIterable, Identifiable, Sendabl
             ["glm-5.2", "glm-5.1", "kimi-k2.7", "kimi-k2.6", "deepseek-v4-pro", "deepseek-v4-flash", "mimo-v2.5", "mimo-v2.5-pro"]
         case .openCodeZen:
             ["deepseek-v4-flash", "deepseek-v4-pro", "minimax-m2.7", "minimax-m2.5", "glm-5.2", "glm-5.1", "kimi-k2.6", "big-pickle"]
+        case .googleAIStudio:
+            // 只列 Gemma：免費額度寬鬆(15 RPM、token 無上限、每日 1500 次)。
+            // 不放 Gemini Flash——其免費額度每日僅約 20 次，生卡片很快就爆。
+            // 想用其他模型可在「驗證並儲存」後從 /models 抓到的清單選。
+            ["gemma-4-26b-a4b-it", "gemma-4-31b-it"]
         case .custom:
             [defaultModel]
         }

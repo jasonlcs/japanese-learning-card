@@ -37,6 +37,19 @@ swift run JapaneseLearningCard
 
 注意：「驗證並儲存」主要確認 API key、Base URL、Provider models API 可用。它不保證每一個模型的長時間生成都一定不會逾時；如果遇到逾時，可以查看 AI Log。
 
+### Google AI Studio (Gemma) — 免費額度
+
+想用免費額度的話，可以選「Google AI Studio (Gemma)」這個 Provider：
+
+1. 到 [Google AI Studio](https://aistudio.google.com/apikey) 申請 API key。
+2. Provider 選「Google AI Studio (Gemma)」，Base URL 會自動帶入 Google 的 OpenAI 相容端點。
+3. Model 預設為 `gemma-4-26b-a4b-it`（小而快、有免費額度）；按「驗證並儲存」後，下拉選單會列出你帳號實際可用的模型（例如 `gemma-4-31b-it`）。
+4. 貼上 API key，按「驗證並儲存」。
+
+這個 Provider 預設關閉「結構化輸出」，因為 Gemma 不一定支援 `response_format`；系統會在 prompt 要求 JSON 並自動容錯解析，不需手動調整。
+
+**免費額度與 Rate Limit**：Gemma 4 系列的免費額度較寬鬆（約 15 RPM、token 無上限、每日 1500 次），適合本 app 生卡片。請避免改用 Gemini Flash 系列——其免費額度每日僅約 20 次，很快就會用完。實際額度以 Google AI Studio 後台「Rate limits by model」為準；若看到 `HTTP 429`，代表暫時超過速率上限，稍等再試即可。
+
 ## 4. 新增網頁內容來源
 
 你可以加入網頁 URL，讓 app 定期爬取內容並產生日文學習卡。
