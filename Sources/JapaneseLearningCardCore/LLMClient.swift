@@ -498,6 +498,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
                 你是日文學習測驗老師。只輸出 JSON，不要 Markdown。
                 JSON schema: {"quizzes":[{"cardId":"可省略","sourceWord":"...","question":"...","choices":["A","B","C","D"],"correctAnswer":"...","explanationZh":"..."}]}
                 題目要測單字意思、用法、助詞、文法或例句理解。請用繁體中文寫解析。每題必須剛好 4 個選項，correctAnswer 必須完全等於其中一個 choices。
+                正確答案在 choices 裡的位置必須分散，不能固定放在第一個；多題時請平均使用第 1、2、3、4 個位置。
                 \(allowedOutputWritingRules)
                 """),
                 .init(role: "user", content: """
@@ -573,22 +574,41 @@ public struct OpenAICompatibleLLMClient: LLMClient {
 
     public static func decodeQuiz(from content: String, cards: [LearningCard]) throws -> [QuizQuestion] {
         let payload = try decodeJSON(QuizPayload.self, from: content)
-        return payload.quizzes.compactMap { item in
+        return payload.quizzes.enumerated().compactMap { offset, item in
             let choices = item.choices.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             guard choices.count == 4, choices.contains(item.correctAnswer) else {
                 return nil
             }
             let cardId = item.cardId.flatMap(UUID.init(uuidString:))
             let matchedCardId = cardId ?? cards.first(where: { $0.word == item.sourceWord })?.id
+            let normalizedChoices = distributedQuizChoices(
+                choices: choices,
+                correctAnswer: item.correctAnswer,
+                preferredCorrectIndex: offset % choices.count
+            )
             return QuizQuestion(
                 cardId: matchedCardId,
                 sourceWord: item.sourceWord,
                 question: item.question,
-                choices: choices,
+                choices: normalizedChoices,
                 correctAnswer: item.correctAnswer,
                 explanationZh: item.explanationZh
             )
         }
+    }
+
+    private static func distributedQuizChoices(choices: [String], correctAnswer: String, preferredCorrectIndex: Int) -> [String] {
+        guard choices.count == 4,
+              let correctIndex = choices.firstIndex(of: correctAnswer) else {
+            return choices
+        }
+        let targetIndex = min(max(preferredCorrectIndex, 0), choices.count - 1)
+        guard targetIndex != correctIndex else { return choices }
+
+        var arranged = choices
+        arranged.remove(at: correctIndex)
+        arranged.insert(correctAnswer, at: targetIndex)
+        return arranged
     }
 
     public static func decodeExampleReading(from content: String) throws -> String {
