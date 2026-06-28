@@ -53,6 +53,12 @@ final class AppViewModel: ObservableObject {
     @Published var availableModels: [String] = ProviderPreset.openAI.fallbackModels
     @Published var isValidatingProvider = false
     @Published var newSourceURL = ""
+    /// 正在驗證連線的來源 id（含 new-URL 欄位使用的 sentinel）。
+    @Published var validatingSourceIDs: Set<UUID> = []
+    /// 各來源最近一次「驗證連線」的診斷結果。
+    @Published var sourceDiagnostics: [UUID: SourceDiagnostic] = [:]
+    /// 新增網址欄位驗證時使用的固定 id。
+    static let newSourceDiagnosticID = UUID(uuidString: "00000000-0000-0000-0000-0000000000B1")!
     @Published var statusMessage = ""
     @Published var isUserInteracting = false
     @Published private(set) var isPopoverVisible = false
@@ -130,6 +136,7 @@ final class AppViewModel: ObservableObject {
     private let providerClient: OpenAICompatibleLLMClient
     private let schedulerPolicy = SchedulerPolicy()
     private let cardSelector = CardSelector()
+    private let connectionTester = SourceConnectionTester()
     private var pipeline: LearningPipeline
     private var displayTimer: Timer?
     private var crawlTimer: Timer?
@@ -675,6 +682,7 @@ final class AppViewModel: ObservableObject {
                 }
             }
             newSourceURL = ""
+            sourceDiagnostics[Self.newSourceDiagnosticID] = nil
             statusMessage = "已新增來源"
             return true
         } catch {
@@ -722,6 +730,53 @@ final class AppViewModel: ObservableObject {
         storeUpdate { state in
             if let index = state.sources.firstIndex(where: { $0.id == source.id }) {
                 state.sources[index].isEnabled.toggle()
+            }
+        }
+    }
+
+    /// 驗證既有來源的連線狀態，並把結果寫回 `Source.lastError`（可連則清空）。
+    func validateSource(_ source: Source) {
+        guard !validatingSourceIDs.contains(source.id) else { return }
+        validatingSourceIDs.insert(source.id)
+        statusMessage = "驗證來源連線..."
+        let url = source.url
+        let id = source.id
+        Task {
+            let diagnostic = await connectionTester.test(url: url)
+            await MainActor.run {
+                self.sourceDiagnostics[id] = diagnostic
+                self.validatingSourceIDs.remove(id)
+                self.statusMessage = diagnostic.summary
+                self.storeUpdate { state in
+                    if let index = state.sources.firstIndex(where: { $0.id == id }) {
+                        state.sources[index].lastError = diagnostic.errorMessageForSource
+                    }
+                }
+            }
+        }
+    }
+
+    /// 驗證「新增網址」欄位目前輸入的網址連線狀態（尚未加入清單時使用）。
+    func validateNewSourceURL() {
+        let trimmed = newSourceURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let id = Self.newSourceDiagnosticID
+        guard let url = URL(string: trimmed) else {
+            sourceDiagnostics[id] = SourceDiagnostic(
+                outcome: .invalidURL,
+                summary: "網址格式不正確。",
+                suggestion: "請確認網址完整且以 http:// 或 https:// 開頭。"
+            )
+            return
+        }
+        guard !validatingSourceIDs.contains(id) else { return }
+        validatingSourceIDs.insert(id)
+        statusMessage = "驗證來源連線..."
+        Task {
+            let diagnostic = await connectionTester.test(url: url)
+            await MainActor.run {
+                self.sourceDiagnostics[id] = diagnostic
+                self.validatingSourceIDs.remove(id)
+                self.statusMessage = diagnostic.summary
             }
         }
     }

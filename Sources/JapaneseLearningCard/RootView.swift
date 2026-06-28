@@ -1158,6 +1158,17 @@ struct SettingsView: View {
                                         addSourceAndRefocus()
                                     }
                                 }
+                            if viewModel.validatingSourceIDs.contains(AppViewModel.newSourceDiagnosticID) {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Button {
+                                    viewModel.validateNewSourceURL()
+                                } label: {
+                                    Image(systemName: "antenna.radiowaves.left.and.right")
+                                }
+                                .disabled(!canAddSource)
+                                .help("驗證連線")
+                            }
                             Button {
                                 addSourceAndRefocus()
                             } label: {
@@ -1165,6 +1176,9 @@ struct SettingsView: View {
                             }
                             .disabled(!canAddSource)
                             .help("新增網址")
+                        }
+                        if let diagnostic = viewModel.sourceDiagnostics[AppViewModel.newSourceDiagnosticID] {
+                            diagnosticView(diagnostic)
                         }
                     }
 
@@ -1176,7 +1190,9 @@ struct SettingsView: View {
                                 TextField("", text: sourceURLBinding(source))
                                     .textFieldStyle(.roundedBorder)
                                     .onSubmit { commitSourceURL(source) }
-                                if let error = source.lastError {
+                                if let diagnostic = viewModel.sourceDiagnostics[source.id] {
+                                    diagnosticView(diagnostic)
+                                } else if let error = source.lastError {
                                     Text(error)
                                         .font(.caption)
                                         .foregroundStyle(.red)
@@ -1194,6 +1210,17 @@ struct SettingsView: View {
                                 }
                             }
                             Spacer()
+                            if viewModel.validatingSourceIDs.contains(source.id) {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Button {
+                                    viewModel.validateSource(source)
+                                } label: {
+                                    Image(systemName: "antenna.radiowaves.left.and.right")
+                                }
+                                .buttonStyle(.borderless)
+                                .help("驗證連線")
+                            }
                             Button {
                                 viewModel.removeSource(source)
                             } label: {
@@ -1472,6 +1499,38 @@ struct SettingsView: View {
         if viewModel.updateSourceURL(source, to: edited) {
             editingSourceURLs[source.id] = nil
         }
+    }
+
+    @ViewBuilder
+    private func diagnosticView(_ diagnostic: SourceDiagnostic) -> some View {
+        let color: Color = diagnostic.outcome == .ok
+            ? .green
+            : (diagnostic.isReachable ? .orange : .red)
+        VStack(alignment: .leading, spacing: 2) {
+            Label {
+                Text(diagnostic.summary)
+                    .font(.caption)
+                    .foregroundStyle(color)
+                    .fixedSize(horizontal: false, vertical: true)
+            } icon: {
+                Image(systemName: diagnostic.isReachable
+                    ? (diagnostic.outcome == .ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    : "xmark.octagon.fill")
+                    .foregroundStyle(color)
+            }
+            if let suggestion = diagnostic.suggestion {
+                Text(suggestion)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let detail = diagnostic.detail {
+                Text(detail)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .textSelection(.enabled)
     }
 
     private func settingsBox<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
