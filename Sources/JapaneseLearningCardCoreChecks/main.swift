@@ -39,6 +39,7 @@ struct CoreChecks {
         try articleDecodingHandlesReasoningModelOutput()
         try structuredOutputIsSentPerProvider()
         try await pipelineGeneratesAIArticleAndCards()
+        try await pipelineParseAndStoreForValidationRegistersSourceAndCards()
         try await storePersistsGeneratedArticles()
         try syncedBaseStoreRoundTrips()
         try mergerKeepsLocalOnlyChanges()
@@ -826,6 +827,42 @@ struct CoreChecks {
 
         let afterDup = await store.read()
         expect(afterDup.generatedArticles.count == 1, "duplicate should not be stored again")
+    }
+
+    private static func pipelineParseAndStoreForValidationRegistersSourceAndCards() async throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathComponent("store.sqlite")
+        let store = await AppStore(fileURL: fileURL)
+        let url = URL(string: "https://www.lifehacker.jp/")!
+        let pipeline = LearningPipeline(
+            store: store,
+            crawler: MockCrawler(document: CrawledDocument(
+                sourceId: UUID(),
+                url: url,
+                title: "lifehacker",
+                plainText: "記事の本文。",
+                contentHash: "hash-lifehacker"
+            )),
+            llmClient: MockLLMClient(cardURL: url)
+        )
+
+        // 測試尚未加入的新網址：解析成功應「登記來源 + 寫入卡片」。
+        let source = Source(url: url)
+        let outcome = await pipeline.parseAndStoreForValidation(source: source, registerSource: true)
+        expect(outcome == .stored(cardCount: 1), "validating a new URL should store the parsed card, got \(outcome)")
+
+        let afterFirst = await store.read()
+        expect(afterFirst.sources.contains(where: { $0.url == url }), "new source should be registered, not vanish")
+        expect(afterFirst.cards.count == 1, "parsed card should be saved to the database")
+        expect(afterFirst.documents.count == 1, "crawled document should be saved")
+
+        // 相同內容再測一次：應判定重複、不重複建立卡片或來源。
+        let dup = await pipeline.parseAndStoreForValidation(source: source, registerSource: true)
+        expect(dup == .duplicate, "re-testing identical content should be a duplicate, got \(dup)")
+        let afterDup = await store.read()
+        expect(afterDup.cards.count == 1, "duplicate content should not add more cards")
+        expect(afterDup.sources.filter { $0.url == url }.count == 1, "duplicate content should not duplicate the source")
     }
 
     private static func storePersistsGeneratedArticles() async throws {

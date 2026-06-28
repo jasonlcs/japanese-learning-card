@@ -806,6 +806,10 @@ public final class AppViewModel: ObservableObject {
             let finalDiagnostic = diagnostic
             // 解析未失敗代表來源已登記(stored 或 duplicate)：把診斷掛到新來源、清空輸入欄。
             let registered = finalDiagnostic.isReachable && finalDiagnostic.aiParseError == nil
+            // pipeline 直接寫 store 不會觸發外部變更回呼，必須自行 reload 才會在清單看到新來源。
+            if registered {
+                await self.reload()
+            }
             await MainActor.run {
                 self.validatingSourceIDs.remove(id)
                 self.statusMessage = finalDiagnostic.aiParseSummary ?? finalDiagnostic.summary
