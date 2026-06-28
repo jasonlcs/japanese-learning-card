@@ -1,5 +1,4 @@
 import AppKit
-import Combine
 import JapaneseLearningCardCore
 import JapaneseLearningCardUI
 import SwiftUI
@@ -101,9 +100,6 @@ final class MenuBarController: NSObject {
     let viewModel: AppViewModel
     private let statusItem: NSStatusItem
     private let popover: NSPopover
-    /// 觀察 view model 變動，內容變高時即時重算開啟中的 popover 高度。
-    private var contentChangeObserver: AnyCancellable?
-    private var popoverResizeScheduled = false
 
     init(viewModel: AppViewModel) {
         self.viewModel = viewModel
@@ -128,26 +124,6 @@ final class MenuBarController: NSObject {
         }
         viewModel.requestClosePopover = { [weak self] in
             self?.popover.performClose(nil)
-        }
-
-        // popover 開著時，內容(新增來源、診斷訊息等)變動就重算高度，避免內容被裁切。
-        contentChangeObserver = viewModel.objectWillChange
-            .sink { [weak self] in self?.schedulePopoverResize() }
-    }
-
-    /// objectWillChange 在變更「前」觸發，所以延到下一個 runloop 量測，確保 SwiftUI 已套用新內容。
-    private func schedulePopoverResize() {
-        guard popover.isShown, !popoverResizeScheduled else { return }
-        popoverResizeScheduled = true
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.popoverResizeScheduled = false
-            guard self.popover.isShown else { return }
-            let newSize = self.preferredPopoverSize(for: self.statusItem.button?.window?.screen)
-            // 高度有實質變化才更新，避免每次 @Published(如倒數計時)都重設造成跳動。
-            if abs(self.popover.contentSize.height - newSize.height) > 0.5 {
-                self.popover.contentSize = newSize
-            }
         }
     }
 
