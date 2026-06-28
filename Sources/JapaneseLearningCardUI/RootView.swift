@@ -33,10 +33,14 @@ extension Color {
     }
 }
 
-struct RootView: View {
+public struct RootView: View {
     @ObservedObject var viewModel: AppViewModel
 
-    var body: some View {
+    public init(viewModel: AppViewModel) {
+        self.viewModel = viewModel
+    }
+
+    public var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Picker("", selection: $viewModel.selectedTab) {

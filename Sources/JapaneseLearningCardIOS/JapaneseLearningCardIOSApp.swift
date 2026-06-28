@@ -1,6 +1,9 @@
 import JapaneseLearningCardCore
 import JapaneseLearningCardUI
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 // MARK: - App entry point
 
@@ -47,9 +50,14 @@ struct IOSRootView: View {
 
     var body: some View {
         NavigationStack {
+            #if canImport(UIKit)
             RootView(viewModel: viewModel)
                 .navigationBarTitleDisplayMode(.inline)
+            #else
+            RootView(viewModel: viewModel)
+            #endif
         }
+        #if canImport(UIKit)
         .onReceive(
             NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)
         ) { _ in
@@ -57,5 +65,6 @@ struct IOSRootView: View {
             Task { await viewModel.performPull() }
             viewModel.refreshNow()
         }
+        #endif
     }
 }

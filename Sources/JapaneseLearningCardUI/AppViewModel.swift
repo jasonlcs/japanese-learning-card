@@ -45,7 +45,7 @@ struct QuickReviewSessionState: Equatable {
 }
 
 @MainActor
-final class AppViewModel: ObservableObject {
+public final class AppViewModel: ObservableObject {
     @Published var snapshot = AppSnapshot()
     @Published var currentCard: LearningCard?
     @Published var currentQuiz: QuizQuestion?
@@ -180,14 +180,14 @@ final class AppViewModel: ObservableObject {
     private var syncPollTimer: Timer?
     private var pushDebounceTask: Task<Void, Never>?
     private var lastSnapshotDataVersion: Int64?
-    var requestShowPopover: (() -> Void)?
-    var requestClosePopover: (() -> Void)?
+    public var requestShowPopover: (() -> Void)?
+    public var requestClosePopover: (() -> Void)?
     /// 使用者按「立即檢查更新」時呼叫，由 AppDelegate 接到 Sparkle。
-    var requestCheckForUpdates: (() -> Void)?
+    public var requestCheckForUpdates: (() -> Void)?
     /// 「自動檢查更新」開關變動時呼叫，橋接到 Sparkle 的排程檢查。
-    var setAutomaticUpdateChecks: ((Bool) -> Void)?
+    public var setAutomaticUpdateChecks: ((Bool) -> Void)?
 
-    init(store: AppStore, secretStore: SecretStore = KeychainStore(), storageSettings: StorageSettings = StorageSettingsStore.load()) {
+    public init(store: AppStore, secretStore: SecretStore = KeychainStore(), storageSettings: StorageSettings = StorageSettingsStore.load()) {
         self.store = store
         self.secretStore = secretStore
         self.providerClient = OpenAICompatibleLLMClient(secretStore: secretStore)
@@ -205,7 +205,7 @@ final class AppViewModel: ObservableObject {
         #endif
     }
 
-    func start() {
+    public func start() {
         #if os(macOS)
         // 自動偵測簡報情境，偵測到就暫停自動彈出，結束後自動恢復。
         presentationDetector.onChange = { [weak self] presenting in
@@ -284,7 +284,7 @@ final class AppViewModel: ObservableObject {
     }
 
     /// 從雲端拉一次 (前景 / 定時 / 啟動都會叫)。
-    func performPull() async {
+    public func performPull() async {
         guard storageSettings.mode == .cloudKit else { return }
         #if LOCAL_BUILD
         return
@@ -573,7 +573,7 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    func refreshNow() {
+    public func refreshNow() {
         isRefreshing = true
         statusMessage = "更新中..."
         Task {
@@ -1257,7 +1257,7 @@ final class AppViewModel: ObservableObject {
         scheduleAutoClose()
     }
 
-    func popoverDidShow(isMouseInside: Bool = false) {
+    public func popoverDidShow(isMouseInside: Bool = false) {
         isPopoverVisible = true
         isUserInteracting = isMouseInside
         if isMouseInside {
@@ -1271,7 +1271,7 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    func popoverDidClose() {
+    public func popoverDidClose() {
         isPopoverVisible = false
         isUserInteracting = false
         finishQuickReview(message: "")
