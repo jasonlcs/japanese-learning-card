@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 import CoreGraphics
 
@@ -90,3 +91,4 @@ final class PresentationDetector {
         return false
     }
 }
+#endif // os(macOS)

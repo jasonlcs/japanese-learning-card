@@ -1,5 +1,6 @@
 import AppKit
 import JapaneseLearningCardCore
+import JapaneseLearningCardUI
 import SwiftUI
 
 @main
