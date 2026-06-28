@@ -1,11 +1,46 @@
+#if canImport(AppKit)
 import AppKit
+#endif
 import JapaneseLearningCardCore
 import SwiftUI
 
-struct RootView: View {
+// MARK: - Platform-adaptive Color helpers
+
+extension Color {
+    /// Window / page background (macOS: windowBackgroundColor, iOS: systemBackground).
+    static var platformWindowBackground: Color {
+        #if os(macOS)
+        Color(nsColor: .windowBackgroundColor)
+        #else
+        Color(.systemBackground)
+        #endif
+    }
+    /// Text-field / editor background (macOS: textBackgroundColor, iOS: secondarySystemBackground).
+    static var platformTextBackground: Color {
+        #if os(macOS)
+        Color(nsColor: .textBackgroundColor)
+        #else
+        Color(.secondarySystemBackground)
+        #endif
+    }
+    /// Hairline separator (macOS: separatorColor, iOS: separator).
+    static var platformSeparator: Color {
+        #if os(macOS)
+        Color(nsColor: .separatorColor)
+        #else
+        Color(.separator)
+        #endif
+    }
+}
+
+public struct RootView: View {
     @ObservedObject var viewModel: AppViewModel
 
-    var body: some View {
+    public init(viewModel: AppViewModel) {
+        self.viewModel = viewModel
+    }
+
+    public var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Picker("", selection: $viewModel.selectedTab) {
@@ -18,7 +53,9 @@ struct RootView: View {
                 .pickerStyle(.segmented)
 
                 AutoDisplayPauseToggle(viewModel: viewModel)
+                #if os(macOS)
                 PresentationModeToggle(viewModel: viewModel)
+                #endif
                 if viewModel.selectedTab == 0 {
                     QuickReviewControls(viewModel: viewModel)
                 }
@@ -46,8 +83,9 @@ struct RootView: View {
                 }
             }
         }
+        #if os(macOS)
         .frame(minWidth: 520)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.platformWindowBackground)
         .scrollContentBackground(.hidden)
         .onHover { inside in
             if inside {
@@ -56,6 +94,10 @@ struct RootView: View {
                 viewModel.resumeAutoCloseAfterInteraction()
             }
         }
+        #else
+        .background(Color.platformWindowBackground)
+        .scrollContentBackground(.hidden)
+        #endif
     }
 }
 
@@ -545,7 +587,7 @@ private struct StyledLearningCard: View {
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .background(
             RoundedRectangle(cornerRadius: 18)
-                .fill(Color(nsColor: .textBackgroundColor))
+                .fill(Color.platformTextBackground)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 18)
@@ -1080,8 +1122,12 @@ struct CopyButton: View {
 
     var body: some View {
         Button {
+            #if os(macOS)
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)
+            #else
+            UIPasteboard.general.string = text
+            #endif
         } label: {
             Image(systemName: "doc.on.doc")
         }
@@ -1156,10 +1202,10 @@ struct SettingsView: View {
                         .scrollContentBackground(.hidden)
                         .padding(6)
                         .frame(minHeight: 96)
-                        .background(Color(nsColor: .textBackgroundColor))
+                        .background(Color.platformTextBackground)
                         .overlay(
                             RoundedRectangle(cornerRadius: 6)
-                                .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                                .stroke(Color.platformSeparator, lineWidth: 1)
                         )
                         .clipShape(RoundedRectangle(cornerRadius: 6))
                     }
@@ -1178,6 +1224,17 @@ struct SettingsView: View {
                                         addSourceAndRefocus()
                                     }
                                 }
+                            if viewModel.validatingSourceIDs.contains(AppViewModel.newSourceDiagnosticID) {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Button {
+                                    viewModel.validateNewSourceURL()
+                                } label: {
+                                    Image(systemName: "antenna.radiowaves.left.and.right")
+                                }
+                                .disabled(!canAddSource)
+                                .help("驗證連線")
+                            }
                             Button {
                                 addSourceAndRefocus()
                             } label: {
@@ -1185,6 +1242,9 @@ struct SettingsView: View {
                             }
                             .disabled(!canAddSource)
                             .help("新增網址")
+                        }
+                        if let diagnostic = viewModel.sourceDiagnostics[AppViewModel.newSourceDiagnosticID] {
+                            diagnosticView(diagnostic)
                         }
                     }
 
@@ -1196,7 +1256,9 @@ struct SettingsView: View {
                                 TextField("", text: sourceURLBinding(source))
                                     .textFieldStyle(.roundedBorder)
                                     .onSubmit { commitSourceURL(source) }
-                                if let error = source.lastError {
+                                if let diagnostic = viewModel.sourceDiagnostics[source.id] {
+                                    diagnosticView(diagnostic)
+                                } else if let error = source.lastError {
                                     Text(error)
                                         .font(.caption)
                                         .foregroundStyle(.red)
@@ -1214,6 +1276,17 @@ struct SettingsView: View {
                                 }
                             }
                             Spacer()
+                            if viewModel.validatingSourceIDs.contains(source.id) {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Button {
+                                    viewModel.validateSource(source)
+                                } label: {
+                                    Image(systemName: "antenna.radiowaves.left.and.right")
+                                }
+                                .buttonStyle(.borderless)
+                                .help("驗證連線")
+                            }
                             Button {
                                 viewModel.removeSource(source)
                             } label: {
@@ -1379,6 +1452,16 @@ struct SettingsView: View {
                     } label: {
                         Label("匯出 SQLite DB", systemImage: "square.and.arrow.down")
                     }
+                    #if !os(macOS)
+                    .sheet(isPresented: Binding(
+                        get: { viewModel.exportedDatabaseURL != nil },
+                        set: { if !$0 { viewModel.exportedDatabaseURL = nil } }
+                    )) {
+                        if let url = viewModel.exportedDatabaseURL {
+                            ShareLink(item: url, message: Text("Japanese Learning Card SQLite DB"))
+                        }
+                    }
+                    #endif
                 }
 
                 settingsBox("iCloud 同步") {
@@ -1419,7 +1502,11 @@ struct SettingsView: View {
                     Button {
                         viewModel.openAIRequestLog()
                     } label: {
+                        #if os(macOS)
                         Label("在 Finder 顯示 AI Log", systemImage: "folder")
+                        #else
+                        Label("顯示 AI Log 路徑", systemImage: "folder")
+                        #endif
                     }
                     Text(AIRequestLogStore.logFileURL.path)
                         .font(.caption)
@@ -1427,6 +1514,7 @@ struct SettingsView: View {
                         .textSelection(.enabled)
                 }
 
+                #if os(macOS)
                 settingsBox("更新") {
                     if UpdateChecker.isLocalBuild {
                         HStack {
@@ -1465,6 +1553,16 @@ struct SettingsView: View {
                 } label: {
                     Label("結束程式", systemImage: "power")
                 }
+                #else
+                settingsBox("關於") {
+                    HStack {
+                        Text("版本")
+                        Spacer()
+                        Text(UpdateChecker.currentVersion)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                #endif
     }
 
     private var canAddSource: Bool {
@@ -1492,6 +1590,38 @@ struct SettingsView: View {
         if viewModel.updateSourceURL(source, to: edited) {
             editingSourceURLs[source.id] = nil
         }
+    }
+
+    @ViewBuilder
+    private func diagnosticView(_ diagnostic: SourceDiagnostic) -> some View {
+        let color: Color = diagnostic.outcome == .ok
+            ? .green
+            : (diagnostic.isReachable ? .orange : .red)
+        VStack(alignment: .leading, spacing: 2) {
+            Label {
+                Text(diagnostic.summary)
+                    .font(.caption)
+                    .foregroundStyle(color)
+                    .fixedSize(horizontal: false, vertical: true)
+            } icon: {
+                Image(systemName: diagnostic.isReachable
+                    ? (diagnostic.outcome == .ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    : "xmark.octagon.fill")
+                    .foregroundStyle(color)
+            }
+            if let suggestion = diagnostic.suggestion {
+                Text(suggestion)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let detail = diagnostic.detail {
+                Text(detail)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .textSelection(.enabled)
     }
 
     private func settingsBox<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
@@ -2162,7 +2292,11 @@ struct AIArticleView: View {
                             displayedComponents: .hourAndMinute
                         )
                         .labelsHidden()
+                        #if os(macOS)
                         .datePickerStyle(.stepperField)
+                        #else
+                        .datePickerStyle(.compact)
+                        #endif
                     }
                     .disabled(!viewModel.snapshot.settings.aiArticleEnabled)
 
@@ -2313,10 +2447,10 @@ struct ManualCardView: View {
                         .scrollContentBackground(.hidden)
                         .padding(6)
                         .frame(minHeight: 180)
-                        .background(Color(nsColor: .textBackgroundColor))
+                        .background(Color.platformTextBackground)
                         .overlay(
                             RoundedRectangle(cornerRadius: 6)
-                                .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                                .stroke(Color.platformSeparator, lineWidth: 1)
                         )
                         .clipShape(RoundedRectangle(cornerRadius: 6))
                 }
@@ -2471,7 +2605,9 @@ struct AIArticleDetailView: View {
             Spacer()
         }
         .padding()
+        #if os(macOS)
         .frame(minWidth: 460, minHeight: 520)
+        #endif
     }
 }
 

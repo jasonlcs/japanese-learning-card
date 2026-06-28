@@ -1,5 +1,9 @@
 import Combine
+#if canImport(AppKit)
 import AppKit
+#elseif canImport(UIKit)
+import UIKit
+#endif
 import Foundation
 import JapaneseLearningCardCore
 
@@ -41,7 +45,7 @@ struct QuickReviewSessionState: Equatable {
 }
 
 @MainActor
-final class AppViewModel: ObservableObject {
+public final class AppViewModel: ObservableObject {
     @Published var snapshot = AppSnapshot()
     @Published var currentCard: LearningCard?
     @Published var currentQuiz: QuizQuestion?
@@ -53,6 +57,12 @@ final class AppViewModel: ObservableObject {
     @Published var availableModels: [String] = ProviderPreset.openAI.fallbackModels
     @Published var isValidatingProvider = false
     @Published var newSourceURL = ""
+    /// 正在驗證連線的來源 id（含 new-URL 欄位使用的 sentinel）。
+    @Published var validatingSourceIDs: Set<UUID> = []
+    /// 各來源最近一次「驗證連線」的診斷結果。
+    @Published var sourceDiagnostics: [UUID: SourceDiagnostic] = [:]
+    /// 新增網址欄位驗證時使用的固定 id。
+    static let newSourceDiagnosticID = UUID(uuidString: "00000000-0000-0000-0000-0000000000B1")!
     @Published var statusMessage = ""
     @Published var isUserInteracting = false
     @Published private(set) var isPopoverVisible = false
@@ -77,6 +87,8 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var storageHealth: DataStoreHealth?
     @Published private(set) var isMigratingStorage = false
     @Published private(set) var isBackfillingCards = false
+    /// iOS only: set by exportDatabase() so the UI can present a share sheet.
+    @Published var exportedDatabaseURL: URL?
 
     /// 簡報模式：手動開關。開著時暫停卡片自動彈出，直到使用者自己關掉
     /// （持久化，重開 App 也記得）。
@@ -88,7 +100,9 @@ final class AppViewModel: ObservableObject {
 
     static let presentationModeKey = "presentationModeEnabled"
 
-    /// 暫停「依顯示頻率自動彈出單字卡」。使用者手動的開關，持久化，
+    #if os(macOS)
+    private let presentationDetector = PresentationDetector()
+    #endif
     /// 開著就一直暫停，直到自己按繼續。
     @Published var autoDisplayPaused = UserDefaults.standard.bool(forKey: AppViewModel.autoDisplayPausedKey) {
         didSet { UserDefaults.standard.set(autoDisplayPaused, forKey: Self.autoDisplayPausedKey) }
@@ -100,8 +114,6 @@ final class AppViewModel: ObservableObject {
 
     /// 目前是否該暫停自動彈出：手動暫停或簡報情境任一成立（自動彈出的總閘門）。
     var isAutoDisplaySuppressed: Bool { autoDisplayPaused || isPresentationPaused }
-
-    private let presentationDetector = PresentationDetector()
 
     // iCloud 同步狀態 (給 settings 頁詳細面板用)
     @Published private(set) var iCloudStatus: CloudKitAccountChecker.Result = .unknown(underlying: "尚未檢查")
@@ -130,6 +142,7 @@ final class AppViewModel: ObservableObject {
     private let providerClient: OpenAICompatibleLLMClient
     private let schedulerPolicy = SchedulerPolicy()
     private let cardSelector = CardSelector()
+    private let connectionTester = SourceConnectionTester()
     private var pipeline: LearningPipeline
     private var displayTimer: Timer?
     private var crawlTimer: Timer?
@@ -156,7 +169,9 @@ final class AppViewModel: ObservableObject {
     private var quickReviewCardDeadline: Date? {
         didSet { updateVisibleCardTimerState() }
     }
+    #if os(macOS)
     nonisolated(unsafe) private var sleepWakeObservers: [NSObjectProtocol] = []
+    #endif
     private var isSuspended = false
     private let accountChecker = CloudKitAccountChecker()
     private let conflictStore = ConflictStore(storeURL: ConflictStore.defaultURL())
@@ -165,14 +180,14 @@ final class AppViewModel: ObservableObject {
     private var syncPollTimer: Timer?
     private var pushDebounceTask: Task<Void, Never>?
     private var lastSnapshotDataVersion: Int64?
-    var requestShowPopover: (() -> Void)?
-    var requestClosePopover: (() -> Void)?
+    public var requestShowPopover: (() -> Void)?
+    public var requestClosePopover: (() -> Void)?
     /// 使用者按「立即檢查更新」時呼叫，由 AppDelegate 接到 Sparkle。
-    var requestCheckForUpdates: (() -> Void)?
+    public var requestCheckForUpdates: (() -> Void)?
     /// 「自動檢查更新」開關變動時呼叫，橋接到 Sparkle 的排程檢查。
-    var setAutomaticUpdateChecks: ((Bool) -> Void)?
+    public var setAutomaticUpdateChecks: ((Bool) -> Void)?
 
-    init(store: AppStore, secretStore: SecretStore = KeychainStore(), storageSettings: StorageSettings = StorageSettingsStore.load()) {
+    public init(store: AppStore, secretStore: SecretStore = KeychainStore(), storageSettings: StorageSettings = StorageSettingsStore.load()) {
         self.store = store
         self.secretStore = secretStore
         self.providerClient = OpenAICompatibleLLMClient(secretStore: secretStore)
@@ -183,17 +198,21 @@ final class AppViewModel: ObservableObject {
     }
 
     deinit {
+        #if os(macOS)
         for observer in sleepWakeObservers {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
+        #endif
     }
 
-    func start() {
+    public func start() {
+        #if os(macOS)
         // 自動偵測簡報情境，偵測到就暫停自動彈出，結束後自動恢復。
         presentationDetector.onChange = { [weak self] presenting in
             self?.presentationAutoDetected = presenting
         }
         presentationDetector.start()
+        #endif
         Task {
             await reload()
             await store.ensureAISentinelSource(extractionPrompt: AISource.sentinelExtractionPrompt)
@@ -265,7 +284,7 @@ final class AppViewModel: ObservableObject {
     }
 
     /// 從雲端拉一次 (前景 / 定時 / 啟動都會叫)。
-    func performPull() async {
+    public func performPull() async {
         guard storageSettings.mode == .cloudKit else { return }
         #if LOCAL_BUILD
         return
@@ -425,6 +444,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func chooseICloudDriveFolderAndMigrate() {
+        #if os(macOS)
         let panel = NSOpenPanel()
         panel.title = "選擇 iCloud Drive 資料夾"
         panel.canChooseFiles = false
@@ -434,6 +454,12 @@ final class AppViewModel: ObservableObject {
         panel.directoryURL = UserDataStoreFactory.defaultICloudDriveFolder().deletingLastPathComponent()
         guard panel.runModal() == .OK, let folder = panel.url else { return }
         switchStorageMode(.iCloudDriveFolder, folder: folder)
+        #else
+        // iOS: UIDocumentPickerViewController could be used here, but for simplicity
+        // we switch directly to the default iCloud Drive folder.  A folder picker
+        // can be added in a future iteration.
+        switchStorageMode(.iCloudDriveFolder, folder: UserDataStoreFactory.defaultICloudDriveFolder())
+        #endif
     }
 
     func switchStorageMode(_ mode: StorageMode, folder: URL? = nil) {
@@ -547,7 +573,7 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    func refreshNow() {
+    public func refreshNow() {
         isRefreshing = true
         statusMessage = "更新中..."
         Task {
@@ -675,6 +701,7 @@ final class AppViewModel: ObservableObject {
                 }
             }
             newSourceURL = ""
+            sourceDiagnostics[Self.newSourceDiagnosticID] = nil
             statusMessage = "已新增來源"
             return true
         } catch {
@@ -722,6 +749,53 @@ final class AppViewModel: ObservableObject {
         storeUpdate { state in
             if let index = state.sources.firstIndex(where: { $0.id == source.id }) {
                 state.sources[index].isEnabled.toggle()
+            }
+        }
+    }
+
+    /// 驗證既有來源的連線狀態，並把結果寫回 `Source.lastError`（可連則清空）。
+    func validateSource(_ source: Source) {
+        guard !validatingSourceIDs.contains(source.id) else { return }
+        validatingSourceIDs.insert(source.id)
+        statusMessage = "驗證來源連線..."
+        let url = source.url
+        let id = source.id
+        Task {
+            let diagnostic = await connectionTester.test(url: url)
+            await MainActor.run {
+                self.sourceDiagnostics[id] = diagnostic
+                self.validatingSourceIDs.remove(id)
+                self.statusMessage = diagnostic.summary
+                self.storeUpdate { state in
+                    if let index = state.sources.firstIndex(where: { $0.id == id }) {
+                        state.sources[index].lastError = diagnostic.errorMessageForSource
+                    }
+                }
+            }
+        }
+    }
+
+    /// 驗證「新增網址」欄位目前輸入的網址連線狀態（尚未加入清單時使用）。
+    func validateNewSourceURL() {
+        let trimmed = newSourceURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let id = Self.newSourceDiagnosticID
+        guard let url = URL(string: trimmed) else {
+            sourceDiagnostics[id] = SourceDiagnostic(
+                outcome: .invalidURL,
+                summary: "網址格式不正確。",
+                suggestion: "請確認網址完整且以 http:// 或 https:// 開頭。"
+            )
+            return
+        }
+        guard !validatingSourceIDs.contains(id) else { return }
+        validatingSourceIDs.insert(id)
+        statusMessage = "驗證來源連線..."
+        Task {
+            let diagnostic = await connectionTester.test(url: url)
+            await MainActor.run {
+                self.sourceDiagnostics[id] = diagnostic
+                self.validatingSourceIDs.remove(id)
+                self.statusMessage = diagnostic.summary
             }
         }
     }
@@ -894,8 +968,12 @@ final class AppViewModel: ObservableObject {
 
     func copyArticle(_ article: GeneratedArticle) {
         let text = article.title.isEmpty ? article.plainText : "\(article.title)\n\n\(article.plainText)"
+        #if os(macOS)
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
+        #else
+        UIPasteboard.general.string = text
+        #endif
         statusMessage = "已複製文章到剪貼簿"
     }
 
@@ -905,14 +983,17 @@ final class AppViewModel: ObservableObject {
         aiArticleTimer?.invalidate()
         autoCloseTask?.cancel()
         requestClosePopover?()
+        #if os(macOS)
         DispatchQueue.main.async {
             NSApp.terminate(nil)
         }
+        #endif
     }
 
     func exportDatabase() {
         Task {
             let sourceURL = await store.exportableDatabaseURL()
+            #if os(macOS)
             await MainActor.run {
                 let panel = NSSavePanel()
                 panel.title = "匯出 SQLite 資料庫"
@@ -934,6 +1015,12 @@ final class AppViewModel: ObservableObject {
                     self.statusMessage = "匯出失敗：\(error.localizedDescription)"
                 }
             }
+            #else
+            // iOS: expose the URL so the UI layer can present a share sheet.
+            await MainActor.run {
+                self.exportedDatabaseURL = sourceURL
+            }
+            #endif
         }
     }
 
@@ -942,8 +1029,12 @@ final class AppViewModel: ObservableObject {
             do {
                 let logURL = try await AIRequestLogStore.shared.ensureLogFile()
                 await MainActor.run {
+                    #if os(macOS)
                     NSWorkspace.shared.activateFileViewerSelecting([logURL])
                     self.statusMessage = "已在 Finder 顯示 AI log：\(logURL.lastPathComponent)"
+                    #else
+                    self.statusMessage = "AI Log 路徑：\(logURL.path)"
+                    #endif
                 }
             } catch {
                 await MainActor.run {
@@ -1166,7 +1257,7 @@ final class AppViewModel: ObservableObject {
         scheduleAutoClose()
     }
 
-    func popoverDidShow(isMouseInside: Bool = false) {
+    public func popoverDidShow(isMouseInside: Bool = false) {
         isPopoverVisible = true
         isUserInteracting = isMouseInside
         if isMouseInside {
@@ -1180,7 +1271,7 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    func popoverDidClose() {
+    public func popoverDidClose() {
         isPopoverVisible = false
         isUserInteracting = false
         finishQuickReview(message: "")
@@ -1224,6 +1315,7 @@ final class AppViewModel: ObservableObject {
     }
 
     private func registerSleepWakeObservers() {
+        #if os(macOS)
         let center = NSWorkspace.shared.notificationCenter
         let entries: [(Notification.Name, Bool)] = [
             (NSWorkspace.willSleepNotification, true),
@@ -1247,6 +1339,8 @@ final class AppViewModel: ObservableObject {
             }
             sleepWakeObservers.append(observer)
         }
+        #endif
+        // iOS: the OS suspends the process on sleep; no observers needed.
     }
 
     private func pauseTimers() {

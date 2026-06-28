@@ -8,6 +8,11 @@ struct CoreChecks {
         try sourceValidatorAcceptsHTTPAndHTTPS()
         try sourceValidatorBlocksSSRF()
         webCrawlerUsesCustomUserAgent()
+        try await sourceConnectionTesterRejectsInvalidScheme()
+        try await sourceConnectionTesterClassifiesSuccess()
+        try await sourceConnectionTesterDetectsNeedsBrowser()
+        try await sourceConnectionTesterDetectsBlockedByUserAgent()
+        try await sourceConnectionTesterClassifiesTimeout()
         schedulerClampsIntervals()
         schedulerComputesNextAIArticleFireDate()
         cardSelectorRandomlyChoosesReviewableCardsOnly()
@@ -99,6 +104,65 @@ struct CoreChecks {
         let userAgent = WebCrawler.userAgent
         expect(userAgent.contains("JapaneseLearningCard"), "WebCrawler should identify with the app's custom User-Agent")
         expect(!userAgent.contains("Mozilla"), "WebCrawler should not spoof a browser User-Agent")
+    }
+
+    private static func makeTester() -> SourceConnectionTester {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: config)
+        return SourceConnectionTester(session: session, minimumUsefulCharacters: 200)
+    }
+
+    private static func sourceConnectionTesterRejectsInvalidScheme() async throws {
+        // 不應觸發任何網路請求即判定為 invalidURL。
+        MockURLProtocol.handler = { _ in throw URLError(.badServerResponse) }
+        defer { MockURLProtocol.handler = nil }
+        let diagnostic = await makeTester().test(url: URL(string: "ftp://example.com/file")!)
+        expect(diagnostic.outcome == .invalidURL, "ftp scheme should be classified as invalidURL")
+        expect(!diagnostic.isReachable, "invalidURL should not be reachable")
+    }
+
+    private static func sourceConnectionTesterClassifiesSuccess() async throws {
+        let html = "<html><body><p>" + String(repeating: "日本語の勉強。", count: 80) + "</p></body></html>"
+        MockURLProtocol.handler = { _ in (200, Data(html.utf8), "text/html") }
+        defer { MockURLProtocol.handler = nil }
+        let diagnostic = await makeTester().test(url: URL(string: "https://example.com/article")!)
+        expect(diagnostic.outcome == .ok, "ample HTML content should classify as ok, got \(diagnostic.outcome)")
+        expect(diagnostic.isReachable, "ok should be reachable")
+        expect(diagnostic.errorMessageForSource == nil, "reachable source should clear lastError")
+    }
+
+    private static func sourceConnectionTesterDetectsNeedsBrowser() async throws {
+        let html = "<html><body><p>少し</p></body></html>"
+        MockURLProtocol.handler = { _ in (200, Data(html.utf8), "text/html") }
+        defer { MockURLProtocol.handler = nil }
+        let diagnostic = await makeTester().test(url: URL(string: "https://spa.example.com/")!)
+        expect(diagnostic.outcome == .needsBrowser, "tiny body should classify as needsBrowser, got \(diagnostic.outcome)")
+        expect(diagnostic.isReachable, "needsBrowser should still count as reachable")
+    }
+
+    private static func sourceConnectionTesterDetectsBlockedByUserAgent() async throws {
+        // App UA 被擋 (403)，瀏覽器 UA 可通 (200) → 判定為站方針對 UA 阻擋。
+        MockURLProtocol.handler = { request in
+            let ua = request.value(forHTTPHeaderField: "User-Agent") ?? ""
+            if ua.contains("Mozilla") {
+                return (200, Data("<html><body>ok</body></html>".utf8), "text/html")
+            }
+            return (403, Data("forbidden".utf8), "text/plain")
+        }
+        defer { MockURLProtocol.handler = nil }
+        let diagnostic = await makeTester().test(url: URL(string: "https://news.example.com/")!)
+        expect(diagnostic.outcome == .blocked, "403 for app UA but 200 for browser UA should classify as blocked, got \(diagnostic.outcome)")
+        expect(diagnostic.httpStatus == 403, "blocked diagnostic should report the app UA status")
+        expect(diagnostic.errorMessageForSource != nil, "blocked source should set lastError")
+    }
+
+    private static func sourceConnectionTesterClassifiesTimeout() async throws {
+        MockURLProtocol.handler = { _ in throw URLError(.timedOut) }
+        defer { MockURLProtocol.handler = nil }
+        let diagnostic = await makeTester().test(url: URL(string: "https://slow.example.com/")!)
+        expect(diagnostic.outcome == .timeout, "URLError.timedOut should classify as timeout, got \(diagnostic.outcome)")
+        expect(!diagnostic.isReachable, "timeout should not be reachable")
     }
 
     private static func schedulerClampsIntervals() {
@@ -1580,4 +1644,36 @@ private struct MockLLMClient: LLMClient {
             text: articleText
         )
     }
+}
+
+/// 測試用的 URLProtocol，讓 SourceConnectionTester 的請求改由 handler 回應，無需真實網路。
+final class MockURLProtocol: URLProtocol, @unchecked Sendable {
+    /// 回傳 (statusCode, body, contentType) 或 throw 以模擬傳輸錯誤。
+    nonisolated(unsafe) static var handler: (@Sendable (URLRequest) throws -> (Int, Data, String))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let handler = MockURLProtocol.handler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+        do {
+            let (status, data, contentType) = try handler(request)
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: status,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": contentType]
+            )!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
 }
