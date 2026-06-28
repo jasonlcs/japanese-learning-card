@@ -20,6 +20,7 @@ struct CoreChecks {
         try openAICompatibleRequestAndCardDecoding()
         try quizDecodingDistributesCorrectAnswerPositions()
         try manualCardsRequestAndN5Retention()
+        try cardDecodingSalvagesMalformedAndTruncatedOutput()
         try exampleReadingDecoding()
         try await pipelineRefreshesEnabledSourcesWithMocks()
         try await pipelineSkipsAISentinelWhenRefreshingSources()
@@ -303,6 +304,38 @@ struct CoreChecks {
         expect(dropped.isEmpty, "default decode should still drop N5")
         let kept = try OpenAICompatibleLLMClient.decodeCards(from: json, sourceURL: url, includeN5: true)
         expect(kept.count == 1 && kept[0].jlptLevel == .n5, "manual decode should retain N5 cards")
+    }
+
+    private static func cardDecodingSalvagesMalformedAndTruncatedOutput() throws {
+        let url = URL(string: "https://www.yomiuri.co.jp/news/")!
+
+        // 1) 必填欄位回成 null：整批不應失敗，該卡以空字串補上。
+        let withNull = """
+        {"cards":[{"word":"報道","reading":"ほうどう","partOfSpeech":"名詞","meaningZh":"報導","grammarNoteZh":null,"jlptLevel":"N2","verbFormType":"非動詞","exampleJa":"報道がある。","exampleZh":"有報導。"}]}
+        """
+        let nullCards = try OpenAICompatibleLLMClient.decodeCards(from: withNull, sourceURL: url, includeN5: true)
+        expect(nullCards.count == 1, "null field should not fail the whole batch")
+        expect(nullCards[0].word == "報道" && nullCards[0].grammarNoteZh == "", "null field should fall back to empty string")
+
+        // 2) 輸出被截斷(最後一張不完整)：完整的那些仍應救回，不完整的略過。
+        let truncated = """
+        {"cards":[{"word":"記者","reading":"きしゃ","partOfSpeech":"名詞","meaningZh":"記者","grammarNoteZh":"職業名詞。","jlptLevel":"N2","verbFormType":"非動詞","exampleJa":"記者が来た。","exampleReading":"きしゃがきた。","exampleZh":"記者來了。"},{"word":"取材","reading":"しゅざ
+        """
+        let salvaged = try OpenAICompatibleLLMClient.decodeCards(from: truncated, sourceURL: url, includeN5: true)
+        expect(salvaged.count == 1, "complete cards should survive a truncated trailing object")
+        expect(salvaged[0].word == "記者", "salvaged card content should be intact")
+
+        // 3) 中間夾一張格式錯誤的卡(choices 型別不符)：壞的跳過，前後好的保留。
+        let mixed = """
+        {"cards":[
+          {"word":"政府","reading":"せいふ","partOfSpeech":"名詞","meaningZh":"政府","grammarNoteZh":"機構名詞。","jlptLevel":"N3","verbFormType":"非動詞","exampleJa":"政府が発表した。","exampleReading":"せいふがはっぴょうした。","exampleZh":"政府發表了。"},
+          {"word":12345},
+          {"word":"発表","reading":"はっぴょう","partOfSpeech":"名詞","meaningZh":"發表","grammarNoteZh":"する動詞語幹。","jlptLevel":"N3","verbFormType":"する動詞","exampleJa":"結果を発表する。","exampleReading":"けっかをはっぴょうする。","exampleZh":"發表結果。"}
+        ]}
+        """
+        let mixedCards = try OpenAICompatibleLLMClient.decodeCards(from: mixed, sourceURL: url, includeN5: true)
+        expect(mixedCards.count == 2, "malformed card in the middle should be skipped, others kept")
+        expect(mixedCards.map(\.word) == ["政府", "発表"], "good cards around a bad one should be preserved in order")
     }
 
     private static func exampleReadingDecoding() throws {
