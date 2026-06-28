@@ -1233,7 +1233,7 @@ struct SettingsView: View {
                                     Image(systemName: "antenna.radiowaves.left.and.right")
                                 }
                                 .disabled(!canAddSource)
-                                .help("驗證連線")
+                                .help("驗證連線並測試 AI 解析(會消耗 API token)")
                             }
                             Button {
                                 addSourceAndRefocus()
@@ -1285,7 +1285,7 @@ struct SettingsView: View {
                                     Image(systemName: "antenna.radiowaves.left.and.right")
                                 }
                                 .buttonStyle(.borderless)
-                                .help("驗證連線")
+                                .help("驗證連線並測試 AI 解析(會消耗 API token)")
                             }
                             Button {
                                 viewModel.removeSource(source)
@@ -1608,6 +1608,22 @@ struct SettingsView: View {
                     ? (diagnostic.outcome == .ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                     : "xmark.octagon.fill")
                     .foregroundStyle(color)
+            }
+            if let aiSummary = diagnostic.aiParseSummary {
+                let aiColor: Color = diagnostic.aiParseError != nil
+                    ? .red
+                    : ((diagnostic.aiParsedCardCount ?? 0) > 0 ? .green : .orange)
+                Label {
+                    Text(aiSummary)
+                        .font(.caption)
+                        .foregroundStyle(aiColor)
+                        .fixedSize(horizontal: false, vertical: true)
+                } icon: {
+                    Image(systemName: diagnostic.aiParseError != nil
+                        ? "xmark.octagon.fill"
+                        : ((diagnostic.aiParsedCardCount ?? 0) > 0 ? "sparkles" : "exclamationmark.triangle.fill"))
+                        .foregroundStyle(aiColor)
+                }
             }
             if let suggestion = diagnostic.suggestion {
                 Text(suggestion)
