@@ -550,21 +550,34 @@ public struct OpenAICompatibleLLMClient: LLMClient {
     }
 
     public static func decodeCards(from content: String, sourceURL: URL, includeN5: Bool = false) throws -> [LearningCard] {
-        let payload = try decodeJSON(CardPayload.self, from: content)
-        return payload.cards.map {
-            let jlptLevel = JLPTLevel(rawValue: $0.jlptLevel ?? "") ?? .unknown
-            let verbFormType = VerbFormType(rawValue: $0.verbFormType ?? "") ?? .unknown
+        // 先嚴格解碼；失敗時改逐張救援，壞掉的卡片跳過而非整批失敗。
+        // 兩者都救不到任何卡片時，才把原始解碼錯誤丟出去。
+        let rawCards: [CardPayload.Card]
+        do {
+            rawCards = try decodeJSON(CardPayload.self, from: content).cards
+        } catch {
+            let salvaged = salvageCards(from: content)
+            guard !salvaged.isEmpty else { throw error }
+            log("嚴格解碼失敗，改用救援模式取得 \(salvaged.count) 張卡片。")
+            rawCards = salvaged
+        }
+        return rawCards.compactMap { card -> LearningCard? in
+            let word = (card.word ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            // 沒有單字的卡片無意義，直接略過。
+            guard !word.isEmpty else { return nil }
+            let jlptLevel = JLPTLevel(rawValue: card.jlptLevel ?? "") ?? .unknown
+            let verbFormType = VerbFormType(rawValue: card.verbFormType ?? "") ?? .unknown
             return LearningCard(
-                word: $0.word,
-                reading: $0.reading,
-                partOfSpeech: $0.partOfSpeech,
-                meaningZh: $0.meaningZh,
-                grammarNoteZh: $0.grammarNoteZh,
+                word: word,
+                reading: card.reading ?? "",
+                partOfSpeech: card.partOfSpeech ?? "",
+                meaningZh: card.meaningZh ?? "",
+                grammarNoteZh: card.grammarNoteZh ?? "",
                 jlptLevel: jlptLevel,
                 verbFormType: verbFormType,
-                exampleJa: $0.exampleJa,
-                exampleReading: $0.exampleReading ?? "",
-                exampleZh: $0.exampleZh,
+                exampleJa: card.exampleJa ?? "",
+                exampleReading: card.exampleReading ?? "",
+                exampleZh: card.exampleZh ?? "",
                 sourceUrl: sourceURL
             )
         }.filter {
@@ -786,7 +799,21 @@ public struct OpenAICompatibleLLMClient: LLMClient {
 
     /// 從第一個 `{` 開始做大括號配對(忽略字串內的括號)，回傳第一個完整的 JSON 物件。
     private static func balancedJSONObject(in content: String) -> String? {
-        guard let start = content.firstIndex(of: "{") else { return nil }
+        guard let start = content.firstIndex(of: "{"),
+              let range = balancedSpan(in: content, from: start, open: "{", close: "}") else {
+            return nil
+        }
+        return String(content[range])
+    }
+
+    /// 從 `start`(必須指向 `open`)開始做括號配對(忽略字串內、跳脫字元)，
+    /// 回傳含頭尾括號的完整範圍；若內容被截斷而無法配對則回傳 nil。
+    private static func balancedSpan(
+        in content: String,
+        from start: String.Index,
+        open: Character,
+        close: Character
+    ) -> Range<String.Index>? {
         var depth = 0
         var inString = false
         var escaped = false
@@ -800,18 +827,51 @@ public struct OpenAICompatibleLLMClient: LLMClient {
             } else if character == "\"" {
                 inString.toggle()
             } else if !inString {
-                if character == "{" {
+                if character == open {
                     depth += 1
-                } else if character == "}" {
+                } else if character == close {
                     depth -= 1
                     if depth == 0 {
-                        return String(content[start...index])
+                        return start..<content.index(after: index)
                     }
                 }
             }
             index = content.index(after: index)
         }
         return nil
+    }
+
+    /// 嚴格解碼失敗時的救援：逐張卡片個別解碼，壞掉/被截斷的那張跳過，能救多少救多少。
+    /// 可同時容忍：某欄位為 null、最後一張因輸出截斷而不完整、個別卡片格式錯誤。
+    private static func salvageCards(from content: String) -> [CardPayload.Card] {
+        let cleaned = extractJSONObject(content)
+        // 找到 "cards" 陣列的起點 `[`。
+        guard let cardsKey = cleaned.range(of: "\"cards\""),
+              let arrayStart = cleaned[cardsKey.upperBound...].firstIndex(of: "[") else {
+            return []
+        }
+        // 陣列若完整就限定在 `]` 之內；被截斷則掃到結尾。
+        let arrayEnd: String.Index
+        if let span = balancedSpan(in: cleaned, from: arrayStart, open: "[", close: "]") {
+            arrayEnd = cleaned.index(before: span.upperBound)
+        } else {
+            arrayEnd = cleaned.endIndex
+        }
+
+        let decoder = JSONDecoder()
+        var cards: [CardPayload.Card] = []
+        var cursor = cleaned.index(after: arrayStart)
+        while cursor < arrayEnd, let objStart = cleaned[cursor..<arrayEnd].firstIndex(of: "{") {
+            guard let span = balancedSpan(in: cleaned, from: objStart, open: "{", close: "}") else {
+                // 配對不到代表後面被截斷，停止。
+                break
+            }
+            if let card = try? decoder.decode(CardPayload.Card.self, from: Data(cleaned[span].utf8)) {
+                cards.append(card)
+            }
+            cursor = span.upperBound
+        }
+        return cards
     }
 
     private static func decodeJSON<T: Decodable>(_ type: T.Type, from content: String) throws -> T {
@@ -911,16 +971,18 @@ private struct ModelsResponse: Codable {
 
 private struct CardPayload: Codable {
     struct Card: Codable {
-        var word: String
-        var reading: String
-        var partOfSpeech: String
-        var meaningZh: String
-        var grammarNoteZh: String
+        // 模型在處理真實新聞時偶爾會把部分欄位回成 null，
+        // 全部設為 optional 並在 decodeCards 以 "" 補上，避免一張卡讓整批解碼失敗。
+        var word: String?
+        var reading: String?
+        var partOfSpeech: String?
+        var meaningZh: String?
+        var grammarNoteZh: String?
         var jlptLevel: String?
         var verbFormType: String?
-        var exampleJa: String
+        var exampleJa: String?
         var exampleReading: String?
-        var exampleZh: String
+        var exampleZh: String?
     }
 
     var cards: [Card]
