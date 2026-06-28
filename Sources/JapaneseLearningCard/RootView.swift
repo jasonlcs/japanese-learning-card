@@ -322,11 +322,17 @@ struct QuizView: View {
                             .font(.headline)
                             .fixedSize(horizontal: false, vertical: true)
 
-                        ForEach(quiz.choices, id: \.self) { choice in
+                        ForEach(Array(quiz.choices.enumerated()), id: \.offset) { index, choice in
                             Button {
                                 viewModel.submitQuizAnswer(choice)
                             } label: {
-                                HStack {
+                                HStack(spacing: 10) {
+                                    Text(optionLabel(index))
+                                        .font(.caption.weight(.bold))
+                                        .frame(width: 24, height: 24)
+                                        .foregroundStyle(optionAccent(index))
+                                        .background(optionAccent(index).opacity(0.16))
+                                        .clipShape(Circle())
                                     Text(choice)
                                         .frame(maxWidth: .infinity, alignment: .leading)
                                     if quiz.selectedAnswer == choice {
@@ -335,7 +341,7 @@ struct QuizView: View {
                                 }
                             }
                             .buttonStyle(.bordered)
-                            .tint(buttonTint(choice: choice, quiz: quiz))
+                            .tint(buttonTint(index: index, choice: choice, quiz: quiz))
                             .disabled(quiz.status != .pending)
                         }
 
@@ -386,11 +392,25 @@ struct QuizView: View {
         .padding()
     }
 
-    private func buttonTint(choice: String, quiz: QuizQuestion) -> Color? {
-        guard quiz.status != .pending else { return nil }
+    private func optionLabel(_ index: Int) -> String {
+        ["A", "B", "C", "D"][safe: index] ?? "\(index + 1)"
+    }
+
+    private func optionAccent(_ index: Int) -> Color {
+        [.blue, .purple, .orange, .teal][safe: index] ?? .accentColor
+    }
+
+    private func buttonTint(index: Int, choice: String, quiz: QuizQuestion) -> Color? {
+        guard quiz.status != .pending else { return optionAccent(index) }
         if choice == quiz.correctAnswer { return .green }
         if choice == quiz.selectedAnswer { return .red }
-        return nil
+        return optionAccent(index)
+    }
+}
+
+private extension Array {
+    subscript(safe index: Index) -> Element? {
+        indices.contains(index) ? self[index] : nil
     }
 }
 

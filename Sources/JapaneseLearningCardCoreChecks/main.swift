@@ -13,6 +13,7 @@ struct CoreChecks {
         cardSelectorRandomlyChoosesReviewableCardsOnly()
         htmlExtractorRemovesScriptsStylesTagsAndDecodesEntities()
         try openAICompatibleRequestAndCardDecoding()
+        try quizDecodingDistributesCorrectAnswerPositions()
         try manualCardsRequestAndN5Retention()
         try exampleReadingDecoding()
         try await pipelineRefreshesEnabledSourcesWithMocks()
@@ -196,6 +197,26 @@ struct CoreChecks {
         expect(cards[0].verbFormType == .notVerb, "non-verb form should decode")
         expect(cards[0].exampleReading == "えきであいます。", "example reading should decode")
         expect(cards[0].sourceUrl == document.url, "source URL should be attached")
+    }
+
+    private static func quizDecodingDistributesCorrectAnswerPositions() throws {
+        let sourceURL = URL(string: "https://example.com")!
+        let cards = [card("駅", status: .new, createdAt: Date(), lastShownAt: nil, url: sourceURL)]
+        let quizzes = try OpenAICompatibleLLMClient.decodeQuiz(from: """
+        {"quizzes":[
+          {"sourceWord":"駅","question":"q1","choices":["正解1","誤1","誤2","誤3"],"correctAnswer":"正解1","explanationZh":"解析"},
+          {"sourceWord":"駅","question":"q2","choices":["正解2","誤1","誤2","誤3"],"correctAnswer":"正解2","explanationZh":"解析"},
+          {"sourceWord":"駅","question":"q3","choices":["正解3","誤1","誤2","誤3"],"correctAnswer":"正解3","explanationZh":"解析"},
+          {"sourceWord":"駅","question":"q4","choices":["正解4","誤1","誤2","誤3"],"correctAnswer":"正解4","explanationZh":"解析"},
+          {"sourceWord":"駅","question":"q5","choices":["正解5","誤1","誤2","誤3"],"correctAnswer":"正解5","explanationZh":"解析"},
+          {"sourceWord":"駅","question":"q6","choices":["正解6","誤1","誤2","誤3"],"correctAnswer":"正解6","explanationZh":"解析"}
+        ]}
+        """, cards: cards)
+
+        let answerIndexes = quizzes.compactMap { $0.choices.firstIndex(of: $0.correctAnswer) }
+        expect(quizzes.count == 6, "all valid quizzes should decode")
+        expect(Set(answerIndexes).count > 1, "decoder should distribute correct answers across option positions")
+        expect(!answerIndexes.allSatisfy { $0 == 0 }, "correct answers should not all remain in the first option")
     }
 
     private static func manualCardsRequestAndN5Retention() throws {
