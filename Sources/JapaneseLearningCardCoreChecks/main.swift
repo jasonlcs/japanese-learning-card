@@ -38,6 +38,7 @@ struct CoreChecks {
         try aiArticleRequestAndDecoding()
         try articleDecodingHandlesReasoningModelOutput()
         try structuredOutputIsSentPerProvider()
+        try googleAIStudioPresetTargetsGeminiOpenAIEndpoint()
         try await pipelineGeneratesAIArticleAndCards()
         try await pipelineParseAndStoreForValidationRegistersSourceAndCards()
         try await storePersistsGeneratedArticles()
@@ -783,6 +784,29 @@ struct CoreChecks {
         let zenBody = OpenAICompatibleLLMClient.articleRequestBody(theme: "旅行", jlptLevels: [.n2], settings: zenSettings)
         let zenJSON = String(decoding: try encoder.encode(zenBody), as: UTF8.self)
         expect(!zenJSON.contains("response_format"), "request should omit response_format when structured output is off")
+    }
+
+    private static func googleAIStudioPresetTargetsGeminiOpenAIEndpoint() throws {
+        let preset = ProviderPreset.googleAIStudio
+        expect(preset.defaultBaseURL.absoluteString == "https://generativelanguage.googleapis.com/v1beta/openai",
+               "Google AI Studio preset should target the Gemini OpenAI-compatible endpoint")
+        expect(preset.defaultModel == "gemma-4-26b-a4b-it", "default model should be the free Gemma 4 model")
+        expect(preset.defaultStructuredOutput == .off, "Gemma preset should default response_format off")
+        expect(preset.usesCuratedModelList, "Google AI Studio should only offer its curated model list")
+        expect(preset.fallbackModels == ["gemma-4-26b-a4b-it", "gemma-4-31b-it"],
+               "Google AI Studio should offer only the two Gemma 4 models")
+
+        // 以選擇 preset 後的設定(model 取 preset 預設)組請求，應帶 Gemma 模型、不帶 response_format。
+        let settings = AppSettings(providerConfig: ProviderConfig(
+            preset: .googleAIStudio,
+            baseURL: preset.defaultBaseURL,
+            model: preset.defaultModel,
+            structuredOutput: preset.defaultStructuredOutput
+        ))
+        let body = OpenAICompatibleLLMClient.articleRequestBody(theme: "旅行", jlptLevels: [.n2], settings: settings)
+        let json = String(decoding: try JSONEncoder().encode(body), as: UTF8.self)
+        expect(body.model == "gemma-4-26b-a4b-it", "request should use the Gemma model")
+        expect(!json.contains("response_format"), "Gemma request should omit response_format by default")
     }
 
     private static func pipelineGeneratesAIArticleAndCards() async throws {

@@ -878,7 +878,13 @@ public final class AppViewModel: ObservableObject {
                     try secretStore.saveAPIKey(candidateKey, reference: snapshot.settings.providerConfig.apiKeyKeychainRef)
                 }
                 await MainActor.run {
-                    self.availableModels = models.isEmpty ? self.snapshot.settings.providerConfig.preset.fallbackModels : models
+                    let preset = self.snapshot.settings.providerConfig.preset
+                    // 精選清單的 provider(如 Google AI Studio)只給 Gemma，不展開完整 /models。
+                    if preset.usesCuratedModelList {
+                        self.availableModels = preset.fallbackModels
+                    } else {
+                        self.availableModels = models.isEmpty ? preset.fallbackModels : models
+                    }
                     if !self.availableModels.contains(self.snapshot.settings.providerConfig.model),
                        let firstModel = self.availableModels.first {
                         var settings = self.snapshot.settings
