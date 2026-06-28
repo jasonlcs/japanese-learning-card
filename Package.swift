@@ -5,12 +5,14 @@ import PackageDescription
 let package = Package(
     name: "JapaneseLearningCard",
     platforms: [
-        .macOS(.v14)
+        .macOS(.v14),
+        .iOS(.v17)
     ],
     products: [
         .executable(name: "JapaneseLearningCard", targets: ["JapaneseLearningCard"]),
         .executable(name: "JapaneseLearningCardCoreChecks", targets: ["JapaneseLearningCardCoreChecks"]),
-        .library(name: "JapaneseLearningCardCore", targets: ["JapaneseLearningCardCore"])
+        .library(name: "JapaneseLearningCardCore", targets: ["JapaneseLearningCardCore"]),
+        .library(name: "JapaneseLearningCardUI", targets: ["JapaneseLearningCardUI"])
     ],
     dependencies: [
         .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0")
@@ -24,10 +26,24 @@ let package = Package(
                 .linkedLibrary("sqlite3")
             ]
         ),
+        // Shared UI library: AppViewModel, all SwiftUI views, BrowserFallbackCrawler.
+        // Available on both macOS and iOS; platform-specific code is guarded with
+        // #if os(macOS) / #if os(iOS) inside each file.
+        .target(
+            name: "JapaneseLearningCardUI",
+            dependencies: ["JapaneseLearningCardCore"],
+            linkerSettings: [
+                .linkedFramework("AppKit", .when(platforms: [.macOS])),
+                .linkedFramework("UIKit", .when(platforms: [.iOS])),
+                .linkedFramework("SwiftUI"),
+                .linkedFramework("WebKit")
+            ]
+        ),
+        // macOS menu-bar app.  Depends on the shared UI library plus Sparkle.
         .executableTarget(
             name: "JapaneseLearningCard",
             dependencies: [
-                "JapaneseLearningCardCore",
+                "JapaneseLearningCardUI",
                 .product(name: "Sparkle", package: "Sparkle")
             ],
             exclude: [
@@ -41,6 +57,11 @@ let package = Package(
                 .linkedFramework("SwiftUI"),
                 .linkedFramework("WebKit")
             ]
+        ),
+        // iOS app.  Only depends on the shared UI library.
+        .executableTarget(
+            name: "JapaneseLearningCardIOS",
+            dependencies: ["JapaneseLearningCardUI"]
         ),
         .executableTarget(
             name: "JapaneseLearningCardCoreChecks",

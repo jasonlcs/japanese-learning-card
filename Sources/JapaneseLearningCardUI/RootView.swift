@@ -1,6 +1,37 @@
+#if canImport(AppKit)
 import AppKit
+#endif
 import JapaneseLearningCardCore
 import SwiftUI
+
+// MARK: - Platform-adaptive Color helpers
+
+extension Color {
+    /// Window / page background (macOS: windowBackgroundColor, iOS: systemBackground).
+    static var platformWindowBackground: Color {
+        #if os(macOS)
+        Color.platformWindowBackground
+        #else
+        Color(.systemBackground)
+        #endif
+    }
+    /// Text-field / editor background (macOS: textBackgroundColor, iOS: secondarySystemBackground).
+    static var platformTextBackground: Color {
+        #if os(macOS)
+        Color.platformTextBackground
+        #else
+        Color(.secondarySystemBackground)
+        #endif
+    }
+    /// Hairline separator (macOS: separatorColor, iOS: separator).
+    static var platformSeparator: Color {
+        #if os(macOS)
+        Color.platformSeparator
+        #else
+        Color(.separator)
+        #endif
+    }
+}
 
 struct RootView: View {
     @ObservedObject var viewModel: AppViewModel
@@ -18,7 +49,9 @@ struct RootView: View {
                 .pickerStyle(.segmented)
 
                 AutoDisplayPauseToggle(viewModel: viewModel)
+                #if os(macOS)
                 PresentationModeToggle(viewModel: viewModel)
+                #endif
                 if viewModel.selectedTab == 0 {
                     QuickReviewControls(viewModel: viewModel)
                 }
@@ -46,8 +79,9 @@ struct RootView: View {
                 }
             }
         }
+        #if os(macOS)
         .frame(minWidth: 520)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.platformWindowBackground)
         .scrollContentBackground(.hidden)
         .onHover { inside in
             if inside {
@@ -56,6 +90,10 @@ struct RootView: View {
                 viewModel.resumeAutoCloseAfterInteraction()
             }
         }
+        #else
+        .background(Color.platformWindowBackground)
+        .scrollContentBackground(.hidden)
+        #endif
     }
 }
 
@@ -525,7 +563,7 @@ private struct StyledLearningCard: View {
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .background(
             RoundedRectangle(cornerRadius: 18)
-                .fill(Color(nsColor: .textBackgroundColor))
+                .fill(Color.platformTextBackground)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 18)
@@ -1060,8 +1098,12 @@ struct CopyButton: View {
 
     var body: some View {
         Button {
+            #if os(macOS)
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)
+            #else
+            UIPasteboard.general.string = text
+            #endif
         } label: {
             Image(systemName: "doc.on.doc")
         }
@@ -1136,10 +1178,10 @@ struct SettingsView: View {
                         .scrollContentBackground(.hidden)
                         .padding(6)
                         .frame(minHeight: 96)
-                        .background(Color(nsColor: .textBackgroundColor))
+                        .background(Color.platformTextBackground)
                         .overlay(
                             RoundedRectangle(cornerRadius: 6)
-                                .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                                .stroke(Color.platformSeparator, lineWidth: 1)
                         )
                         .clipShape(RoundedRectangle(cornerRadius: 6))
                     }
@@ -1359,6 +1401,16 @@ struct SettingsView: View {
                     } label: {
                         Label("匯出 SQLite DB", systemImage: "square.and.arrow.down")
                     }
+                    #if !os(macOS)
+                    .sheet(isPresented: Binding(
+                        get: { viewModel.exportedDatabaseURL != nil },
+                        set: { if !$0 { viewModel.exportedDatabaseURL = nil } }
+                    )) {
+                        if let url = viewModel.exportedDatabaseURL {
+                            ShareLink(item: url, message: Text("Japanese Learning Card SQLite DB"))
+                        }
+                    }
+                    #endif
                 }
 
                 settingsBox("iCloud 同步") {
@@ -1399,7 +1451,11 @@ struct SettingsView: View {
                     Button {
                         viewModel.openAIRequestLog()
                     } label: {
+                        #if os(macOS)
                         Label("在 Finder 顯示 AI Log", systemImage: "folder")
+                        #else
+                        Label("顯示 AI Log 路徑", systemImage: "folder")
+                        #endif
                     }
                     Text(AIRequestLogStore.logFileURL.path)
                         .font(.caption)
@@ -1407,6 +1463,7 @@ struct SettingsView: View {
                         .textSelection(.enabled)
                 }
 
+                #if os(macOS)
                 settingsBox("更新") {
                     if UpdateChecker.isLocalBuild {
                         HStack {
@@ -1445,6 +1502,16 @@ struct SettingsView: View {
                 } label: {
                     Label("結束程式", systemImage: "power")
                 }
+                #else
+                settingsBox("關於") {
+                    HStack {
+                        Text("版本")
+                        Spacer()
+                        Text(UpdateChecker.currentVersion)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                #endif
     }
 
     private var canAddSource: Bool {
@@ -2142,7 +2209,11 @@ struct AIArticleView: View {
                             displayedComponents: .hourAndMinute
                         )
                         .labelsHidden()
+                        #if os(macOS)
                         .datePickerStyle(.stepperField)
+                        #else
+                        .datePickerStyle(.compact)
+                        #endif
                     }
                     .disabled(!viewModel.snapshot.settings.aiArticleEnabled)
 
@@ -2293,10 +2364,10 @@ struct ManualCardView: View {
                         .scrollContentBackground(.hidden)
                         .padding(6)
                         .frame(minHeight: 180)
-                        .background(Color(nsColor: .textBackgroundColor))
+                        .background(Color.platformTextBackground)
                         .overlay(
                             RoundedRectangle(cornerRadius: 6)
-                                .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                                .stroke(Color.platformSeparator, lineWidth: 1)
                         )
                         .clipShape(RoundedRectangle(cornerRadius: 6))
                 }
@@ -2451,7 +2522,9 @@ struct AIArticleDetailView: View {
             Spacer()
         }
         .padding()
+        #if os(macOS)
         .frame(minWidth: 460, minHeight: 520)
+        #endif
     }
 }
 
