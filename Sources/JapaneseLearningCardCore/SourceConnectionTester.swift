@@ -43,6 +43,10 @@ public struct SourceDiagnostic: Sendable, Equatable {
     /// 建議動作（中文）。
     public var suggestion: String?
     public var checkedAt: Date
+    /// AI 解析測試結果：實際呼叫 provider 後解析出的卡片數；nil 表示未跑 AI 測試。
+    public var aiParsedCardCount: Int?
+    /// AI 解析測試的錯誤訊息；nil 表示沒測或沒出錯。
+    public var aiParseError: String?
 
     public init(
         outcome: Outcome,
@@ -53,7 +57,9 @@ public struct SourceDiagnostic: Sendable, Equatable {
         summary: String,
         detail: String? = nil,
         suggestion: String? = nil,
-        checkedAt: Date = Date()
+        checkedAt: Date = Date(),
+        aiParsedCardCount: Int? = nil,
+        aiParseError: String? = nil
     ) {
         self.outcome = outcome
         self.httpStatus = httpStatus
@@ -64,6 +70,8 @@ public struct SourceDiagnostic: Sendable, Equatable {
         self.detail = detail
         self.suggestion = suggestion
         self.checkedAt = checkedAt
+        self.aiParsedCardCount = aiParsedCardCount
+        self.aiParseError = aiParseError
     }
 
     /// 是否表示來源目前可用（含「需瀏覽器渲染」，因為 app 會自動退回 WebKit）。
@@ -71,9 +79,23 @@ public struct SourceDiagnostic: Sendable, Equatable {
         outcome == .ok || outcome == .needsBrowser
     }
 
+    /// AI 解析測試的一句話結論；未跑 AI 測試時回傳 nil。
+    public var aiParseSummary: String? {
+        if let error = aiParseError {
+            return "AI 解析失敗：\(error)"
+        }
+        if let count = aiParsedCardCount {
+            return count == 0 ? "AI 這次沒解析出任何卡片。" : "AI 成功解析出 \(count) 張卡片。"
+        }
+        return nil
+    }
+
     /// 適合寫回 `Source.lastError` 的字串；可用時回傳 nil。
+    /// 連線可用但 AI 解析出錯時，回傳 AI 的錯誤訊息(這也是來源實際不可用的原因)。
     public var errorMessageForSource: String? {
-        isReachable ? nil : summary
+        if !isReachable { return summary }
+        if let error = aiParseError { return "AI 解析失敗：\(error)" }
+        return nil
     }
 }
 

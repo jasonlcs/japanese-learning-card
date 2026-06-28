@@ -143,6 +143,8 @@ public final class AppViewModel: ObservableObject {
     private let schedulerPolicy = SchedulerPolicy()
     private let cardSelector = CardSelector()
     private let connectionTester = SourceConnectionTester()
+    /// 給「測試 AI 解析」用的爬蟲，與實際擷取走同一條(含瀏覽器 fallback)路徑。
+    private let parseTestCrawler = BrowserFallbackCrawler()
     private var pipeline: LearningPipeline
     private var displayTimer: Timer?
     private var crawlTimer: Timer?
@@ -758,17 +760,22 @@ public final class AppViewModel: ObservableObject {
         guard !validatingSourceIDs.contains(source.id) else { return }
         validatingSourceIDs.insert(source.id)
         statusMessage = "驗證來源連線..."
-        let url = source.url
         let id = source.id
         Task {
-            let diagnostic = await connectionTester.test(url: url)
+            var diagnostic = await connectionTester.test(url: source.url)
+            // 連得到才接著實際呼叫 AI 解析，回報能解析出幾張卡片。
+            if diagnostic.isReachable {
+                await MainActor.run { self.statusMessage = "測試 AI 解析內容..." }
+                diagnostic = await self.runAIParseTest(source: source, into: diagnostic)
+            }
+            let finalDiagnostic = diagnostic
             await MainActor.run {
-                self.sourceDiagnostics[id] = diagnostic
+                self.sourceDiagnostics[id] = finalDiagnostic
                 self.validatingSourceIDs.remove(id)
-                self.statusMessage = diagnostic.summary
+                self.statusMessage = finalDiagnostic.aiParseSummary ?? finalDiagnostic.summary
                 self.storeUpdate { state in
                     if let index = state.sources.firstIndex(where: { $0.id == id }) {
-                        state.sources[index].lastError = diagnostic.errorMessageForSource
+                        state.sources[index].lastError = finalDiagnostic.errorMessageForSource
                     }
                 }
             }
@@ -791,13 +798,41 @@ public final class AppViewModel: ObservableObject {
         validatingSourceIDs.insert(id)
         statusMessage = "驗證來源連線..."
         Task {
-            let diagnostic = await connectionTester.test(url: url)
+            var diagnostic = await connectionTester.test(url: url)
+            if diagnostic.isReachable {
+                await MainActor.run { self.statusMessage = "測試 AI 解析內容..." }
+                diagnostic = await self.runAIParseTest(source: Source(url: url), into: diagnostic)
+            }
+            let finalDiagnostic = diagnostic
             await MainActor.run {
-                self.sourceDiagnostics[id] = diagnostic
+                self.sourceDiagnostics[id] = finalDiagnostic
                 self.validatingSourceIDs.remove(id)
-                self.statusMessage = diagnostic.summary
+                self.statusMessage = finalDiagnostic.aiParseSummary ?? finalDiagnostic.summary
             }
         }
+    }
+
+    /// 實際抓取來源內容並呼叫 provider 解析，把「能解析出幾張卡片」寫進診斷結果。
+    /// 只回報張數、不設成功/失敗門檻；AI 出錯時記下錯誤訊息供使用者判斷。
+    private func runAIParseTest(source: Source, into diagnostic: SourceDiagnostic) async -> SourceDiagnostic {
+        var result = diagnostic
+        let settings = snapshot.settings
+        let prompt = source.extractionPrompt.isEmpty ? settings.defaultExtractionPrompt : source.extractionPrompt
+        do {
+            let document = try await parseTestCrawler.crawl(source: source)
+            let cards = try await providerClient.generateCards(
+                document: document,
+                sourcePrompt: prompt,
+                settings: settings
+            )
+            result.aiParsedCardCount = cards.count
+            result.aiParseError = nil
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            result.aiParsedCardCount = nil
+            result.aiParseError = message
+        }
+        return result
     }
 
     func updateSettings(_ settings: AppSettings) {

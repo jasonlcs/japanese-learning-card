@@ -13,6 +13,7 @@ struct CoreChecks {
         try await sourceConnectionTesterDetectsNeedsBrowser()
         try await sourceConnectionTesterDetectsBlockedByUserAgent()
         try await sourceConnectionTesterClassifiesTimeout()
+        sourceDiagnosticReportsAIParseResult()
         schedulerClampsIntervals()
         schedulerComputesNextAIArticleFireDate()
         cardSelectorRandomlyChoosesReviewableCardsOnly()
@@ -164,6 +165,32 @@ struct CoreChecks {
         let diagnostic = await makeTester().test(url: URL(string: "https://slow.example.com/")!)
         expect(diagnostic.outcome == .timeout, "URLError.timedOut should classify as timeout, got \(diagnostic.outcome)")
         expect(!diagnostic.isReachable, "timeout should not be reachable")
+    }
+
+    private static func sourceDiagnosticReportsAIParseResult() {
+        let base = SourceDiagnostic(outcome: .ok, summary: "連線正常。")
+
+        // 未跑 AI 測試：不顯示 AI 行，可用來源不應有 lastError。
+        expect(base.aiParseSummary == nil, "no AI test should produce no AI summary")
+        expect(base.errorMessageForSource == nil, "reachable source without AI error should clear lastError")
+
+        // 解析出卡片：回報張數、不視為錯誤。
+        var ok = base
+        ok.aiParsedCardCount = 5
+        expect(ok.aiParseSummary == "AI 成功解析出 5 張卡片。", "should report parsed card count")
+        expect(ok.errorMessageForSource == nil, "successful AI parse should not set lastError")
+
+        // 解析出 0 張：仍只回報、不設門檻判失敗，但也不算錯誤。
+        var zero = base
+        zero.aiParsedCardCount = 0
+        expect(zero.aiParseSummary == "AI 這次沒解析出任何卡片。", "zero cards should be reported, not thresholded")
+        expect(zero.errorMessageForSource == nil, "zero parsed cards is not treated as an error")
+
+        // AI 解析出錯：連得到但實際不可用，錯誤訊息寫回來源。
+        var failed = base
+        failed.aiParseError = "無法解析模型回應。"
+        expect(failed.aiParseSummary == "AI 解析失敗：無法解析模型回應。", "AI error should surface in summary")
+        expect(failed.errorMessageForSource == "AI 解析失敗：無法解析模型回應。", "AI parse error should be written back to source")
     }
 
     private static func schedulerClampsIntervals() {
