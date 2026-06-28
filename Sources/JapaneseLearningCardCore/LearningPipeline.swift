@@ -249,6 +249,57 @@ public actor LearningPipeline {
         )
     }
 
+    /// 「驗證來源」測試 AI 解析的結果。
+    public enum ValidationParseOutcome: Sendable, Equatable {
+        /// 成功解析並寫入 DB，回報新增的卡片數。
+        case stored(cardCount: Int)
+        /// 內容與 DB 既有文件相同，未重複解析或建立卡片。
+        case duplicate
+        /// 爬取或解析失敗。
+        case failed(message: String)
+    }
+
+    /// 為「驗證來源」實際抓取內容並呼叫 provider 解析，成功就把文件與卡片寫入 DB
+    /// （沿用排程刷新的 contentHash 去重）。`registerSource` 為 true 時（測試尚未加入的
+    /// 新網址），在非失敗情況下把來源一併加進清單。
+    public func parseAndStoreForValidation(source: Source, registerSource: Bool) async -> ValidationParseOutcome {
+        do {
+            let snapshot = await store.read()
+            let settings = snapshot.settings
+            let document = try await crawler.crawl(source: source)
+
+            // 內容與既有文件重複：不重存卡片，但仍視需要登記來源。
+            if snapshot.documents.contains(where: { $0.contentHash == document.contentHash }) {
+                if registerSource {
+                    try await store.update { state in
+                        if !state.sources.contains(where: { $0.url == source.url }) {
+                            state.sources.append(source)
+                        }
+                    }
+                }
+                return .duplicate
+            }
+
+            let prompt = source.extractionPrompt.isEmpty ? settings.defaultExtractionPrompt : source.extractionPrompt
+            let cards = try await llmClient.generateCards(document: document, sourcePrompt: prompt, settings: settings)
+            try await store.update { state in
+                if registerSource, !state.sources.contains(where: { $0.url == source.url }) {
+                    state.sources.append(source)
+                }
+                state.documents.append(document)
+                state.cards.append(contentsOf: cards)
+                if let index = state.sources.firstIndex(where: { $0.id == source.id }) {
+                    state.sources[index].lastFetchedAt = Date()
+                    state.sources[index].lastError = nil
+                }
+            }
+            return .stored(cardCount: cards.count)
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            return .failed(message: message)
+        }
+    }
+
     @discardableResult
     public func generateAIArticleNow(theme: String? = nil) async -> AIArticleOutcome {
         let traceId = UUID().uuidString

@@ -174,11 +174,17 @@ struct CoreChecks {
         expect(base.aiParseSummary == nil, "no AI test should produce no AI summary")
         expect(base.errorMessageForSource == nil, "reachable source without AI error should clear lastError")
 
-        // 解析出卡片：回報張數、不視為錯誤。
+        // 解析出卡片：回報張數並加入資料庫、不視為錯誤。
         var ok = base
         ok.aiParsedCardCount = 5
-        expect(ok.aiParseSummary == "AI 成功解析出 5 張卡片。", "should report parsed card count")
+        expect(ok.aiParseSummary == "AI 成功解析出 5 張卡片並加入資料庫。", "should report parsed card count")
         expect(ok.errorMessageForSource == nil, "successful AI parse should not set lastError")
+
+        // 內容重複：回報未重複建立、不算錯誤、不寫回 lastError。
+        var duplicate = base
+        duplicate.aiParseDuplicate = true
+        expect(duplicate.aiParseSummary == "內容與既有資料相同，未重複建立卡片。", "duplicate content should be reported")
+        expect(duplicate.errorMessageForSource == nil, "duplicate content is not an error")
 
         // 解析出 0 張：仍只回報、不設門檻判失敗，但也不算錯誤。
         var zero = base

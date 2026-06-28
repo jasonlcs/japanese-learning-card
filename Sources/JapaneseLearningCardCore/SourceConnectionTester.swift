@@ -47,6 +47,8 @@ public struct SourceDiagnostic: Sendable, Equatable {
     public var aiParsedCardCount: Int?
     /// AI 解析測試的錯誤訊息；nil 表示沒測或沒出錯。
     public var aiParseError: String?
+    /// AI 解析測試時內容與 DB 既有文件相同，未重複建立卡片。
+    public var aiParseDuplicate: Bool
 
     public init(
         outcome: Outcome,
@@ -59,7 +61,8 @@ public struct SourceDiagnostic: Sendable, Equatable {
         suggestion: String? = nil,
         checkedAt: Date = Date(),
         aiParsedCardCount: Int? = nil,
-        aiParseError: String? = nil
+        aiParseError: String? = nil,
+        aiParseDuplicate: Bool = false
     ) {
         self.outcome = outcome
         self.httpStatus = httpStatus
@@ -72,6 +75,7 @@ public struct SourceDiagnostic: Sendable, Equatable {
         self.checkedAt = checkedAt
         self.aiParsedCardCount = aiParsedCardCount
         self.aiParseError = aiParseError
+        self.aiParseDuplicate = aiParseDuplicate
     }
 
     /// 是否表示來源目前可用（含「需瀏覽器渲染」，因為 app 會自動退回 WebKit）。
@@ -84,8 +88,11 @@ public struct SourceDiagnostic: Sendable, Equatable {
         if let error = aiParseError {
             return "AI 解析失敗：\(error)"
         }
+        if aiParseDuplicate {
+            return "內容與既有資料相同，未重複建立卡片。"
+        }
         if let count = aiParsedCardCount {
-            return count == 0 ? "AI 這次沒解析出任何卡片。" : "AI 成功解析出 \(count) 張卡片。"
+            return count == 0 ? "AI 這次沒解析出任何卡片。" : "AI 成功解析出 \(count) 張卡片並加入資料庫。"
         }
         return nil
     }
