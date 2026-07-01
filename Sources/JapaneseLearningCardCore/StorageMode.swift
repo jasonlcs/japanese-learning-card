@@ -135,9 +135,14 @@ public enum UserDataStoreFactory {
     }
 
     public static func defaultICloudDriveFolder() -> URL {
+#if os(macOS)
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs", isDirectory: true)
             .appendingPathComponent("JapaneseLearningCard", isDirectory: true)
+#else
+        AppPaths.appSupportFolder
+            .appendingPathComponent("iCloudDriveFolder", isDirectory: true)
+#endif
     }
 
     public static func appearsInsideICloudDrive(_ folder: URL) -> Bool {

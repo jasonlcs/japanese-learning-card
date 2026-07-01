@@ -1172,6 +1172,9 @@ struct SettingsView: View {
     @ObservedObject var viewModel: AppViewModel
     @AppStorage(UpdateChecker.autoCheckDefaultsKey) private var autoCheckUpdates = false
     @FocusState private var isSourceURLFocused: Bool
+    @FocusState private var focusedSettingsField: SettingsField?
+    @State private var baseURLDraft = ""
+    @State private var keychainReferenceDraft = ""
     /// 既有來源網址的編輯緩衝區（key 為 Source.id），送出前不寫回資料。
     @State private var editingSourceURLs: [UUID: String] = [:]
     /// 設定分類：用上方分段直接切換，不再藏在「系統設定」子頁裡。
@@ -1184,6 +1187,13 @@ struct SettingsView: View {
         case data = "資料"
         case system = "系統"
         var id: String { rawValue }
+    }
+
+    private enum SettingsField: Hashable {
+        case baseURL
+        case keychainReference
+        case apiKey
+        case existingSource(UUID)
     }
 
     var body: some View {
@@ -1215,6 +1225,30 @@ struct SettingsView: View {
                 }
                 .padding()
                 .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .onAppear {
+            syncAIDraftsFromSettings()
+        }
+        .onChange(of: section) { _, _ in
+            syncAIDraftsFromSettings()
+        }
+        .onChange(of: viewModel.snapshot.settings.providerConfig.baseURL) { _, _ in
+            syncAIDraftsFromSettings()
+        }
+        .onChange(of: viewModel.snapshot.settings.providerConfig.apiKeyKeychainRef) { _, _ in
+            syncAIDraftsFromSettings()
+        }
+        .onChange(of: focusedSettingsField) { oldValue, newValue in
+            if oldValue == .baseURL, newValue != .baseURL {
+                commitBaseURLDraft()
+            }
+            if oldValue == .keychainReference, newValue != .keychainReference {
+                commitKeychainReferenceDraft()
+            }
+            if case .existingSource(let id) = oldValue, newValue != oldValue,
+               let source = viewModel.snapshot.sources.first(where: { $0.id == id }) {
+                commitSourceURL(source)
             }
         }
     }
@@ -1287,6 +1321,7 @@ struct SettingsView: View {
                             VStack(alignment: .leading, spacing: 3) {
                                 TextField("", text: sourceURLBinding(source))
                                     .textFieldStyle(.roundedBorder)
+                                    .focused($focusedSettingsField, equals: .existingSource(source.id))
                                     .onSubmit { commitSourceURL(source) }
                                 if let diagnostic = viewModel.sourceDiagnostics[source.id] {
                                     diagnosticView(diagnostic)
@@ -1365,15 +1400,10 @@ struct SettingsView: View {
                     }
 
                     labeledRow("Base URL") {
-                        TextField("", text: stringBinding(
-                            get: { $0.providerConfig.baseURL.absoluteString },
-                            set: { settings, value in
-                                if let url = URL(string: value) {
-                                    settings.providerConfig.baseURL = url
-                                }
-                            }
-                        ))
+                        TextField("", text: $baseURLDraft)
                         .textFieldStyle(.roundedBorder)
+                        .focused($focusedSettingsField, equals: .baseURL)
+                        .onSubmit { commitBaseURLDraft() }
                     }
 
                     labeledRow("Model") {
@@ -1399,16 +1429,16 @@ struct SettingsView: View {
                     }
 
                     labeledRow("Keychain reference") {
-                        TextField("", text: stringBinding(
-                            get: { $0.providerConfig.apiKeyKeychainRef },
-                            set: { $0.providerConfig.apiKeyKeychainRef = $1 }
-                        ))
+                        TextField("", text: $keychainReferenceDraft)
                         .textFieldStyle(.roundedBorder)
+                        .focused($focusedSettingsField, equals: .keychainReference)
+                        .onSubmit { commitKeychainReferenceDraft() }
                     }
 
                     labeledRow("API key") {
                         SecureField("", text: $viewModel.apiKeyInput)
                             .textFieldStyle(.roundedBorder)
+                            .focused($focusedSettingsField, equals: .apiKey)
                     }
 
                     Button {
@@ -1622,6 +1652,42 @@ struct SettingsView: View {
         if viewModel.updateSourceURL(source, to: edited) {
             editingSourceURLs[source.id] = nil
         }
+    }
+
+    private func syncAIDraftsFromSettings() {
+        guard focusedSettingsField != .baseURL else { return }
+        guard focusedSettingsField != .keychainReference else { return }
+        baseURLDraft = viewModel.snapshot.settings.providerConfig.baseURL.absoluteString
+        keychainReferenceDraft = viewModel.snapshot.settings.providerConfig.apiKeyKeychainRef
+    }
+
+    private func commitBaseURLDraft() {
+        let trimmed = baseURLDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            baseURLDraft = viewModel.snapshot.settings.providerConfig.baseURL.absoluteString
+            return
+        }
+        guard let url = URL(string: trimmed), url.scheme != nil else {
+            viewModel.statusMessage = "Base URL 格式不正確"
+            baseURLDraft = viewModel.snapshot.settings.providerConfig.baseURL.absoluteString
+            return
+        }
+        guard url != viewModel.snapshot.settings.providerConfig.baseURL else { return }
+        var settings = viewModel.snapshot.settings
+        settings.providerConfig.baseURL = url
+        viewModel.updateSettings(settings)
+    }
+
+    private func commitKeychainReferenceDraft() {
+        let trimmed = keychainReferenceDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            keychainReferenceDraft = viewModel.snapshot.settings.providerConfig.apiKeyKeychainRef
+            return
+        }
+        guard trimmed != viewModel.snapshot.settings.providerConfig.apiKeyKeychainRef else { return }
+        var settings = viewModel.snapshot.settings
+        settings.providerConfig.apiKeyKeychainRef = trimmed
+        viewModel.updateSettings(settings)
     }
 
     @ViewBuilder
