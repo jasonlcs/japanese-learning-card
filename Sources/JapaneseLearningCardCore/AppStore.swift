@@ -646,10 +646,7 @@ public actor AppStore {
     /// 啟動開到不同的空檔，造成資料看似被清空、甚至把空檔 push 上 CloudKit
     /// 覆蓋雲端。帳號隔離交給 CloudKit（雲端本就分帳號）+ 3-way merge。
     public static func localDatabaseURL() -> URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser
-        return base
-            .appendingPathComponent("JapaneseLearningCard", isDirectory: true)
+        AppPaths.appSupportFolder
             .appendingPathComponent("store.sqlite")
     }
 

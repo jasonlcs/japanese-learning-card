@@ -100,10 +100,7 @@ public actor AIRequestLogStore {
     }
 
     public nonisolated static var logFileURL: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser
-        return base
-            .appendingPathComponent("JapaneseLearningCard", isDirectory: true)
+        AppPaths.appSupportFolder
             .appendingPathComponent("ai-requests.jsonl")
     }
 

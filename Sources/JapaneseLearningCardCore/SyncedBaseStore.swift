@@ -16,10 +16,7 @@ public struct SyncedBaseStore: Sendable {
 
     /// 預設路徑: `~/Library/Application Support/JapaneseLearningCard/store-synced.sqlite`
     public static func defaultURL() -> URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser
-        return base
-            .appendingPathComponent("JapaneseLearningCard", isDirectory: true)
+        AppPaths.appSupportFolder
             .appendingPathComponent("store-synced.sqlite")
     }
 
