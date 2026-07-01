@@ -600,8 +600,10 @@ public struct AppSettings: Codable, Equatable, Sendable {
     }
 
     public static func defaultProviderProfile(config: ProviderConfig = ProviderConfig()) -> ProviderProfile {
-        ProviderProfile(name: config.preset.displayName, config: config)
+        ProviderProfile(id: defaultProviderProfileID, name: config.preset.displayName, config: config)
     }
+
+    private static let defaultProviderProfileID = UUID(uuidString: "00000000-0000-4000-8000-000000000001")!
 
     public mutating func normalizeProviderProfiles() {
         if providerProfiles.isEmpty {
