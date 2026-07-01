@@ -432,6 +432,44 @@ public struct ProviderConfig: Codable, Equatable, Sendable {
     }
 }
 
+public enum ProviderVerificationStatus: String, Codable, CaseIterable, Sendable {
+    case unverified
+    case success
+    case failed
+    case missingKey
+}
+
+public struct ProviderProfile: Codable, Identifiable, Equatable, Sendable {
+    public var id: UUID
+    public var name: String
+    public var config: ProviderConfig
+    public var lastVerifiedAt: Date?
+    public var lastVerificationStatus: ProviderVerificationStatus
+    public var lastVerificationMessage: String?
+    public var verifiedModelCount: Int?
+    public var updatedAt: Date
+
+    public init(
+        id: UUID = UUID(),
+        name: String,
+        config: ProviderConfig,
+        lastVerifiedAt: Date? = nil,
+        lastVerificationStatus: ProviderVerificationStatus = .unverified,
+        lastVerificationMessage: String? = nil,
+        verifiedModelCount: Int? = nil,
+        updatedAt: Date = Date()
+    ) {
+        self.id = id
+        self.name = name
+        self.config = config
+        self.lastVerifiedAt = lastVerifiedAt
+        self.lastVerificationStatus = lastVerificationStatus
+        self.lastVerificationMessage = lastVerificationMessage
+        self.verifiedModelCount = verifiedModelCount
+        self.updatedAt = updatedAt
+    }
+}
+
 public struct GeneratedArticle: Codable, Identifiable, Equatable, Sendable {
     public let id: UUID
     public var theme: String
@@ -504,6 +542,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var aiArticleWeekdays: [Int]
     public var aiArticleLevels: [JLPTLevel]
     public var aiArticleCustomTheme: String
+    public var providerProfiles: [ProviderProfile]
+    public var activeProviderProfileId: UUID?
     public var completedMigrations: [String]
     public var updatedAt: Date
 
@@ -522,6 +562,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         aiArticleWeekdays: [Int] = [1, 2, 3, 4, 5, 6, 7],
         aiArticleLevels: [JLPTLevel] = JLPTLevel.allCases,
         aiArticleCustomTheme: String = "",
+        providerProfiles: [ProviderProfile] = [],
+        activeProviderProfileId: UUID? = nil,
         completedMigrations: [String] = [],
         updatedAt: Date = Date()
     ) {
@@ -539,8 +581,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.aiArticleWeekdays = AppSettings.normalizeWeekdays(aiArticleWeekdays)
         self.aiArticleLevels = aiArticleLevels.isEmpty ? JLPTLevel.allCases : aiArticleLevels
         self.aiArticleCustomTheme = aiArticleCustomTheme
+        self.providerProfiles = providerProfiles
+        self.activeProviderProfileId = activeProviderProfileId
         self.completedMigrations = completedMigrations
         self.updatedAt = updatedAt
+        normalizeProviderProfiles()
     }
 
     public static func clampHour(_ value: Int) -> Int { min(23, max(0, value)) }
@@ -552,6 +597,31 @@ public struct AppSettings: Codable, Equatable, Sendable {
     /// 去重、過濾無效值並排序，星期幾以 Calendar 慣例（1...7）表示。
     public static func normalizeWeekdays(_ values: [Int]) -> [Int] {
         Array(Set(values.filter { (1...7).contains($0) })).sorted()
+    }
+
+    public static func defaultProviderProfile(config: ProviderConfig = ProviderConfig()) -> ProviderProfile {
+        ProviderProfile(name: config.preset.displayName, config: config)
+    }
+
+    public mutating func normalizeProviderProfiles() {
+        if providerProfiles.isEmpty {
+            let profile = Self.defaultProviderProfile(config: providerConfig)
+            providerProfiles = [profile]
+            activeProviderProfileId = profile.id
+        }
+
+        if activeProviderProfileId == nil || !providerProfiles.contains(where: { $0.id == activeProviderProfileId }) {
+            activeProviderProfileId = providerProfiles.first?.id
+        }
+
+        if let active = activeProviderProfile {
+            providerConfig = active.config
+        }
+    }
+
+    public var activeProviderProfile: ProviderProfile? {
+        guard let activeProviderProfileId else { return providerProfiles.first }
+        return providerProfiles.first { $0.id == activeProviderProfileId } ?? providerProfiles.first
     }
 
     public init(from decoder: Decoder) throws {
@@ -572,8 +642,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
         let decodedLevels = try container.decodeIfPresent([JLPTLevel].self, forKey: .aiArticleLevels) ?? JLPTLevel.allCases
         self.aiArticleLevels = decodedLevels.isEmpty ? JLPTLevel.allCases : decodedLevels
         self.aiArticleCustomTheme = try container.decodeIfPresent(String.self, forKey: .aiArticleCustomTheme) ?? ""
+        self.providerProfiles = try container.decodeIfPresent([ProviderProfile].self, forKey: .providerProfiles) ?? []
+        self.activeProviderProfileId = try container.decodeIfPresent(UUID.self, forKey: .activeProviderProfileId)
         self.completedMigrations = try container.decodeIfPresent([String].self, forKey: .completedMigrations) ?? []
         self.updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+        normalizeProviderProfiles()
     }
 }
 

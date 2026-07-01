@@ -1185,6 +1185,7 @@ struct SettingsView: View {
     @AppStorage(UpdateChecker.autoCheckDefaultsKey) private var autoCheckUpdates = false
     @FocusState private var isSourceURLFocused: Bool
     @FocusState private var focusedSettingsField: SettingsField?
+    @State private var profileNameDraft = ""
     @State private var baseURLDraft = ""
     @State private var keychainReferenceDraft = ""
     /// 既有來源網址的編輯緩衝區（key 為 Source.id），送出前不寫回資料。
@@ -1202,6 +1203,7 @@ struct SettingsView: View {
     }
 
     private enum SettingsField: Hashable {
+        case profileName
         case baseURL
         case keychainReference
         case apiKey
@@ -1251,7 +1253,13 @@ struct SettingsView: View {
         .onChange(of: viewModel.snapshot.settings.providerConfig.apiKeyKeychainRef) { _, _ in
             syncAIDraftsFromSettings()
         }
+        .onChange(of: viewModel.snapshot.settings.activeProviderProfileId) { _, _ in
+            syncAIDraftsFromSettings()
+        }
         .onChange(of: focusedSettingsField) { oldValue, newValue in
+            if oldValue == .profileName, newValue != .profileName {
+                commitProfileNameDraft()
+            }
             if oldValue == .baseURL, newValue != .baseURL {
                 commitBaseURLDraft()
             }
@@ -1401,65 +1409,110 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var aiSection: some View {
-                settingsBox("AI Provider") {
-                    labeledRow("Provider") {
-                        Picker("", selection: providerPresetBinding()) {
-                            ForEach(ProviderPreset.allCases) { preset in
-                                Text(preset.displayName).tag(preset)
+                settingsBox("AI Provider Profiles") {
+                    labeledRow("Active Profile") {
+                        Picker("", selection: activeProviderProfileBinding()) {
+                            ForEach(viewModel.snapshot.settings.providerProfiles) { profile in
+                                Text(profile.name).tag(Optional(profile.id))
                             }
                         }
                         .labelsHidden()
                     }
 
-                    labeledRow("Base URL") {
-                        TextField("", text: $baseURLDraft)
-                        .textFieldStyle(.roundedBorder)
-                        .focused($focusedSettingsField, equals: .baseURL)
-                        .onSubmit { commitBaseURLDraft() }
-                    }
+                    if let profile = viewModel.activeProviderProfile {
+                        providerProfileStatus(profile)
 
-                    labeledRow("Model") {
-                        Picker("", selection: stringBinding(
-                            get: { $0.providerConfig.model },
-                            set: { $0.providerConfig.model = $1 }
-                        )) {
-                            ForEach(viewModel.availableModels, id: \.self) { model in
-                                Text(model).tag(model)
+                        HStack(spacing: 8) {
+                            Button {
+                                viewModel.createProviderProfile()
+                                syncAIDraftsFromSettings()
+                            } label: {
+                                Label("新增", systemImage: "plus")
+                            }
+                            Button {
+                                viewModel.duplicateActiveProviderProfile()
+                                syncAIDraftsFromSettings()
+                            } label: {
+                                Label("複製", systemImage: "doc.on.doc")
+                            }
+                            Button(role: .destructive) {
+                                viewModel.deleteActiveProviderProfile()
+                                syncAIDraftsFromSettings()
+                            } label: {
+                                Label("刪除", systemImage: "trash")
+                            }
+                            .disabled(viewModel.snapshot.settings.providerProfiles.count <= 1)
+                            Button(role: .destructive) {
+                                viewModel.clearActiveProviderProfileKey()
+                            } label: {
+                                Label("清空 Key", systemImage: "key.slash")
                             }
                         }
-                        .labelsHidden()
-                    }
+                        .buttonStyle(.borderless)
 
-                    labeledRow("JSON 格式輸出") {
-                        Picker("", selection: structuredOutputBinding()) {
-                            ForEach(StructuredOutputMode.allCases) { mode in
-                                Text(mode.displayName).tag(mode)
-                            }
+                        labeledRow("Profile name") {
+                            TextField("", text: $profileNameDraft)
+                                .textFieldStyle(.roundedBorder)
+                                .focused($focusedSettingsField, equals: .profileName)
+                                .onSubmit { commitProfileNameDraft() }
                         }
-                        .labelsHidden()
-                        .help("要求模型只輸出 JSON (response_format)。OpenAI 等支援的 provider 建議開啟；不支援的 endpoint 請關閉，否則可能回 400。關閉時仍會自動清洗 <think>、markdown 等雜訊。")
-                    }
 
-                    labeledRow("Keychain reference") {
-                        TextField("", text: $keychainReferenceDraft)
-                        .textFieldStyle(.roundedBorder)
-                        .focused($focusedSettingsField, equals: .keychainReference)
-                        .onSubmit { commitKeychainReferenceDraft() }
-                    }
+                        labeledRow("Provider") {
+                            Picker("", selection: providerPresetBinding()) {
+                                ForEach(ProviderPreset.allCases) { preset in
+                                    Text(preset.displayName).tag(preset)
+                                }
+                            }
+                            .labelsHidden()
+                        }
 
-                    labeledRow("API key") {
-                        SecureField("", text: $viewModel.apiKeyInput)
+                        labeledRow("Base URL") {
+                            TextField("", text: $baseURLDraft)
                             .textFieldStyle(.roundedBorder)
-                            .focused($focusedSettingsField, equals: .apiKey)
-                    }
+                            .focused($focusedSettingsField, equals: .baseURL)
+                            .onSubmit { commitBaseURLDraft() }
+                        }
 
-                    Button {
-                        viewModel.validateAndSaveProvider()
-                    } label: {
-                        Label(viewModel.isValidatingProvider ? "驗證中..." : "驗證並儲存", systemImage: "checkmark.seal")
+                        labeledRow("Model") {
+                            Picker("", selection: activeProviderModelBinding()) {
+                                ForEach(viewModel.availableModels, id: \.self) { model in
+                                    Text(model).tag(model)
+                                }
+                            }
+                            .labelsHidden()
+                        }
+
+                        labeledRow("JSON 格式輸出") {
+                            Picker("", selection: structuredOutputBinding()) {
+                                ForEach(StructuredOutputMode.allCases) { mode in
+                                    Text(mode.displayName).tag(mode)
+                                }
+                            }
+                            .labelsHidden()
+                            .help("要求模型只輸出 JSON (response_format)。OpenAI 等支援的 provider 建議開啟；不支援的 endpoint 請關閉，否則可能回 400。關閉時仍會自動清洗 <think>、markdown 等雜訊。")
+                        }
+
+                        labeledRow("Keychain reference") {
+                            TextField("", text: $keychainReferenceDraft)
+                            .textFieldStyle(.roundedBorder)
+                            .focused($focusedSettingsField, equals: .keychainReference)
+                            .onSubmit { commitKeychainReferenceDraft() }
+                        }
+
+                        labeledRow("API key") {
+                            SecureField("貼上新 key；留空會沿用 Keychain 既有 key 驗證", text: $viewModel.apiKeyInput)
+                                .textFieldStyle(.roundedBorder)
+                                .focused($focusedSettingsField, equals: .apiKey)
+                        }
+
+                        Button {
+                            viewModel.validateAndSaveProvider()
+                        } label: {
+                            Label(viewModel.isValidatingProvider ? "驗證中..." : "驗證並儲存", systemImage: "checkmark.seal")
+                        }
+                        .disabled(viewModel.isValidatingProvider)
+                        .help("驗證成功才會把新的 API key 存入 Keychain；欄位留空時會用既有 key 驗證。")
                     }
-                    .disabled(viewModel.isValidatingProvider)
-                    .help("驗證成功才會把 API key 存入 Keychain；失敗則不變更。")
                 }
     }
 
@@ -1667,39 +1720,117 @@ struct SettingsView: View {
     }
 
     private func syncAIDraftsFromSettings() {
+        guard focusedSettingsField != .profileName else { return }
         guard focusedSettingsField != .baseURL else { return }
         guard focusedSettingsField != .keychainReference else { return }
-        baseURLDraft = viewModel.snapshot.settings.providerConfig.baseURL.absoluteString
-        keychainReferenceDraft = viewModel.snapshot.settings.providerConfig.apiKeyKeychainRef
+        guard let profile = viewModel.activeProviderProfile else { return }
+        profileNameDraft = profile.name
+        baseURLDraft = profile.config.baseURL.absoluteString
+        keychainReferenceDraft = profile.config.apiKeyKeychainRef
+    }
+
+    private func commitProfileNameDraft() {
+        let trimmed = profileNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            profileNameDraft = viewModel.activeProviderProfile?.name ?? ""
+            return
+        }
+        guard trimmed != viewModel.activeProviderProfile?.name else { return }
+        viewModel.updateActiveProviderProfileName(trimmed)
     }
 
     private func commitBaseURLDraft() {
         let trimmed = baseURLDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            baseURLDraft = viewModel.snapshot.settings.providerConfig.baseURL.absoluteString
+            baseURLDraft = viewModel.activeProviderProfile?.config.baseURL.absoluteString ?? ""
             return
         }
         guard let url = URL(string: trimmed), url.scheme != nil else {
             viewModel.statusMessage = "Base URL 格式不正確"
-            baseURLDraft = viewModel.snapshot.settings.providerConfig.baseURL.absoluteString
+            baseURLDraft = viewModel.activeProviderProfile?.config.baseURL.absoluteString ?? ""
             return
         }
-        guard url != viewModel.snapshot.settings.providerConfig.baseURL else { return }
-        var settings = viewModel.snapshot.settings
-        settings.providerConfig.baseURL = url
-        viewModel.updateSettings(settings)
+        guard url != viewModel.activeProviderProfile?.config.baseURL else { return }
+        viewModel.updateActiveProviderProfileConfig { config in
+            config.baseURL = url
+        }
     }
 
     private func commitKeychainReferenceDraft() {
         let trimmed = keychainReferenceDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            keychainReferenceDraft = viewModel.snapshot.settings.providerConfig.apiKeyKeychainRef
+            keychainReferenceDraft = viewModel.activeProviderProfile?.config.apiKeyKeychainRef ?? ""
             return
         }
-        guard trimmed != viewModel.snapshot.settings.providerConfig.apiKeyKeychainRef else { return }
-        var settings = viewModel.snapshot.settings
-        settings.providerConfig.apiKeyKeychainRef = trimmed
-        viewModel.updateSettings(settings)
+        guard trimmed != viewModel.activeProviderProfile?.config.apiKeyKeychainRef else { return }
+        viewModel.updateActiveProviderProfileConfig { config in
+            config.apiKeyKeychainRef = trimmed
+        }
+        viewModel.refreshActiveProviderKeyStatus()
+    }
+
+    @ViewBuilder
+    private func providerProfileStatus(_ profile: ProviderProfile) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label(providerVerificationText(profile), systemImage: providerVerificationIcon(profile.lastVerificationStatus))
+                .font(.caption)
+                .foregroundStyle(providerVerificationColor(profile.lastVerificationStatus))
+            Label(viewModel.activeProviderKeyStatus.displayText, systemImage: "key")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let message = profile.lastVerificationMessage, !message.isEmpty {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+                    .textSelection(.enabled)
+            }
+        }
+    }
+
+    private func providerVerificationText(_ profile: ProviderProfile) -> String {
+        let status = switch profile.lastVerificationStatus {
+        case .unverified:
+            "尚未驗證"
+        case .success:
+            "驗證成功"
+        case .failed:
+            "驗證失敗"
+        case .missingKey:
+            "缺少 API key"
+        }
+        var details: [String] = []
+        if let count = profile.verifiedModelCount {
+            details.append("\(count) models")
+        }
+        if let date = profile.lastVerifiedAt {
+            details.append(date.formatted())
+        }
+        return details.isEmpty ? status : "\(status) · \(details.joined(separator: " · "))"
+    }
+
+    private func providerVerificationIcon(_ status: ProviderVerificationStatus) -> String {
+        switch status {
+        case .unverified:
+            "questionmark.circle"
+        case .success:
+            "checkmark.seal"
+        case .failed:
+            "xmark.octagon"
+        case .missingKey:
+            "key.slash"
+        }
+    }
+
+    private func providerVerificationColor(_ status: ProviderVerificationStatus) -> Color {
+        switch status {
+        case .unverified:
+            .secondary
+        case .success:
+            .green
+        case .failed, .missingKey:
+            .red
+        }
     }
 
     @ViewBuilder
@@ -2061,19 +2192,41 @@ struct SettingsView: View {
 
     private func providerPresetBinding() -> Binding<ProviderPreset> {
         Binding {
-            viewModel.snapshot.settings.providerConfig.preset
+            viewModel.activeProviderProfile?.config.preset ?? .openAI
         } set: { preset in
             viewModel.applyProviderPreset(preset)
+            syncAIDraftsFromSettings()
+        }
+    }
+
+    private func activeProviderProfileBinding() -> Binding<UUID?> {
+        Binding {
+            viewModel.snapshot.settings.activeProviderProfileId
+        } set: { id in
+            if let id {
+                viewModel.selectProviderProfile(id)
+                syncAIDraftsFromSettings()
+            }
+        }
+    }
+
+    private func activeProviderModelBinding() -> Binding<String> {
+        Binding {
+            viewModel.activeProviderProfile?.config.model ?? viewModel.snapshot.settings.providerConfig.model
+        } set: { model in
+            viewModel.updateActiveProviderProfileConfig(resetVerification: false) { config in
+                config.model = model
+            }
         }
     }
 
     private func structuredOutputBinding() -> Binding<StructuredOutputMode> {
         Binding {
-            viewModel.snapshot.settings.providerConfig.structuredOutput
+            viewModel.activeProviderProfile?.config.structuredOutput ?? viewModel.snapshot.settings.providerConfig.structuredOutput
         } set: { mode in
-            var settings = viewModel.snapshot.settings
-            settings.providerConfig.structuredOutput = mode
-            viewModel.updateSettings(settings)
+            viewModel.updateActiveProviderProfileConfig(resetVerification: false) { config in
+                config.structuredOutput = mode
+            }
         }
     }
 

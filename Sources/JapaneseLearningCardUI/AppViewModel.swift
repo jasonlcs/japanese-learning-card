@@ -44,6 +44,26 @@ struct QuickReviewSessionState: Equatable {
     }
 }
 
+enum ProviderKeyStatus: Equatable {
+    case unknown
+    case saved
+    case missing
+    case error(String)
+
+    var displayText: String {
+        switch self {
+        case .unknown:
+            "Key 狀態未知"
+        case .saved:
+            "Keychain 已儲存 API key"
+        case .missing:
+            "尚未儲存 API key"
+        case .error(let message):
+            "Keychain 檢查失敗：\(message)"
+        }
+    }
+}
+
 @MainActor
 public final class AppViewModel: ObservableObject {
     @Published var snapshot = AppSnapshot()
@@ -56,6 +76,7 @@ public final class AppViewModel: ObservableObject {
     @Published var apiKeyInput = ""
     @Published var availableModels: [String] = ProviderPreset.openAI.fallbackModels
     @Published var isValidatingProvider = false
+    @Published private(set) var activeProviderKeyStatus: ProviderKeyStatus = .unknown
     @Published var newSourceURL = ""
     /// 正在驗證連線的來源 id（含 new-URL 欄位使用的 sentinel）。
     @Published var validatingSourceIDs: Set<UUID> = []
@@ -417,6 +438,12 @@ public final class AppViewModel: ObservableObject {
 
     func reload() async {
         snapshot = await store.read()
+        if snapshot.settings.providerProfiles.isEmpty || snapshot.settings.activeProviderProfile == nil {
+            var settings = snapshot.settings
+            settings.normalizeProviderProfiles()
+            snapshot.settings = settings
+            updateSettings(settings)
+        }
         updateVisibleCardTimerState()
         aiArticleCustomTheme = snapshot.settings.aiArticleCustomTheme
         if let currentCard,
@@ -440,6 +467,7 @@ public final class AppViewModel: ObservableObject {
         if availableModels.isEmpty || !availableModels.contains(snapshot.settings.providerConfig.model) {
             availableModels = Array(Set(snapshot.settings.providerConfig.preset.fallbackModels + [snapshot.settings.providerConfig.model])).sorted()
         }
+        refreshActiveProviderKeyStatus()
         // 任何 reload (來自本地寫入或 pull 後 merge) 都排一個 debounce push,
         // 避免快照改了卻忘記上雲。
         schedulePushDebounced()
@@ -881,50 +909,179 @@ public final class AppViewModel: ObservableObject {
         scheduleTimers()
     }
 
+    var activeProviderProfile: ProviderProfile? {
+        snapshot.settings.activeProviderProfile
+    }
+
+    func selectProviderProfile(_ id: UUID) {
+        var settings = snapshot.settings
+        guard settings.providerProfiles.contains(where: { $0.id == id }) else { return }
+        settings.activeProviderProfileId = id
+        settings.normalizeProviderProfiles()
+        applyProviderSettings(settings)
+        availableModels = Array(Set(settings.providerConfig.preset.fallbackModels + [settings.providerConfig.model])).sorted()
+        apiKeyInput = ""
+    }
+
+    func createProviderProfile() {
+        var settings = snapshot.settings
+        settings.normalizeProviderProfiles()
+        var config = ProviderConfig()
+        config.apiKeyKeychainRef = uniqueKeychainReference(base: config.preset.rawValue, in: settings.providerProfiles)
+        let profile = ProviderProfile(name: "New \(config.preset.displayName)", config: config)
+        settings.providerProfiles.append(profile)
+        settings.activeProviderProfileId = profile.id
+        settings.normalizeProviderProfiles()
+        applyProviderSettings(settings)
+        availableModels = config.preset.fallbackModels
+        apiKeyInput = ""
+    }
+
+    func duplicateActiveProviderProfile() {
+        var settings = snapshot.settings
+        settings.normalizeProviderProfiles()
+        guard let source = settings.activeProviderProfile else { return }
+        var copy = source
+        copy.id = UUID()
+        copy.name = "\(source.name) Copy"
+        copy.config.apiKeyKeychainRef = uniqueKeychainReference(base: source.config.apiKeyKeychainRef, in: settings.providerProfiles)
+        copy.lastVerifiedAt = nil
+        copy.lastVerificationStatus = .missingKey
+        copy.lastVerificationMessage = "複製 profile 後需要貼上 API key 並重新驗證。"
+        copy.verifiedModelCount = nil
+        copy.updatedAt = Date()
+        settings.providerProfiles.append(copy)
+        settings.activeProviderProfileId = copy.id
+        settings.normalizeProviderProfiles()
+        applyProviderSettings(settings)
+        apiKeyInput = ""
+    }
+
+    func deleteActiveProviderProfile() {
+        var settings = snapshot.settings
+        settings.normalizeProviderProfiles()
+        guard let activeId = settings.activeProviderProfileId else { return }
+        settings.providerProfiles.removeAll { $0.id == activeId }
+        if settings.providerProfiles.isEmpty {
+            let profile = AppSettings.defaultProviderProfile(config: ProviderConfig())
+            settings.providerProfiles = [profile]
+            settings.activeProviderProfileId = profile.id
+        } else {
+            settings.activeProviderProfileId = settings.providerProfiles.first?.id
+        }
+        settings.normalizeProviderProfiles()
+        applyProviderSettings(settings)
+        availableModels = Array(Set(settings.providerConfig.preset.fallbackModels + [settings.providerConfig.model])).sorted()
+        apiKeyInput = ""
+    }
+
+    func updateActiveProviderProfileName(_ name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        updateActiveProviderProfile(resetVerification: false) { profile in
+            profile.name = trimmed
+        }
+    }
+
+    func updateActiveProviderProfileConfig(resetVerification: Bool = true, _ mutate: (inout ProviderConfig) -> Void) {
+        updateActiveProviderProfile(resetVerification: resetVerification) { profile in
+            mutate(&profile.config)
+        }
+    }
+
+    func applyProviderPreset(_ preset: ProviderPreset) {
+        updateActiveProviderProfile(resetVerification: true) { profile in
+            profile.name = profile.name.isEmpty || profile.name == profile.config.preset.displayName
+                ? preset.displayName
+                : profile.name
+            profile.config.preset = preset
+            profile.config.baseURL = preset.defaultBaseURL
+            profile.config.model = preset.defaultModel
+            profile.config.apiKeyKeychainRef = uniqueKeychainReference(base: preset.rawValue, in: snapshot.settings.providerProfiles, excluding: profile.id)
+            profile.config.structuredOutput = preset.defaultStructuredOutput
+        }
+        availableModels = preset.fallbackModels
+        apiKeyInput = ""
+    }
+
     func validateAndSaveProvider() {
         isValidatingProvider = true
         statusMessage = "驗證 provider..."
         Task {
             do {
+                var settings = snapshot.settings
+                settings.normalizeProviderProfiles()
+                guard let activeId = settings.activeProviderProfileId,
+                      let activeIndex = settings.providerProfiles.firstIndex(where: { $0.id == activeId }) else {
+                    throw LLMClientError.invalidResponse
+                }
+
                 let trimmedKey = apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
-                // 先用「輸入的 key」(若留空則用既有 key) 驗證，成功才寫入 Keychain；失敗不動 Keychain。
                 let candidateKey: String?
                 if trimmedKey.isEmpty {
-                    let existingKey = try secretStore.apiKey(reference: snapshot.settings.providerConfig.apiKeyKeychainRef)
-                    guard existingKey?.isEmpty == false else {
-                        throw LLMClientError.missingAPIKey
+                    let hasStoredKey = try secretStore.hasAPIKey(reference: settings.providerConfig.apiKeyKeychainRef)
+                    guard hasStoredKey else {
+                        await MainActor.run {
+                            var missingKeySettings = self.snapshot.settings
+                            missingKeySettings.normalizeProviderProfiles()
+                            self.updateActiveProviderProfile(in: &missingKeySettings, resetVerification: false) { profile in
+                                profile.lastVerifiedAt = Date()
+                                profile.lastVerificationStatus = .missingKey
+                                profile.lastVerificationMessage = "請貼上 API key 後再驗證。"
+                                profile.verifiedModelCount = nil
+                            }
+                            self.applyProviderSettings(missingKeySettings)
+                            self.activeProviderKeyStatus = .missing
+                            self.isValidatingProvider = false
+                            self.statusMessage = "尚未儲存 API key，請貼上後驗證。"
+                        }
+                        return
                     }
                     candidateKey = nil
                 } else {
                     candidateKey = trimmedKey
                 }
 
-                let models = try await providerClient.listModels(settings: snapshot.settings, apiKeyOverride: candidateKey)
+                let models = try await providerClient.listModels(settings: settings, apiKeyOverride: candidateKey)
 
-                // 驗證成功後才儲存新的 key。
                 if let candidateKey {
-                    try secretStore.saveAPIKey(candidateKey, reference: snapshot.settings.providerConfig.apiKeyKeychainRef)
+                    try secretStore.saveAPIKey(candidateKey, reference: settings.providerConfig.apiKeyKeychainRef)
                 }
                 await MainActor.run {
-                    let preset = self.snapshot.settings.providerConfig.preset
-                    // 精選清單的 provider(如 Google AI Studio)只給 Gemma，不展開完整 /models。
+                    let preset = settings.providerConfig.preset
                     if preset.usesCuratedModelList {
                         self.availableModels = preset.fallbackModels
                     } else {
                         self.availableModels = models.isEmpty ? preset.fallbackModels : models
                     }
-                    if !self.availableModels.contains(self.snapshot.settings.providerConfig.model),
+                    if !self.availableModels.contains(settings.providerConfig.model),
                        let firstModel = self.availableModels.first {
-                        var settings = self.snapshot.settings
                         settings.providerConfig.model = firstModel
-                        self.updateSettings(settings)
+                        settings.providerProfiles[activeIndex].config.model = firstModel
                     }
+                    settings.providerProfiles[activeIndex].lastVerifiedAt = Date()
+                    settings.providerProfiles[activeIndex].lastVerificationStatus = .success
+                    settings.providerProfiles[activeIndex].lastVerificationMessage = "驗證成功，已取得 \(self.availableModels.count) 個 model。"
+                    settings.providerProfiles[activeIndex].verifiedModelCount = self.availableModels.count
+                    settings.providerProfiles[activeIndex].updatedAt = Date()
+                    settings.normalizeProviderProfiles()
+                    self.applyProviderSettings(settings)
                     self.apiKeyInput = ""
+                    self.activeProviderKeyStatus = .saved
                     self.isValidatingProvider = false
                     self.statusMessage = "Provider 驗證成功，已取得 \(self.availableModels.count) 個 model"
                 }
             } catch {
                 await MainActor.run {
+                    var settings = self.snapshot.settings
+                    settings.normalizeProviderProfiles()
+                    self.updateActiveProviderProfile(in: &settings, resetVerification: false) { profile in
+                        profile.lastVerifiedAt = Date()
+                        profile.lastVerificationStatus = .failed
+                        profile.lastVerificationMessage = error.localizedDescription
+                        profile.verifiedModelCount = nil
+                    }
+                    self.applyProviderSettings(settings)
                     self.isValidatingProvider = false
                     self.statusMessage = "驗證失敗：\(error.localizedDescription)"
                 }
@@ -932,15 +1089,90 @@ public final class AppViewModel: ObservableObject {
         }
     }
 
-    func applyProviderPreset(_ preset: ProviderPreset) {
+    func clearActiveProviderProfileKey() {
+        guard let profile = snapshot.settings.activeProviderProfile else { return }
+        do {
+            try secretStore.deleteAPIKey(reference: profile.config.apiKeyKeychainRef)
+            var settings = snapshot.settings
+            settings.normalizeProviderProfiles()
+            updateActiveProviderProfile(in: &settings, resetVerification: false) { profile in
+                profile.lastVerifiedAt = Date()
+                profile.lastVerificationStatus = .missingKey
+                profile.lastVerificationMessage = "API key 已清空。"
+                profile.verifiedModelCount = nil
+            }
+            applyProviderSettings(settings)
+            apiKeyInput = ""
+            activeProviderKeyStatus = .missing
+            statusMessage = "已清空目前 profile 的 API key"
+        } catch {
+            activeProviderKeyStatus = .error(error.localizedDescription)
+            statusMessage = "清空 API key 失敗：\(error.localizedDescription)"
+        }
+    }
+
+    func refreshActiveProviderKeyStatus() {
+        guard let profile = snapshot.settings.activeProviderProfile else {
+            activeProviderKeyStatus = .missing
+            return
+        }
+        do {
+            activeProviderKeyStatus = try secretStore.hasAPIKey(reference: profile.config.apiKeyKeychainRef) ? .saved : .missing
+        } catch {
+            activeProviderKeyStatus = .error(error.localizedDescription)
+        }
+    }
+
+    private func updateActiveProviderProfile(resetVerification: Bool, _ mutate: (inout ProviderProfile) -> Void) {
         var settings = snapshot.settings
-        settings.providerConfig.preset = preset
-        settings.providerConfig.baseURL = preset.defaultBaseURL
-        settings.providerConfig.model = preset.defaultModel
-        settings.providerConfig.apiKeyKeychainRef = preset.rawValue
-        settings.providerConfig.structuredOutput = preset.defaultStructuredOutput
-        availableModels = preset.fallbackModels
-        updateSettings(settings)
+        settings.normalizeProviderProfiles()
+        updateActiveProviderProfile(in: &settings, resetVerification: resetVerification, mutate)
+        applyProviderSettings(settings)
+    }
+
+    private func updateActiveProviderProfile(
+        in settings: inout AppSettings,
+        resetVerification: Bool,
+        _ mutate: (inout ProviderProfile) -> Void
+    ) {
+        settings.normalizeProviderProfiles()
+        guard let activeId = settings.activeProviderProfileId,
+              let index = settings.providerProfiles.firstIndex(where: { $0.id == activeId }) else { return }
+        mutate(&settings.providerProfiles[index])
+        settings.providerProfiles[index].updatedAt = Date()
+        if resetVerification {
+            settings.providerProfiles[index].lastVerifiedAt = nil
+            settings.providerProfiles[index].lastVerificationStatus = .unverified
+            settings.providerProfiles[index].lastVerificationMessage = nil
+            settings.providerProfiles[index].verifiedModelCount = nil
+        }
+        settings.normalizeProviderProfiles()
+    }
+
+    private func applyProviderSettings(_ settings: AppSettings) {
+        var normalized = settings
+        normalized.normalizeProviderProfiles()
+        snapshot.settings = normalized
+        updateSettings(normalized)
+        refreshActiveProviderKeyStatus()
+    }
+
+    private func uniqueKeychainReference(base: String, in profiles: [ProviderProfile], excluding excludedId: UUID? = nil) -> String {
+        let trimmed = base.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefix = trimmed.isEmpty ? "provider" : trimmed
+        let existing = Set(profiles.compactMap { profile in
+            profile.id == excludedId ? nil : profile.config.apiKeyKeychainRef
+        })
+        if !existing.contains(prefix) {
+            return prefix
+        }
+        for index in 2...999 {
+            let candidate = "\(prefix)-\(index)"
+            if !existing.contains(candidate) {
+                return candidate
+            }
+        }
+        return "\(prefix)-\(UUID().uuidString.prefix(8))"
     }
 
     func markCurrentCard(_ status: CardStatus) {
