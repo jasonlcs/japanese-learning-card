@@ -1424,18 +1424,21 @@ struct SettingsView: View {
 
                         HStack(spacing: 8) {
                             Button {
+                                commitPendingProviderProfileDrafts()
                                 viewModel.createProviderProfile()
                                 syncAIDraftsFromSettings()
                             } label: {
                                 Label("新增", systemImage: "plus")
                             }
                             Button {
+                                commitPendingProviderProfileDrafts()
                                 viewModel.duplicateActiveProviderProfile()
                                 syncAIDraftsFromSettings()
                             } label: {
                                 Label("複製", systemImage: "doc.on.doc")
                             }
                             Button(role: .destructive) {
+                                commitPendingProviderProfileDrafts()
                                 viewModel.deleteActiveProviderProfile()
                                 syncAIDraftsFromSettings()
                             } label: {
@@ -1717,6 +1720,20 @@ struct SettingsView: View {
         if viewModel.updateSourceURL(source, to: edited) {
             editingSourceURLs[source.id] = nil
         }
+    }
+
+    /// 在切換 active profile(新增/複製/刪除/選擇)之前呼叫,把目前 focus 中欄位的
+    /// 草稿值強制寫回「目前這個」profile,並釋放 focus。
+    ///
+    /// 沒有這一步的話,`syncAIDraftsFromSettings()` 會因為欄位仍在 focus 中而略過
+    /// 同步,草稿值(例如 keychainReferenceDraft)就會停留在切換前的內容;等到
+    /// focus 離開時才觸發的 commit,會把這份「屬於舊 profile」的草稿寫進「切換後
+    /// 的新 active profile」,悄悄把它的 apiKeyKeychainRef／baseURL／name 改壞。
+    private func commitPendingProviderProfileDrafts() {
+        commitProfileNameDraft()
+        commitBaseURLDraft()
+        commitKeychainReferenceDraft()
+        focusedSettingsField = nil
     }
 
     private func syncAIDraftsFromSettings() {
@@ -2204,6 +2221,7 @@ struct SettingsView: View {
             viewModel.snapshot.settings.activeProviderProfileId
         } set: { id in
             if let id {
+                commitPendingProviderProfileDrafts()
                 viewModel.selectProviderProfile(id)
                 syncAIDraftsFromSettings()
             }
