@@ -28,6 +28,7 @@ public enum LLMClientError: LocalizedError {
 
 public protocol LLMClient: Sendable {
     func generateCards(document: CrawledDocument, sourcePrompt: String, settings: AppSettings) async throws -> [LearningCard]
+    func generateRuby(for cards: [LearningCard], settings: AppSettings) async throws -> [RubyBackfillResult]
     func generateQuiz(cards: [LearningCard], settings: AppSettings) async throws -> [QuizQuestion]
     func generateArticle(theme: String, jlptLevels: [JLPTLevel], settings: AppSettings) async throws -> AIArticleDraft
     /// 由使用者貼上的文字（文章或單字清單）直接產生學習卡。
@@ -46,6 +47,22 @@ public extension LLMClient {
         )
         let prompt = instruction.isEmpty ? "請從以下內容挑出值得學習的日文單字與片語。" : instruction
         return try await generateCards(document: document, sourcePrompt: prompt, settings: settings)
+    }
+
+    func generateRuby(for cards: [LearningCard], settings: AppSettings) async throws -> [RubyBackfillResult] {
+        throw LLMClientError.invalidResponse
+    }
+}
+
+public struct RubyBackfillResult: Equatable, Sendable {
+    public var cardId: UUID
+    public var wordRuby: [RubySegment]
+    public var exampleRuby: [RubySegment]
+
+    public init(cardId: UUID, wordRuby: [RubySegment], exampleRuby: [RubySegment]) {
+        self.cardId = cardId
+        self.wordRuby = wordRuby
+        self.exampleRuby = exampleRuby
     }
 }
 
@@ -153,6 +170,39 @@ public struct OpenAICompatibleLLMClient: LLMClient {
             ]
         )
         return cards
+    }
+
+    public func generateRuby(for cards: [LearningCard], settings: AppSettings) async throws -> [RubyBackfillResult] {
+        guard let apiKey = try secretStore.apiKey(reference: settings.providerConfig.apiKeyKeychainRef), !apiKey.isEmpty else {
+            throw LLMClientError.missingAPIKey
+        }
+
+        let body = Self.rubyBackfillRequestBody(cards: cards, settings: settings)
+        var request = URLRequest(url: settings.providerConfig.baseURL.appendingPathComponent("chat/completions"))
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let organization = settings.providerConfig.organization, !organization.isEmpty {
+            request.setValue(organization, forHTTPHeaderField: "OpenAI-Organization")
+        }
+        if let project = settings.providerConfig.project, !project.isEmpty {
+            request.setValue(project, forHTTPHeaderField: "OpenAI-Project")
+        }
+        for (key, value) in settings.providerConfig.extraHeaders {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        request.httpBody = try JSONEncoder().encode(body)
+
+        let data = try await performLoggedRequest(request, operation: "generateRuby", model: settings.providerConfig.model)
+        Self.debugLog("ruby 回應原始 body：\n\(String(decoding: data, as: UTF8.self))")
+        let content = try Self.extractContent(from: data)
+        let results = try Self.decodeRubyBackfill(from: content, sourceCards: cards)
+        await AIRequestLogStore.shared.appendEvent(
+            "llm.decode.completed",
+            operation: "generateRuby",
+            output: ["resultCount": "\(results.count)"]
+        )
+        return results
     }
 
     public func generateQuiz(cards: [LearningCard], settings: AppSettings) async throws -> [QuizQuestion] {
@@ -386,11 +436,12 @@ public struct OpenAICompatibleLLMClient: LLMClient {
             messages: [
                 .init(role: "system", content: """
                 你是日文學習卡產生器。只輸出 JSON，不要 Markdown。
-                JSON schema: {"cards":[{"word":"...","reading":"...","partOfSpeech":"...","meaningZh":"...","grammarNoteZh":"...","jlptLevel":"N1|N2|N3|N4|N5|Unknown","verbFormType":"一段動詞|五段動詞|する動詞|くる動詞|不規則動詞|非動詞|不明","exampleJa":"...","exampleReading":"...","exampleZh":"..."}]}
+                JSON schema: {"cards":[{"word":"...","reading":"...","wordRuby":[{"base":"...","ruby":"..."}],"partOfSpeech":"...","meaningZh":"...","grammarNoteZh":"...","jlptLevel":"N1|N2|N3|N4|N5|Unknown","verbFormType":"一段動詞|五段動詞|する動詞|くる動詞|不規則動詞|非動詞|不明","exampleJa":"...","exampleReading":"...","exampleRuby":[{"base":"...","ruby":"..."}],"exampleZh":"..."}]}
                 不要輸出 JLPT N5 的單字或文法點；若判定為 N5，請直接略過該卡。
                 jlptLevel 必須標註 N1、N2、N3、N4、N5 或 Unknown。
                 如果 partOfSpeech 是動詞，verbFormType 必須標註動詞型態；如果不是動詞，verbFormType 使用「非動詞」。
                 exampleReading 是必填欄位，必須把 exampleJa 整句完整轉成平假名讀音；漢字必須轉成正確平假名，助詞保留原本讀音，不要使用羅馬拼音。
+                wordRuby 與 exampleRuby 必填；每個 base 片段依序串接後必須完全等於 word 或 exampleJa。含漢字片段的 ruby 填平假名；純假名、助詞、標點可用空字串。
                 請同時挑選「單字／片語」與「文法句型」。若來源文字有可學習的文法，至少產生 1 張文法卡；整體最多 6 張卡。
                 \(allowedOutputWritingRules)
                 \(cardLayoutContentRules)
@@ -419,13 +470,14 @@ public struct OpenAICompatibleLLMClient: LLMClient {
             messages: [
                 .init(role: "system", content: """
                 你是日文學習卡產生器。只輸出 JSON，不要 Markdown。
-                JSON schema: {"cards":[{"word":"...","reading":"...","partOfSpeech":"...","meaningZh":"...","grammarNoteZh":"...","jlptLevel":"N1|N2|N3|N4|N5|Unknown","verbFormType":"一段動詞|五段動詞|する動詞|くる動詞|不規則動詞|非動詞|不明","exampleJa":"...","exampleReading":"...","exampleZh":"..."}]}
+                JSON schema: {"cards":[{"word":"...","reading":"...","wordRuby":[{"base":"...","ruby":"..."}],"partOfSpeech":"...","meaningZh":"...","grammarNoteZh":"...","jlptLevel":"N1|N2|N3|N4|N5|Unknown","verbFormType":"一段動詞|五段動詞|する動詞|くる動詞|不規則動詞|非動詞|不明","exampleJa":"...","exampleReading":"...","exampleRuby":[{"base":"...","ruby":"..."}],"exampleZh":"..."}]}
                 使用者會貼上一段日文文章或一份單字／片語清單：
                 - 若是文章，請挑出值得學習的重要單字與片語。
                 - 若是單字／片語清單，請為清單中每個項目各產生一張卡，盡量不要遺漏。
                 所有 JLPT 等級都要保留（包含 N5），請依實際難度標註 jlptLevel；無法判斷時用 Unknown。
                 如果 partOfSpeech 是動詞，verbFormType 必須標註動詞型態；如果不是動詞，verbFormType 使用「非動詞」。
                 exampleReading 是必填欄位，必須把 exampleJa 整句完整轉成平假名讀音；漢字必須轉成正確平假名，助詞保留原本讀音，不要使用羅馬拼音。
+                wordRuby 與 exampleRuby 必填；每個 base 片段依序串接後必須完全等於 word 或 exampleJa。含漢字片段的 ruby 填平假名；純假名、助詞、標點可用空字串。
                 exampleJa 請自然地造句示範該單字；若輸入本身就是完整句子可直接沿用。
                 若內容是文章，請同時挑選「單字／片語」與「文法句型」；若有可學習的文法，至少產生 1 張文法卡。
                 最多產生 30 張卡。
@@ -441,6 +493,35 @@ public struct OpenAICompatibleLLMClient: LLMClient {
                 """)
             ],
             temperature: 0.3,
+            responseFormat: responseFormat(for: settings)
+        )
+    }
+
+    public static func rubyBackfillRequestBody(cards: [LearningCard], settings: AppSettings) -> ChatCompletionRequest {
+        let source = cards.map { card in
+            """
+            - id: \(card.id.uuidString)
+              word: \(card.word)
+              reading: \(card.reading)
+              exampleJa: \(card.exampleJa)
+              exampleReading: \(card.exampleReading)
+            """
+        }.joined(separator: "\n")
+        return ChatCompletionRequest(
+            model: settings.providerConfig.model,
+            messages: [
+                .init(role: "system", content: """
+                你是日文 ruby / furigana 標註器。只輸出 JSON，不要 Markdown。
+                JSON schema: {"cards":[{"id":"UUID","wordRuby":[{"base":"...","ruby":"..."}],"exampleRuby":[{"base":"...","ruby":"..."}]}]}
+                每個輸入 id 都必須輸出一筆。
+                wordRuby 的 base 片段依序串接後必須完全等於 word。
+                exampleRuby 的 base 片段依序串接後必須完全等於 exampleJa。
+                含漢字片段的 ruby 填平假名；純假名、助詞、標點可用空字串。
+                不要改寫原文、不要加入羅馬拼音、不要省略標點。
+                """),
+                .init(role: "user", content: source)
+            ],
+            temperature: 0.1,
             responseFormat: responseFormat(for: settings)
         )
     }
@@ -567,6 +648,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
             guard !word.isEmpty else { return nil }
             let jlptLevel = JLPTLevel(rawValue: card.jlptLevel ?? "") ?? .unknown
             let verbFormType = VerbFormType(rawValue: card.verbFormType ?? "") ?? .unknown
+            let exampleJa = card.exampleJa ?? ""
             return LearningCard(
                 word: word,
                 reading: card.reading ?? "",
@@ -575,8 +657,10 @@ public struct OpenAICompatibleLLMClient: LLMClient {
                 grammarNoteZh: card.grammarNoteZh ?? "",
                 jlptLevel: jlptLevel,
                 verbFormType: verbFormType,
-                exampleJa: card.exampleJa ?? "",
+                exampleJa: exampleJa,
                 exampleReading: card.exampleReading ?? "",
+                wordRuby: RubySupport.validated(card.wordRuby, for: word),
+                exampleRuby: RubySupport.validated(card.exampleRuby, for: exampleJa),
                 exampleZh: card.exampleZh ?? "",
                 sourceUrl: sourceURL
             )
@@ -627,6 +711,18 @@ public struct OpenAICompatibleLLMClient: LLMClient {
     public static func decodeExampleReading(from content: String) throws -> String {
         let payload = try decodeJSON(ExampleReadingPayload.self, from: content)
         return payload.exampleReading.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    public static func decodeRubyBackfill(from content: String, sourceCards: [LearningCard]) throws -> [RubyBackfillResult] {
+        let payload = try decodeJSON(RubyBackfillPayload.self, from: content)
+        let sourceById = Dictionary(uniqueKeysWithValues: sourceCards.map { ($0.id, $0) })
+        return payload.cards.compactMap { item in
+            guard let id = UUID(uuidString: item.id), let source = sourceById[id] else { return nil }
+            let wordRuby = RubySupport.validated(item.wordRuby, for: source.word)
+            let exampleRuby = RubySupport.validated(item.exampleRuby, for: source.exampleJa)
+            guard !wordRuby.isEmpty || !exampleRuby.isEmpty else { return nil }
+            return RubyBackfillResult(cardId: id, wordRuby: wordRuby, exampleRuby: exampleRuby)
+        }
     }
 
     public static func decodeArticle(from content: String, fallbackTheme: String) throws -> AIArticleDraft {
@@ -975,6 +1071,7 @@ private struct CardPayload: Codable {
         // 全部設為 optional 並在 decodeCards 以 "" 補上，避免一張卡讓整批解碼失敗。
         var word: String?
         var reading: String?
+        var wordRuby: [RubySegment]?
         var partOfSpeech: String?
         var meaningZh: String?
         var grammarNoteZh: String?
@@ -982,7 +1079,18 @@ private struct CardPayload: Codable {
         var verbFormType: String?
         var exampleJa: String?
         var exampleReading: String?
+        var exampleRuby: [RubySegment]?
         var exampleZh: String?
+    }
+
+    var cards: [Card]
+}
+
+private struct RubyBackfillPayload: Codable {
+    struct Card: Codable {
+        var id: String
+        var wordRuby: [RubySegment]?
+        var exampleRuby: [RubySegment]?
     }
 
     var cards: [Card]

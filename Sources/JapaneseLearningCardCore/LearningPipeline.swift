@@ -31,6 +31,22 @@ public struct CardBackfillOutcome: Equatable, Sendable {
     }
 }
 
+public struct RubyMigrationOutcome: Equatable, Sendable {
+    public var attemptedCards: Int
+    public var updatedCards: Int
+    public var skippedCards: Int
+    public var failures: [String]
+    public var completed: Bool
+
+    public init(attemptedCards: Int = 0, updatedCards: Int = 0, skippedCards: Int = 0, failures: [String] = [], completed: Bool = false) {
+        self.attemptedCards = attemptedCards
+        self.updatedCards = updatedCards
+        self.skippedCards = skippedCards
+        self.failures = failures
+        self.completed = completed
+    }
+}
+
 public actor LearningPipeline {
     private let store: AppStore
     private let crawler: Crawling
@@ -56,6 +72,57 @@ public actor LearningPipeline {
         return await AITraceContext.$traceId.withValue(traceId) {
             await AITraceContext.$flow.withValue("backfillExistingCards") {
                 await backfillExistingCardsWithTrace(limitToIncompleteCards: limitToIncompleteCards)
+            }
+        }
+    }
+
+    public func migrateRubyOnce() async -> RubyMigrationOutcome {
+        let snapshot = await store.read()
+        guard !snapshot.settings.completedMigrations.contains(RubySupport.migrationId) else {
+            return RubyMigrationOutcome(skippedCards: snapshot.cards.count, completed: true)
+        }
+
+        let candidates = snapshot.cards.filter(\.needsRubyBackfill)
+        guard !candidates.isEmpty else {
+            try? await markRubyMigrationCompleted()
+            return RubyMigrationOutcome(skippedCards: snapshot.cards.count, completed: true)
+        }
+
+        var outcome = RubyMigrationOutcome(attemptedCards: candidates.count)
+        do {
+            for batch in candidates.chunked(into: 8) {
+                let results = try await llmClient.generateRuby(for: batch, settings: snapshot.settings)
+                let resultById = Dictionary(uniqueKeysWithValues: results.map { ($0.cardId, $0) })
+                try await store.update { state in
+                    for index in state.cards.indices {
+                        guard let result = resultById[state.cards[index].id] else { continue }
+                        if !result.wordRuby.isEmpty {
+                            state.cards[index].wordRuby = result.wordRuby
+                        }
+                        if !result.exampleRuby.isEmpty {
+                            state.cards[index].exampleRuby = result.exampleRuby
+                        }
+                        state.cards[index].updatedAt = Date()
+                    }
+                }
+                outcome.updatedCards += results.count
+                let missing = batch.filter { resultById[$0.id] == nil }
+                outcome.failures.append(contentsOf: missing.map { "\($0.word): ruby 生成結果無效" })
+            }
+            try await markRubyMigrationCompleted()
+            outcome.completed = true
+            return outcome
+        } catch {
+            outcome.failures.append(error.localizedDescription)
+            outcome.completed = false
+            return outcome
+        }
+    }
+
+    private func markRubyMigrationCompleted() async throws {
+        try await store.update { state in
+            if !state.settings.completedMigrations.contains(RubySupport.migrationId) {
+                state.settings.completedMigrations.append(RubySupport.migrationId)
             }
         }
     }
@@ -534,8 +601,24 @@ public extension LearningCard {
         merged.verbFormType = regenerated.verbFormType
         merged.exampleJa = regenerated.exampleJa
         merged.exampleReading = regenerated.exampleReading
+        merged.wordRuby = regenerated.wordRuby
+        merged.exampleRuby = regenerated.exampleRuby
         merged.exampleZh = regenerated.exampleZh
         merged.sourceUrl = sourceURL
         return merged
+    }
+
+    var needsRubyBackfill: Bool {
+        !RubySupport.isUsable(wordRuby, for: word)
+            || !RubySupport.isUsable(exampleRuby, for: exampleJa)
+    }
+}
+
+private extension Array {
+    func chunked(into size: Int) -> [[Element]] {
+        guard size > 0 else { return [self] }
+        return stride(from: 0, to: count, by: size).map {
+            Array(self[$0..<Swift.min($0 + size, count)])
+        }
     }
 }

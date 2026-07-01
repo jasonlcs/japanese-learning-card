@@ -66,6 +66,14 @@ let package = Package(
         .executableTarget(
             name: "JapaneseLearningCardCoreChecks",
             dependencies: ["JapaneseLearningCardCore"]
+        ),
+        .testTarget(
+            name: "JapaneseLearningCardCoreTests",
+            dependencies: ["JapaneseLearningCardCore"]
+        ),
+        .testTarget(
+            name: "JapaneseLearningCardUITests",
+            dependencies: ["JapaneseLearningCardUI"]
         )
     ]
 )

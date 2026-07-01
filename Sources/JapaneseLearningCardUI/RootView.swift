@@ -759,8 +759,22 @@ private struct StyledLearningCard: View {
         let showRomanized = showReading && !romanized.isEmpty && romanized != trimmedReading
         // 一顆按鈕同時複製讀音與詞條（讀音與詞條相同時只複製一份）。
         let copyText = showReading ? "\(trimmedReading) \(trimmedWord)" : trimmedWord
+        let usesRuby = RubySupport.isUsable(card.wordRuby, for: trimmedWord)
         return VStack(spacing: 6) {
-            if showReading {
+            if usesRuby {
+                RubyText(
+                    segments: card.wordRuby,
+                    fallback: trimmedWord,
+                    baseFont: .system(size: kind == .grammar ? 30 : 38, weight: .black, design: .rounded),
+                    rubyFont: .callout.weight(.bold),
+                    baseColor: kind == .grammar ? Color.cardBlue : .primary,
+                    rubyColor: Color.cardBlue,
+                    horizontalSpacing: 0,
+                    verticalSpacing: 2
+                )
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
+            } else if showReading {
                 Text(card.reading)
                     .font(.callout.weight(.bold))
                     .foregroundStyle(Color.cardBlue)
@@ -768,15 +782,17 @@ private struct StyledLearningCard: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.5)
             }
-            Text(card.word)
-                .font(.system(size: kind == .grammar ? 30 : 38, weight: .black, design: .rounded))
-                .foregroundStyle(kind == .grammar ? Color.cardBlue : .primary)
-                .textSelection(.enabled)
-                .multilineTextAlignment(.center)
-                .lineLimit(2)
-                .minimumScaleFactor(0.4)
-                .padding(.horizontal, 24)
-            if showRomanized {
+            if !usesRuby {
+                Text(card.word)
+                    .font(.system(size: kind == .grammar ? 30 : 38, weight: .black, design: .rounded))
+                    .foregroundStyle(kind == .grammar ? Color.cardBlue : .primary)
+                    .textSelection(.enabled)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.4)
+                    .padding(.horizontal, 24)
+            }
+            if showRomanized && !usesRuby {
                 Text(romanized)
                     .font(.callout.weight(.bold))
                     .foregroundStyle(.secondary)
@@ -886,12 +902,28 @@ private struct StyledLearningCard: View {
     private func examplePanel(tint: Color, title: String) -> some View {
         CardInfoPanel(title: title, systemImage: "pencil", tint: tint) {
             VStack(alignment: .leading, spacing: 8) {
-                CopyableTextRow(text: card.exampleJa, font: .headline)
-                    .lineLimit(2)
-                if !card.exampleReading.isEmpty {
+                if RubySupport.isUsable(card.exampleRuby, for: card.exampleJa) {
+                    HStack(alignment: .top, spacing: 6) {
+                        RubyText(
+                            segments: card.exampleRuby,
+                            fallback: card.exampleJa,
+                            baseFont: .headline,
+                            rubyFont: .caption2,
+                            baseColor: .primary,
+                            rubyColor: .secondary,
+                            horizontalSpacing: 1,
+                            verticalSpacing: 3
+                        )
+                        CopyButton(text: card.exampleJa)
+                    }
+                } else {
+                    CopyableTextRow(text: card.exampleJa, font: .headline)
+                        .lineLimit(2)
+                }
+                if !card.exampleReading.isEmpty && !RubySupport.isUsable(card.exampleRuby, for: card.exampleJa) {
                     CopyableTextRow(text: card.exampleReading, font: .subheadline, color: .secondary)
                         .lineLimit(1)
-                } else {
+                } else if card.exampleReading.isEmpty && !RubySupport.isUsable(card.exampleRuby, for: card.exampleJa) {
                     Button {
                         fillExampleReading()
                     } label: {

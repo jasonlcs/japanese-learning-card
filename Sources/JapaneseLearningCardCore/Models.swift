@@ -122,6 +122,16 @@ public enum VerbFormType: String, Codable, CaseIterable, Identifiable, Sendable 
     public var id: String { rawValue }
 }
 
+public struct RubySegment: Codable, Equatable, Sendable {
+    public var base: String
+    public var ruby: String
+
+    public init(base: String, ruby: String = "") {
+        self.base = base
+        self.ruby = ruby
+    }
+}
+
 /// 是否在請求中加入 OpenAI 相容的 `response_format`，要求模型只輸出 JSON。
 /// 與模型無關的「主動」治本手段；不支援此欄位的 endpoint 應設為 .off。
 public enum StructuredOutputMode: String, Codable, CaseIterable, Identifiable, Sendable {
@@ -244,6 +254,8 @@ public struct LearningCard: Codable, Identifiable, Equatable, Sendable {
     public var verbFormType: VerbFormType
     public var exampleJa: String
     public var exampleReading: String
+    public var wordRuby: [RubySegment]
+    public var exampleRuby: [RubySegment]
     public var exampleZh: String
     public var sourceUrl: URL
     public var status: CardStatus
@@ -263,6 +275,8 @@ public struct LearningCard: Codable, Identifiable, Equatable, Sendable {
         verbFormType: VerbFormType = .notVerb,
         exampleJa: String,
         exampleReading: String = "",
+        wordRuby: [RubySegment] = [],
+        exampleRuby: [RubySegment] = [],
         exampleZh: String,
         sourceUrl: URL,
         status: CardStatus = .new,
@@ -281,6 +295,8 @@ public struct LearningCard: Codable, Identifiable, Equatable, Sendable {
         self.verbFormType = verbFormType
         self.exampleJa = exampleJa
         self.exampleReading = exampleReading
+        self.wordRuby = wordRuby
+        self.exampleRuby = exampleRuby
         self.exampleZh = exampleZh
         self.sourceUrl = sourceUrl
         self.status = status
@@ -302,6 +318,8 @@ public struct LearningCard: Codable, Identifiable, Equatable, Sendable {
         self.verbFormType = try container.decodeIfPresent(VerbFormType.self, forKey: .verbFormType) ?? .notVerb
         self.exampleJa = try container.decode(String.self, forKey: .exampleJa)
         self.exampleReading = try container.decodeIfPresent(String.self, forKey: .exampleReading) ?? ""
+        self.wordRuby = try container.decodeIfPresent([RubySegment].self, forKey: .wordRuby) ?? []
+        self.exampleRuby = try container.decodeIfPresent([RubySegment].self, forKey: .exampleRuby) ?? []
         self.exampleZh = try container.decode(String.self, forKey: .exampleZh)
         self.sourceUrl = try container.decode(URL.self, forKey: .sourceUrl)
         self.status = try container.decodeIfPresent(CardStatus.self, forKey: .status) ?? .new
@@ -486,6 +504,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var aiArticleWeekdays: [Int]
     public var aiArticleLevels: [JLPTLevel]
     public var aiArticleCustomTheme: String
+    public var completedMigrations: [String]
     public var updatedAt: Date
 
     public init(
@@ -503,6 +522,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         aiArticleWeekdays: [Int] = [1, 2, 3, 4, 5, 6, 7],
         aiArticleLevels: [JLPTLevel] = JLPTLevel.allCases,
         aiArticleCustomTheme: String = "",
+        completedMigrations: [String] = [],
         updatedAt: Date = Date()
     ) {
         self.displayIntervalMinutes = displayIntervalMinutes
@@ -519,6 +539,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.aiArticleWeekdays = AppSettings.normalizeWeekdays(aiArticleWeekdays)
         self.aiArticleLevels = aiArticleLevels.isEmpty ? JLPTLevel.allCases : aiArticleLevels
         self.aiArticleCustomTheme = aiArticleCustomTheme
+        self.completedMigrations = completedMigrations
         self.updatedAt = updatedAt
     }
 
@@ -551,6 +572,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         let decodedLevels = try container.decodeIfPresent([JLPTLevel].self, forKey: .aiArticleLevels) ?? JLPTLevel.allCases
         self.aiArticleLevels = decodedLevels.isEmpty ? JLPTLevel.allCases : decodedLevels
         self.aiArticleCustomTheme = try container.decodeIfPresent(String.self, forKey: .aiArticleCustomTheme) ?? ""
+        self.completedMigrations = try container.decodeIfPresent([String].self, forKey: .completedMigrations) ?? []
         self.updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
     }
 }
