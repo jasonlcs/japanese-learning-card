@@ -757,8 +757,8 @@ private struct StyledLearningCard: View {
         // The romaji fallback leaves kana untouched, so only render it when it
         // actually differs from the reading we already displayed.
         let showRomanized = showReading && !romanized.isEmpty && romanized != trimmedReading
-        // 一顆按鈕同時複製讀音與詞條（讀音與詞條相同時只複製一份）。
-        let copyText = showReading ? "\(trimmedReading) \(trimmedWord)" : trimmedWord
+        // 一顆按鈕同時複製詞條與讀音（讀音與詞條相同時只複製一份）。
+        let copyText = clipboardText(base: trimmedWord, reading: trimmedReading)
         let usesRuby = RubySupport.isUsable(card.wordRuby, for: trimmedWord)
         return VStack(spacing: 6) {
             if usesRuby {
@@ -914,10 +914,14 @@ private struct StyledLearningCard: View {
                             horizontalSpacing: 1,
                             verticalSpacing: 3
                         )
-                        CopyButton(text: card.exampleJa)
+                        CopyButton(text: clipboardText(base: card.exampleJa, reading: card.exampleReading))
                     }
                 } else {
-                    CopyableTextRow(text: card.exampleJa, font: .headline)
+                    CopyableTextRow(
+                        text: card.exampleJa,
+                        font: .headline,
+                        copyText: clipboardText(base: card.exampleJa, reading: card.exampleReading)
+                    )
                         .lineLimit(2)
                 }
                 if !card.exampleReading.isEmpty && !RubySupport.isUsable(card.exampleRuby, for: card.exampleJa) {
@@ -937,6 +941,13 @@ private struct StyledLearningCard: View {
                     .lineLimit(2)
             }
         }
+    }
+
+    private func clipboardText(base: String, reading: String) -> String {
+        let trimmedBase = base.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedReading = reading.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedReading.isEmpty, trimmedReading != trimmedBase else { return trimmedBase }
+        return "\(trimmedBase)\n\(trimmedReading)"
     }
 }
 
@@ -1135,6 +1146,7 @@ struct CopyableTextRow: View {
     var text: String
     var font: Font
     var color: Color = .primary
+    var copyText: String? = nil
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -1143,7 +1155,7 @@ struct CopyableTextRow: View {
                 .foregroundStyle(color)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
-            CopyButton(text: text)
+            CopyButton(text: copyText ?? text)
         }
     }
 }
