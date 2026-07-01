@@ -765,15 +765,15 @@ private struct StyledLearningCard: View {
                 RubyText(
                     segments: card.wordRuby,
                     fallback: trimmedWord,
-                    baseFont: .system(size: kind == .grammar ? 30 : 38, weight: .black, design: .rounded),
-                    rubyFont: .callout.weight(.bold),
+                    baseFont: .system(size: kind == .grammar ? 25 : 31, weight: .black, design: .rounded),
+                    rubyFont: .system(size: 11, weight: .bold, design: .rounded),
                     baseColor: kind == .grammar ? Color.cardBlue : .primary,
                     rubyColor: Color.cardBlue,
                     horizontalSpacing: 0,
-                    verticalSpacing: 2
+                    verticalSpacing: 1
                 )
                 .multilineTextAlignment(.center)
-                .padding(.horizontal, 24)
+                .padding(.horizontal, 18)
             } else if showReading {
                 Text(card.reading)
                     .font(.callout.weight(.bold))
