@@ -18,7 +18,14 @@ public enum KeychainStoreError: LocalizedError {
 public protocol SecretStore: Sendable {
     func saveAPIKey(_ apiKey: String, reference: String) throws
     func apiKey(reference: String) throws -> String?
+    func hasAPIKey(reference: String) throws -> Bool
     func deleteAPIKey(reference: String) throws
+}
+
+public extension SecretStore {
+    func hasAPIKey(reference: String) throws -> Bool {
+        try apiKey(reference: reference)?.isEmpty == false
+    }
 }
 
 public struct KeychainStore: SecretStore {
@@ -56,6 +63,21 @@ public struct KeychainStore: SecretStore {
             throw KeychainStoreError.invalidData
         }
         return apiKey
+    }
+
+    public func hasAPIKey(reference: String) throws -> Bool {
+        var query = baseQuery(reference: reference)
+        query[kSecReturnData as String] = false
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+
+        let status = SecItemCopyMatching(query as CFDictionary, nil)
+        if status == errSecItemNotFound {
+            return false
+        }
+        guard status == errSecSuccess else {
+            throw KeychainStoreError.unexpectedStatus(status)
+        }
+        return true
     }
 
     public func deleteAPIKey(reference: String) throws {
