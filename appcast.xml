@@ -3,6 +3,15 @@
     <channel>
         <title>JapaneseLearningCard</title>
         <item>
+            <title>0.2.20</title>
+            <pubDate>Wed, 01 Jul 2026 05:06:19 +0000</pubDate>
+            <sparkle:version>2020</sparkle:version>
+            <sparkle:shortVersionString>0.2.20</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/jasonlcs/japanese-learning-card/releases/download/v0.2.20/JapaneseLearningCard.dmg" length="4775273" type="application/octet-stream" sparkle:edSignature="PC2D39t4tbfvOeDf1yzqpdP3ymwqCpBcNJufLrVSFpdCZwg4mOVLmBBal5fcl0c01O3jF3itW4hxRSusCtxzBg=="/>
+        </item>
+        <item>
             <title>0.2.19</title>
             <pubDate>Sun, 28 Jun 2026 13:18:35 +0000</pubDate>
             <sparkle:version>2019</sparkle:version>
@@ -19,15 +28,6 @@
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
             <enclosure url="https://github.com/jasonlcs/japanese-learning-card/releases/download/v0.2.18/JapaneseLearningCard.dmg" length="4728974" type="application/octet-stream" sparkle:edSignature="cwBlzxVxtGUb/YjBd6GymoEDMpkUj2y1aJwsp+R4tdlX1yXxgE11kAhuuo7+JV2qF7nut8CXoQLF8VmO6T45Cw=="/>
-        </item>
-        <item>
-            <title>0.2.17</title>
-            <pubDate>Sun, 28 Jun 2026 12:40:20 +0000</pubDate>
-            <sparkle:version>2017</sparkle:version>
-            <sparkle:shortVersionString>0.2.17</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/jasonlcs/japanese-learning-card/releases/download/v0.2.17/JapaneseLearningCard.dmg" length="4729054" type="application/octet-stream" sparkle:edSignature="My9/69G+cNL2YLr8iGOa0UN4+Lumkg/NpfsvlT0cx3VQsCI4xYMPmQyhI3KuLwAmoOXjfnSZuCmH3JPwsl7VBg=="/>
         </item>
     </channel>
 </rss>
