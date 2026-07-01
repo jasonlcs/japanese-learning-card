@@ -179,6 +179,7 @@ public final class AppViewModel: ObservableObject {
     private var syncCoordinator: SyncCoordinator?
     private var syncPollTimer: Timer?
     private var pushDebounceTask: Task<Void, Never>?
+    private var isRubyMigrationRunning = false
     private var lastSnapshotDataVersion: Int64?
     public var requestShowPopover: (() -> Void)?
     public var requestClosePopover: (() -> Void)?
@@ -217,6 +218,7 @@ public final class AppViewModel: ObservableObject {
             await reload()
             await store.ensureAISentinelSource(extractionPrompt: AISource.sentinelExtractionPrompt)
             await reload()
+            await migrateRubyOnceIfPossible()
             await updateStorageHealth()
             scheduleTimers()
             #if ICLOUD_ENABLED && !LOCAL_BUILD
@@ -441,6 +443,32 @@ public final class AppViewModel: ObservableObject {
         // 任何 reload (來自本地寫入或 pull 後 merge) 都排一個 debounce push,
         // 避免快照改了卻忘記上雲。
         schedulePushDebounced()
+    }
+
+    private func migrateRubyOnceIfPossible() async {
+        guard !isRubyMigrationRunning else { return }
+        let current = await store.read()
+        guard !current.settings.completedMigrations.contains(RubySupport.migrationId) else { return }
+        guard current.cards.contains(where: \.needsRubyBackfill) else {
+            _ = await pipeline.migrateRubyOnce()
+            await reload()
+            return
+        }
+
+        let keyReference = current.settings.providerConfig.apiKeyKeychainRef
+        guard ((try? secretStore.apiKey(reference: keyReference)) ?? "").isEmpty == false else {
+            statusMessage = "偵測到舊卡缺少 ruby；設定 API key 後會自動補齊一次"
+            return
+        }
+
+        isRubyMigrationRunning = true
+        statusMessage = "正在一次性補齊 ruby 讀音..."
+        let outcome = await pipeline.migrateRubyOnce()
+        isRubyMigrationRunning = false
+        statusMessage = outcome.completed
+            ? "已補齊 ruby：更新 \(outcome.updatedCards) 張卡"
+            : "ruby 補齊未完成：\(outcome.failures.first ?? "未知錯誤")"
+        await reload()
     }
 
     func chooseICloudDriveFolderAndMigrate() {
