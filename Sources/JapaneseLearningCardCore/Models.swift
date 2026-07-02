@@ -468,6 +468,36 @@ public struct ProviderProfile: Codable, Identifiable, Equatable, Sendable {
         self.verifiedModelCount = verifiedModelCount
         self.updatedAt = updatedAt
     }
+
+    /// Keychain 帳號(reference)新制:一律由 profile id 自動產生,與 ProfileID
+    /// 一一對應,使用者不可手動編輯。舊資料的搬移見 `ProviderKeychainMigration`。
+    public var keychainReference: String {
+        Self.keychainReference(for: id)
+    }
+
+    public static func keychainReference(for id: UUID) -> String {
+        sanitizedKeychainReference(id.uuidString)
+    }
+
+    /// 把任意字串轉成安全的 keychain 帳號:白名單(英數、`.`、`-`)以外的字元
+    /// 逐 UTF-8 byte 轉成 `_XX`(大寫 hex)。`_` 不在白名單內、本身也會被轉義,
+    /// 所以轉換是一對一,兩個不同輸入不會撞出同一個 reference。
+    public static func sanitizedKeychainReference(_ raw: String) -> String {
+        var result = ""
+        result.reserveCapacity(raw.utf8.count)
+        for byte in raw.utf8 {
+            switch byte {
+            case UInt8(ascii: "0")...UInt8(ascii: "9"),
+                 UInt8(ascii: "A")...UInt8(ascii: "Z"),
+                 UInt8(ascii: "a")...UInt8(ascii: "z"),
+                 UInt8(ascii: "."), UInt8(ascii: "-"):
+                result.append(Character(UnicodeScalar(byte)))
+            default:
+                result += String(format: "_%02X", byte)
+            }
+        }
+        return result
+    }
 }
 
 public struct GeneratedArticle: Codable, Identifiable, Equatable, Sendable {

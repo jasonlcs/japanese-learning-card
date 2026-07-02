@@ -68,18 +68,32 @@ public struct RootView: View {
 
             Divider()
 
-            Group {
-                switch viewModel.selectedTab {
-                case 1:
-                    CardMakerView(viewModel: viewModel)
-                case 2:
-                    QuizView(viewModel: viewModel)
-                case 4:
-                    SettingsView(viewModel: viewModel)
-                case 5:
-                    HistoryView(viewModel: viewModel)
-                default:
-                    CardView(viewModel: viewModel)
+            // 內容區用 ZStack 疊放:卡片頁永遠參與 layout 當高度基準,其他頁籤
+            // 蓋在上面並吃滿同樣的高度。這樣切換頁籤時 popover 不會因為各頁
+            // fitting size 不同而重新計算(高度亂跳),所有頁籤都跟卡片頁等高。
+            ZStack(alignment: .topLeading) {
+                CardView(viewModel: viewModel)
+                    .opacity(viewModel.selectedTab == 0 ? 1 : 0)
+                    .allowsHitTesting(viewModel.selectedTab == 0)
+                    .accessibilityHidden(viewModel.selectedTab != 0)
+
+                if viewModel.selectedTab != 0 {
+                    Group {
+                        switch viewModel.selectedTab {
+                        case 1:
+                            CardMakerView(viewModel: viewModel)
+                        case 2:
+                            QuizView(viewModel: viewModel)
+                        case 4:
+                            SettingsView(viewModel: viewModel)
+                        case 5:
+                            HistoryView(viewModel: viewModel)
+                        default:
+                            EmptyView()
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color.platformWindowBackground)
                 }
             }
         }
@@ -335,7 +349,14 @@ struct DatabaseView: View {
 struct QuizView: View {
     @ObservedObject var viewModel: AppViewModel
 
+    // 高度由卡片頁決定(見 RootView),考題內容比卡片高時改用捲動。
     var body: some View {
+        ScrollView {
+            quizContent
+        }
+    }
+
+    private var quizContent: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
@@ -1187,7 +1208,6 @@ struct SettingsView: View {
     @FocusState private var focusedSettingsField: SettingsField?
     @State private var profileNameDraft = ""
     @State private var baseURLDraft = ""
-    @State private var keychainReferenceDraft = ""
     /// 既有來源網址的編輯緩衝區（key 為 Source.id），送出前不寫回資料。
     @State private var editingSourceURLs: [UUID: String] = [:]
     /// 設定分類：用上方分段直接切換，不再藏在「系統設定」子頁裡。
@@ -1205,7 +1225,6 @@ struct SettingsView: View {
     private enum SettingsField: Hashable {
         case profileName
         case baseURL
-        case keychainReference
         case apiKey
         case existingSource(UUID)
     }
@@ -1250,9 +1269,6 @@ struct SettingsView: View {
         .onChange(of: viewModel.snapshot.settings.providerConfig.baseURL) { _, _ in
             syncAIDraftsFromSettings()
         }
-        .onChange(of: viewModel.snapshot.settings.providerConfig.apiKeyKeychainRef) { _, _ in
-            syncAIDraftsFromSettings()
-        }
         .onChange(of: viewModel.snapshot.settings.activeProviderProfileId) { _, _ in
             syncAIDraftsFromSettings()
         }
@@ -1262,9 +1278,6 @@ struct SettingsView: View {
             }
             if oldValue == .baseURL, newValue != .baseURL {
                 commitBaseURLDraft()
-            }
-            if oldValue == .keychainReference, newValue != .keychainReference {
-                commitKeychainReferenceDraft()
             }
             if case .existingSource(let id) = oldValue, newValue != oldValue,
                let source = viewModel.snapshot.sources.first(where: { $0.id == id }) {
@@ -1410,48 +1423,60 @@ struct SettingsView: View {
     @ViewBuilder
     private var aiSection: some View {
                 settingsBox("AI Provider Profiles") {
-                    labeledRow("Active Profile") {
-                        Picker("", selection: activeProviderProfileBinding()) {
-                            ForEach(viewModel.snapshot.settings.providerProfiles) { profile in
-                                Text(profile.name).tag(Optional(profile.id))
+                    Text("點一下列表即可切換預設 profile；AI 造卡、出題、驗證都會使用打勾的那一組。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    VStack(spacing: 0) {
+                        ForEach(viewModel.snapshot.settings.providerProfiles) { profile in
+                            providerProfileRow(profile)
+                            if profile.id != viewModel.snapshot.settings.providerProfiles.last?.id {
+                                Divider()
                             }
                         }
-                        .labelsHidden()
                     }
+                    .background(Color.platformTextBackground)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.platformSeparator, lineWidth: 1)
+                    )
 
-                    if let profile = viewModel.activeProviderProfile {
-                        providerProfileStatus(profile)
-
-                        HStack(spacing: 8) {
-                            Button {
-                                commitPendingProviderProfileDrafts()
-                                viewModel.createProviderProfile()
-                                syncAIDraftsFromSettings()
-                            } label: {
-                                Label("新增", systemImage: "plus")
-                            }
-                            Button {
-                                commitPendingProviderProfileDrafts()
-                                viewModel.duplicateActiveProviderProfile()
-                                syncAIDraftsFromSettings()
-                            } label: {
-                                Label("複製", systemImage: "doc.on.doc")
-                            }
-                            Button(role: .destructive) {
-                                commitPendingProviderProfileDrafts()
-                                viewModel.deleteActiveProviderProfile()
-                                syncAIDraftsFromSettings()
-                            } label: {
-                                Label("刪除", systemImage: "trash")
-                            }
-                            .disabled(viewModel.snapshot.settings.providerProfiles.count <= 1)
-                            Button(role: .destructive) {
-                                viewModel.clearActiveProviderProfileKey()
-                            } label: {
-                                Label("清空 Key", systemImage: "key.slash")
-                            }
+                    HStack(spacing: 8) {
+                        Button {
+                            commitPendingProviderProfileDrafts()
+                            viewModel.createProviderProfile()
+                            syncAIDraftsFromSettings()
+                        } label: {
+                            Label("新增", systemImage: "plus")
                         }
-                        .buttonStyle(.borderless)
+                        Button {
+                            commitPendingProviderProfileDrafts()
+                            viewModel.duplicateActiveProviderProfile()
+                            syncAIDraftsFromSettings()
+                        } label: {
+                            Label("複製", systemImage: "doc.on.doc")
+                        }
+                        Button(role: .destructive) {
+                            commitPendingProviderProfileDrafts()
+                            viewModel.deleteActiveProviderProfile()
+                            syncAIDraftsFromSettings()
+                        } label: {
+                            Label("刪除", systemImage: "trash")
+                        }
+                        .disabled(viewModel.snapshot.settings.providerProfiles.count <= 1)
+                        Button(role: .destructive) {
+                            viewModel.clearActiveProviderProfileKey()
+                        } label: {
+                            Label("清空 Key", systemImage: "key.slash")
+                        }
+                    }
+                    .buttonStyle(.borderless)
+                }
+
+                if let profile = viewModel.activeProviderProfile {
+                    settingsBox("Profile 設定") {
+                        providerProfileStatus(profile)
 
                         labeledRow("Profile name") {
                             TextField("", text: $profileNameDraft)
@@ -1495,11 +1520,17 @@ struct SettingsView: View {
                             .help("要求模型只輸出 JSON (response_format)。OpenAI 等支援的 provider 建議開啟；不支援的 endpoint 請關閉，否則可能回 400。關閉時仍會自動清洗 <think>、markdown 等雜訊。")
                         }
 
-                        labeledRow("Keychain reference") {
-                            TextField("", text: $keychainReferenceDraft)
-                            .textFieldStyle(.roundedBorder)
-                            .focused($focusedSettingsField, equals: .keychainReference)
-                            .onSubmit { commitKeychainReferenceDraft() }
+                        labeledRow("Keychain ID") {
+                            HStack(spacing: 6) {
+                                Text(profile.keychainReference)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .textSelection(.enabled)
+                                CopyButton(text: profile.keychainReference)
+                            }
+                            .help("自動產生，永遠等於 Profile ID，無法手動修改。")
                         }
 
                         labeledRow("API key") {
@@ -1517,6 +1548,54 @@ struct SettingsView: View {
                         .help("驗證成功才會把新的 API key 存入 Keychain；欄位留空時會用既有 key 驗證。")
                     }
                 }
+    }
+
+    /// Profile 清單的一列:點一下整列就把該 profile 設為預設(active)。
+    private func providerProfileRow(_ profile: ProviderProfile) -> some View {
+        let isActive = profile.id == viewModel.snapshot.settings.activeProviderProfileId
+        return Button {
+            guard !isActive else { return }
+            commitPendingProviderProfileDrafts()
+            viewModel.selectProviderProfile(profile.id)
+            syncAIDraftsFromSettings()
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: isActive ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 16))
+                    .foregroundStyle(isActive ? Color.accentColor : .secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(profile.name)
+                            .font(.body.weight(isActive ? .semibold : .regular))
+                            .lineLimit(1)
+                        if isActive {
+                            Text("預設")
+                                .font(.caption2.weight(.bold))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 1)
+                                .background(Color.accentColor.opacity(0.15))
+                                .foregroundStyle(Color.accentColor)
+                                .clipShape(Capsule())
+                        }
+                    }
+                    Text("\(profile.config.preset.displayName) · \(profile.config.model)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+                Image(systemName: providerVerificationIcon(profile.lastVerificationStatus))
+                    .foregroundStyle(providerVerificationColor(profile.lastVerificationStatus))
+                    .help(providerVerificationText(profile))
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(isActive ? Color.accentColor.opacity(0.08) : Color.clear)
+        .accessibilityLabel("\(profile.name)\(isActive ? "，目前為預設" : "")")
+        .accessibilityHint("點一下設為預設 profile")
     }
 
     @ViewBuilder
@@ -1726,24 +1805,21 @@ struct SettingsView: View {
     /// 草稿值強制寫回「目前這個」profile,並釋放 focus。
     ///
     /// 沒有這一步的話,`syncAIDraftsFromSettings()` 會因為欄位仍在 focus 中而略過
-    /// 同步,草稿值(例如 keychainReferenceDraft)就會停留在切換前的內容;等到
-    /// focus 離開時才觸發的 commit,會把這份「屬於舊 profile」的草稿寫進「切換後
-    /// 的新 active profile」,悄悄把它的 apiKeyKeychainRef／baseURL／name 改壞。
+    /// 同步,草稿值(例如 baseURLDraft)就會停留在切換前的內容;等到 focus 離開時
+    /// 才觸發的 commit,會把這份「屬於舊 profile」的草稿寫進「切換後的新 active
+    /// profile」,悄悄把它的 baseURL／name 改壞。
     private func commitPendingProviderProfileDrafts() {
         commitProfileNameDraft()
         commitBaseURLDraft()
-        commitKeychainReferenceDraft()
         focusedSettingsField = nil
     }
 
     private func syncAIDraftsFromSettings() {
         guard focusedSettingsField != .profileName else { return }
         guard focusedSettingsField != .baseURL else { return }
-        guard focusedSettingsField != .keychainReference else { return }
         guard let profile = viewModel.activeProviderProfile else { return }
         profileNameDraft = profile.name
         baseURLDraft = profile.config.baseURL.absoluteString
-        keychainReferenceDraft = profile.config.apiKeyKeychainRef
     }
 
     private func commitProfileNameDraft() {
@@ -1771,19 +1847,6 @@ struct SettingsView: View {
         viewModel.updateActiveProviderProfileConfig { config in
             config.baseURL = url
         }
-    }
-
-    private func commitKeychainReferenceDraft() {
-        let trimmed = keychainReferenceDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            keychainReferenceDraft = viewModel.activeProviderProfile?.config.apiKeyKeychainRef ?? ""
-            return
-        }
-        guard trimmed != viewModel.activeProviderProfile?.config.apiKeyKeychainRef else { return }
-        viewModel.updateActiveProviderProfileConfig { config in
-            config.apiKeyKeychainRef = trimmed
-        }
-        viewModel.refreshActiveProviderKeyStatus()
     }
 
     @ViewBuilder
@@ -2213,18 +2276,6 @@ struct SettingsView: View {
         } set: { preset in
             viewModel.applyProviderPreset(preset)
             syncAIDraftsFromSettings()
-        }
-    }
-
-    private func activeProviderProfileBinding() -> Binding<UUID?> {
-        Binding {
-            viewModel.snapshot.settings.activeProviderProfileId
-        } set: { id in
-            if let id {
-                commitPendingProviderProfileDrafts()
-                viewModel.selectProviderProfile(id)
-                syncAIDraftsFromSettings()
-            }
         }
     }
 

@@ -467,6 +467,7 @@ public final class AppViewModel: ObservableObject {
         if availableModels.isEmpty || !availableModels.contains(snapshot.settings.providerConfig.model) {
             availableModels = Array(Set(snapshot.settings.providerConfig.preset.fallbackModels + [snapshot.settings.providerConfig.model])).sorted()
         }
+        migrateProviderKeychainReferencesIfNeeded()
         refreshActiveProviderKeyStatus()
         // 任何 reload (來自本地寫入或 pull 後 merge) 都排一個 debounce push,
         // 避免快照改了卻忘記上雲。
@@ -923,12 +924,21 @@ public final class AppViewModel: ObservableObject {
         apiKeyInput = ""
     }
 
+    /// keychain reference 新制:一律等於 profile id。舊資料(含 iCloud 同步
+    /// 回來的 profile)在每次 reload 檢查一次,有不一致就把既有 key 搬到新
+    /// reference,搬完才刪舊項目;失敗會留在舊 reference 等下次重試。
+    private func migrateProviderKeychainReferencesIfNeeded() {
+        guard let migrated = ProviderKeychainMigration.migrate(settings: snapshot.settings, secretStore: secretStore) else { return }
+        applyProviderSettings(migrated)
+    }
+
     func createProviderProfile() {
         var settings = snapshot.settings
         settings.normalizeProviderProfiles()
+        let id = UUID()
         var config = ProviderConfig()
-        config.apiKeyKeychainRef = uniqueKeychainReference(base: config.preset.rawValue, in: settings.providerProfiles)
-        let profile = ProviderProfile(name: "New \(config.preset.displayName)", config: config)
+        config.apiKeyKeychainRef = ProviderProfile.keychainReference(for: id)
+        let profile = ProviderProfile(id: id, name: "New \(config.preset.displayName)", config: config)
         settings.providerProfiles.append(profile)
         settings.activeProviderProfileId = profile.id
         settings.normalizeProviderProfiles()
@@ -944,7 +954,7 @@ public final class AppViewModel: ObservableObject {
         var copy = source
         copy.id = UUID()
         copy.name = "\(source.name) Copy"
-        copy.config.apiKeyKeychainRef = uniqueKeychainReference(base: source.config.apiKeyKeychainRef, in: settings.providerProfiles)
+        copy.config.apiKeyKeychainRef = copy.keychainReference
         copy.lastVerifiedAt = nil
         copy.lastVerificationStatus = .missingKey
         copy.lastVerificationMessage = "複製 profile 後需要貼上 API key 並重新驗證。"
@@ -997,7 +1007,6 @@ public final class AppViewModel: ObservableObject {
             profile.config.preset = preset
             profile.config.baseURL = preset.defaultBaseURL
             profile.config.model = preset.defaultModel
-            profile.config.apiKeyKeychainRef = uniqueKeychainReference(base: preset.rawValue, in: snapshot.settings.providerProfiles, excluding: profile.id)
             profile.config.structuredOutput = preset.defaultStructuredOutput
         }
         availableModels = preset.fallbackModels
@@ -1155,24 +1164,6 @@ public final class AppViewModel: ObservableObject {
         snapshot.settings = normalized
         updateSettings(normalized)
         refreshActiveProviderKeyStatus()
-    }
-
-    private func uniqueKeychainReference(base: String, in profiles: [ProviderProfile], excluding excludedId: UUID? = nil) -> String {
-        let trimmed = base.trimmingCharacters(in: .whitespacesAndNewlines)
-        let prefix = trimmed.isEmpty ? "provider" : trimmed
-        let existing = Set(profiles.compactMap { profile in
-            profile.id == excludedId ? nil : profile.config.apiKeyKeychainRef
-        })
-        if !existing.contains(prefix) {
-            return prefix
-        }
-        for index in 2...999 {
-            let candidate = "\(prefix)-\(index)"
-            if !existing.contains(candidate) {
-                return candidate
-            }
-        }
-        return "\(prefix)-\(UUID().uuidString.prefix(8))"
     }
 
     func markCurrentCard(_ status: CardStatus) {
