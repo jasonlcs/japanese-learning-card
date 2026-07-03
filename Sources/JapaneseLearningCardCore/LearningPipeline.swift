@@ -229,7 +229,7 @@ public actor LearningPipeline {
                 ]
             )
             do {
-                let document = try await crawler.crawl(source: source)
+                let document = try await crawlWithStageTagging(source: source)
                 await AIRequestLogStore.shared.appendEvent(
                     "source.crawled",
                     operation: "crawlSource",
@@ -333,7 +333,7 @@ public actor LearningPipeline {
         do {
             let snapshot = await store.read()
             let settings = snapshot.settings
-            let document = try await crawler.crawl(source: source)
+            let document = try await crawlWithStageTagging(source: source)
 
             // 內容與既有文件重複：不重存卡片，但仍視需要登記來源。
             if snapshot.documents.contains(where: { $0.contentHash == document.contentHash }) {
@@ -562,6 +562,27 @@ public actor LearningPipeline {
                 errorSummary: error.localizedDescription
             )
             return .failed(error.localizedDescription)
+        }
+    }
+
+    /// 爬取失敗時記 `crawler.failed` 並標上「網頁抓取」階段，
+    /// 讓 source.failed / flow.failed 的錯誤訊息能與 AI 請求失敗區分開來。
+    private func crawlWithStageTagging(source: Source) async throws -> CrawledDocument {
+        let startedAt = Date()
+        do {
+            return try await crawler.crawl(source: source)
+        } catch {
+            await AIRequestLogStore.shared.appendEvent(
+                "crawler.failed",
+                operation: "crawlSource",
+                input: [
+                    "sourceId": source.id.uuidString,
+                    "sourceURL": source.url.absoluteString
+                ],
+                durationMilliseconds: Self.durationMilliseconds(since: startedAt),
+                errorSummary: error.localizedDescription
+            )
+            throw AIStageError.wrap(error, stage: .webCrawl, operation: "crawlSource")
         }
     }
 
