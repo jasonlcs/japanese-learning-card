@@ -1,6 +1,9 @@
 #if canImport(AppKit)
 import AppKit
 #endif
+#if canImport(UIKit)
+import UIKit
+#endif
 import JapaneseLearningCardCore
 import SwiftUI
 
@@ -1190,6 +1193,8 @@ struct CopyableTextRow: View {
 struct CopyButton: View {
     var text: String
     var isProminent = false
+    @State private var didCopy = false
+    @State private var feedbackToken = 0
 
     var body: some View {
         Button {
@@ -1199,27 +1204,53 @@ struct CopyButton: View {
             #else
             UIPasteboard.general.string = text
             #endif
+            showCopyFeedback()
         } label: {
-            Image(systemName: "doc.on.doc")
-                .font(.system(size: isProminent ? 14 : 12, weight: .semibold))
-                .foregroundStyle(Color.cardBlue)
-                .frame(width: isProminent ? 30 : 18, height: isProminent ? 30 : 18)
-                .background {
-                    if isProminent {
-                        RoundedRectangle(cornerRadius: 7)
-                            .fill(Color.cardBlue.opacity(0.09))
-                    }
+            HStack(spacing: 5) {
+                Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: isProminent ? 13 : 12, weight: .bold))
+                    .symbolEffect(.bounce, value: didCopy)
+
+                if isProminent {
+                    Text(didCopy ? "已複製" : "複製")
+                        .font(.caption.weight(.bold))
+                        .lineLimit(1)
                 }
-                .overlay {
-                    if isProminent {
-                        RoundedRectangle(cornerRadius: 7)
-                            .stroke(Color.cardBlue.opacity(0.28), lineWidth: 1)
-                    }
+            }
+            .foregroundStyle(didCopy ? Color.cardGreen : Color.cardBlue)
+            .frame(width: isProminent ? 68 : 18, height: isProminent ? 30 : 18)
+            .background {
+                if isProminent {
+                    RoundedRectangle(cornerRadius: 7)
+                        .fill((didCopy ? Color.cardGreen : Color.cardBlue).opacity(didCopy ? 0.14 : 0.09))
                 }
+            }
+            .overlay {
+                if isProminent {
+                    RoundedRectangle(cornerRadius: 7)
+                        .stroke((didCopy ? Color.cardGreen : Color.cardBlue).opacity(didCopy ? 0.38 : 0.28), lineWidth: 1)
+                }
+            }
+            .scaleEffect(didCopy ? 1.04 : 1)
+            .animation(.spring(response: 0.24, dampingFraction: 0.72), value: didCopy)
         }
         .buttonStyle(.borderless)
         .contentShape(RoundedRectangle(cornerRadius: isProminent ? 7 : 4))
-        .help("複製")
+        .help(didCopy ? "已複製" : "複製")
+    }
+
+    private func showCopyFeedback() {
+        feedbackToken += 1
+        let token = feedbackToken
+        withAnimation(.spring(response: 0.24, dampingFraction: 0.72)) {
+            didCopy = true
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.15) {
+            guard feedbackToken == token else { return }
+            withAnimation(.easeOut(duration: 0.18)) {
+                didCopy = false
+            }
+        }
     }
 }
 
