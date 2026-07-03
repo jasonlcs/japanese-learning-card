@@ -80,8 +80,12 @@ public struct AIArticleDraft: Codable, Equatable, Sendable {
 
 public struct OpenAICompatibleLLMClient: LLMClient {
     public static let userAgent = "JapaneseLearningCard/0.1 (+https://github.com/jasonlcs/japanese-learning-card)"
-    private static let providerRequestTimeout: TimeInterval = 180
-    private static let providerResourceTimeout: TimeInterval = 240
+    // 實測 opencode.ai 等慢速 provider 成功回應常落在 120~170 秒，180 秒上限太貼近而頻繁逾時。
+    private static let providerRequestTimeout: TimeInterval = 300
+    private static let providerResourceTimeout: TimeInterval = 330
+    /// 逾時 / 5xx 等暫時性錯誤最多再重試 2 次（共 3 次嘗試）。
+    private static let maxRequestAttempts = 3
+    private static let retryDelaysSeconds: [TimeInterval] = [2, 5]
 
     private let secretStore: SecretStore
     private let session: URLSession
@@ -378,47 +382,108 @@ public struct OpenAICompatibleLLMClient: LLMClient {
     private func performLoggedRequest(_ request: URLRequest, operation: String, model: String) async throws -> Data {
         var request = request
         request.timeoutInterval = Self.providerRequestTimeout
-        let startedAt = Date()
         let requestBytes = request.httpBody?.count ?? 0
-        await Self.logRequestStart(
-            operation: operation,
-            request: request,
-            model: model,
-            requestBytes: requestBytes
-        )
 
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await session.data(for: request)
-        } catch {
+        var lastError: Error = LLMClientError.invalidResponse
+        for attempt in 1...Self.maxRequestAttempts {
+            let startedAt = Date()
+            await Self.logRequestStart(
+                operation: operation,
+                request: request,
+                model: model,
+                requestBytes: requestBytes
+            )
+
+            let data: Data
+            let response: URLResponse
+            do {
+                (data, response) = try await session.data(for: request)
+            } catch {
+                await Self.logRequest(
+                    operation: operation,
+                    request: request,
+                    model: model,
+                    startedAt: startedAt,
+                    statusCode: nil,
+                    requestBytes: requestBytes,
+                    responseData: Data(),
+                    errorSummary: Self.transportErrorSummary(error, model: model, timeout: request.timeoutInterval)
+                )
+                lastError = AIStageError(
+                    stage: .aiRequest,
+                    operation: operation,
+                    detail: Self.transportErrorSummary(error, model: model, timeout: request.timeoutInterval)
+                )
+                if Self.isRetryableTransportError(error), attempt < Self.maxRequestAttempts {
+                    await logRetry(operation: operation, attempt: attempt, reason: error.localizedDescription)
+                    continue
+                }
+                throw lastError
+            }
+
+            let statusCode = (response as? HTTPURLResponse)?.statusCode
+            let isHTTPError = statusCode.map { !(200..<300).contains($0) } ?? false
             await Self.logRequest(
                 operation: operation,
                 request: request,
                 model: model,
                 startedAt: startedAt,
-                statusCode: nil,
+                statusCode: statusCode,
                 requestBytes: requestBytes,
-                responseData: Data(),
-                errorSummary: error.localizedDescription
+                responseData: data,
+                errorSummary: isHTTPError ? Self.responseSnippet(from: data) : nil
             )
-            throw error
+            guard isHTTPError, let statusCode else {
+                return data
+            }
+            lastError = AIStageError(
+                stage: .aiRequest,
+                operation: operation,
+                detail: "供應商（\(model)）回傳 HTTP \(statusCode)：\(Self.responseSnippet(from: data))"
+            )
+            if Self.isRetryableStatusCode(statusCode), attempt < Self.maxRequestAttempts {
+                await logRetry(operation: operation, attempt: attempt, reason: "HTTP \(statusCode)")
+                continue
+            }
+            throw lastError
         }
+        throw lastError
+    }
 
-        let statusCode = (response as? HTTPURLResponse)?.statusCode
-        let isHTTPError = statusCode.map { !(200..<300).contains($0) } ?? false
-        await Self.logRequest(
+    /// 逾時、連線中斷等暫時性錯誤值得重試；憑證錯誤、URL 錯誤等重試無意義。
+    private static func isRetryableTransportError(_ error: Error) -> Bool {
+        guard let urlError = error as? URLError else { return false }
+        switch urlError.code {
+        case .timedOut, .networkConnectionLost, .cannotConnectToHost,
+             .dnsLookupFailed, .secureConnectionFailed, .cannotFindHost:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func isRetryableStatusCode(_ code: Int) -> Bool {
+        code == 408 || code == 429 || (500..<600).contains(code)
+    }
+
+    /// 把 URLError 翻成能區分階段的訊息；特別點名逾時是 AI 供應商，不是網頁抓取。
+    private static func transportErrorSummary(_ error: Error, model: String, timeout: TimeInterval) -> String {
+        if let urlError = error as? URLError, urlError.code == .timedOut {
+            return "AI 供應商（\(model)）在 \(Int(timeout)) 秒內未回應而逾時。此為 AI 端逾時，與網頁抓取無關。"
+        }
+        return error.localizedDescription
+    }
+
+    private func logRetry(operation: String, attempt: Int, reason: String) async {
+        let delay = Self.retryDelaysSeconds[min(attempt - 1, Self.retryDelaysSeconds.count - 1)]
+        await AIRequestLogStore.shared.appendEvent(
+            "llm.request.retry",
             operation: operation,
-            request: request,
-            model: model,
-            startedAt: startedAt,
-            statusCode: statusCode,
-            requestBytes: requestBytes,
-            responseData: data,
-            errorSummary: isHTTPError ? Self.responseSnippet(from: data) : nil
+            message: "Attempt \(attempt) failed; retrying in \(Int(delay))s.",
+            input: ["attempt": "\(attempt)", "maxAttempts": "\(Self.maxRequestAttempts)"],
+            errorSummary: reason
         )
-        try Self.validateHTTPResponse(response, data: data)
-        return data
+        try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
     }
 
     /// 依 provider 設定決定是否要求結構化輸出。集中在一處，避免每個請求各寫一份。
@@ -751,14 +816,6 @@ public struct OpenAICompatibleLLMClient: LLMClient {
     static func debugLog(_ message: @autoclosure () -> String) {
         guard ProcessInfo.processInfo.environment["JLC_DEBUG_LLM"] != nil else { return }
         log(message())
-    }
-
-    private static func validateHTTPResponse(_ response: URLResponse, data: Data) throws {
-        guard let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) else {
-            return
-        }
-        let snippet = responseSnippet(from: data)
-        throw LLMClientError.httpStatus(code: http.statusCode, body: snippet)
     }
 
     private static func responseSnippet(from data: Data) -> String {
