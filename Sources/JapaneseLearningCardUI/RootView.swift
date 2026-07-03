@@ -416,6 +416,7 @@ struct QuizView: View {
                                     systemImage: quiz.status == .correct ? "checkmark.seal" : "lightbulb"
                                 )
                                 .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(quiz.status == .correct ? Color.quizCorrect : Color.quizIncorrect)
                                 Text(quiz.explanationZh)
                                     .foregroundStyle(.secondary)
                                     .fixedSize(horizontal: false, vertical: true)
@@ -465,8 +466,8 @@ struct QuizView: View {
 
     private func buttonTint(index: Int, choice: String, quiz: QuizQuestion) -> Color? {
         guard quiz.status != .pending else { return optionAccent(index) }
-        if choice == quiz.correctAnswer { return .green }
-        if choice == quiz.selectedAnswer { return .red }
+        if choice == quiz.correctAnswer { return .quizCorrect }
+        if choice == quiz.selectedAnswer { return .quizIncorrect }
         return optionAccent(index)
     }
 }
@@ -1140,6 +1141,11 @@ private extension Color {
     static let cardOrange = Color(red: 0.96, green: 0.61, blue: 0.05)
     static let cardPink = Color(red: 0.93, green: 0.27, blue: 0.45)
     static let cardGreen = Color(red: 0.25, green: 0.68, blue: 0.28)
+
+    static let quizCorrect = Color(red: 0.18, green: 0.80, blue: 0.44)
+    static let quizIncorrect = Color(red: 0.91, green: 0.30, blue: 0.24)
+    static let quizCorrectBg = Color(red: 0.18, green: 0.80, blue: 0.44).opacity(0.12)
+    static let quizIncorrectBg = Color(red: 0.91, green: 0.30, blue: 0.24).opacity(0.12)
 }
 
 private extension String {
@@ -2489,6 +2495,10 @@ struct HistoryView: View {
                         }
                     }
                     .padding(.vertical, 3)
+                    .padding(.horizontal, 8)
+                    .background(quizResultBackground(quiz))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .padding(.horizontal, -8)
                 }
             }
         }
@@ -2528,13 +2538,26 @@ struct HistoryView: View {
     private func quizResultColor(_ quiz: QuizQuestion) -> Color {
         switch quiz.status {
         case .correct:
-            return .green
+            return .quizCorrect
         case .incorrect:
-            return .red
+            return .quizIncorrect
         case .skipped:
             return .secondary
         case .pending:
             return .secondary
+        }
+    }
+
+    private func quizResultBackground(_ quiz: QuizQuestion) -> Color {
+        switch quiz.status {
+        case .correct:
+            return .quizCorrectBg
+        case .incorrect:
+            return .quizIncorrectBg
+        case .skipped:
+            return .secondary.opacity(0.08)
+        case .pending:
+            return .clear
         }
     }
 }
