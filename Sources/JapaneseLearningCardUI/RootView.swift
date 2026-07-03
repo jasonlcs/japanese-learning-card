@@ -591,6 +591,9 @@ private struct StyledLearningCard: View {
 
     private var kind: LearningCardLayoutKind { LearningCardLayoutKind(card: card) }
     private var noteSections: CardNoteSections { CardNoteSections(note: card.grammarNoteZh) }
+    private var cardCopyText: String {
+        clipboardText(base: card.word, reading: card.reading)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -659,6 +662,9 @@ private struct StyledLearningCard: View {
                 )
 
             Spacer()
+
+            CopyButton(text: cardCopyText, isProminent: true)
+                .padding(.leading, 8)
         }
     }
 
@@ -779,8 +785,6 @@ private struct StyledLearningCard: View {
         // The romaji fallback leaves kana untouched, so only render it when it
         // actually differs from the reading we already displayed.
         let showRomanized = showReading && !romanized.isEmpty && romanized != trimmedReading
-        // 一顆按鈕同時複製詞條與讀音（讀音與詞條相同時只複製一份）。
-        let copyText = clipboardText(base: trimmedWord, reading: trimmedReading)
         let usesRuby = RubySupport.isUsable(card.wordRuby, for: trimmedWord)
         return VStack(spacing: 6) {
             if usesRuby {
@@ -834,11 +838,6 @@ private struct StyledLearningCard: View {
                 .scaleEffect(x: -1, y: 1)
                 .foregroundStyle(Color.cardBlue)
                 .padding(.trailing, 6)
-        }
-        .overlay(alignment: .topTrailing) {
-            CopyButton(text: copyText)
-                .padding(.top, 2)
-                .padding(.trailing, 10)
         }
     }
 
@@ -1190,6 +1189,7 @@ struct CopyableTextRow: View {
 /// 統一的「複製到剪貼簿」按鈕，整張卡只保留一顆。
 struct CopyButton: View {
     var text: String
+    var isProminent = false
 
     var body: some View {
         Button {
@@ -1201,8 +1201,24 @@ struct CopyButton: View {
             #endif
         } label: {
             Image(systemName: "doc.on.doc")
+                .font(.system(size: isProminent ? 14 : 12, weight: .semibold))
+                .foregroundStyle(Color.cardBlue)
+                .frame(width: isProminent ? 30 : 18, height: isProminent ? 30 : 18)
+                .background {
+                    if isProminent {
+                        RoundedRectangle(cornerRadius: 7)
+                            .fill(Color.cardBlue.opacity(0.09))
+                    }
+                }
+                .overlay {
+                    if isProminent {
+                        RoundedRectangle(cornerRadius: 7)
+                            .stroke(Color.cardBlue.opacity(0.28), lineWidth: 1)
+                    }
+                }
         }
         .buttonStyle(.borderless)
+        .contentShape(RoundedRectangle(cornerRadius: isProminent ? 7 : 4))
         .help("複製")
     }
 }
