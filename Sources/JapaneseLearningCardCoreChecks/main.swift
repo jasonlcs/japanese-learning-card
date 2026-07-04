@@ -790,23 +790,25 @@ struct CoreChecks {
         let preset = ProviderPreset.googleAIStudio
         expect(preset.defaultBaseURL.absoluteString == "https://generativelanguage.googleapis.com/v1beta/openai",
                "Google AI Studio preset should target the Gemini OpenAI-compatible endpoint")
-        expect(preset.defaultModel == "gemma-4-26b-a4b-it", "default model should be the free Gemma 4 model")
-        expect(preset.defaultStructuredOutput == .off, "Gemma preset should default response_format off")
-        expect(preset.usesCuratedModelList, "Google AI Studio should only offer its curated model list")
-        expect(preset.fallbackModels == ["gemma-4-26b-a4b-it", "gemma-4-31b-it"],
-               "Google AI Studio should offer only the two Gemma 4 models")
+        expect(preset.defaultModel == "gemini-3.5-flash", "default model should be Gemini 3.5 Flash")
+        expect(preset.defaultFastModel == "gemini-3.1-flash-lite", "default fast model should be Gemini 3.1 Flash-Lite")
+        expect(preset.defaultStructuredOutput == .off, "Gemini preset should default response_format off")
+        expect(!preset.usesCuratedModelList, "Google AI Studio should offer full model list")
+        expect(preset.fallbackModels == ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemma-4-26b-a4b-it", "gemma-4-31b-it"],
+               "Google AI Studio fallback models should include Gemini and Gemma models")
 
-        // 以選擇 preset 後的設定(model 取 preset 預設)組請求，應帶 Gemma 模型、不帶 response_format。
+        // 以選擇 preset 後的設定組請求，應帶 Gemini 模型、不帶 response_format。
         let settings = AppSettings(providerConfig: ProviderConfig(
             preset: .googleAIStudio,
             baseURL: preset.defaultBaseURL,
             model: preset.defaultModel,
+            fastModel: preset.defaultFastModel,
             structuredOutput: preset.defaultStructuredOutput
         ))
         let body = OpenAICompatibleLLMClient.articleRequestBody(theme: "旅行", jlptLevels: [.n2], settings: settings)
         let json = String(decoding: try JSONEncoder().encode(body), as: UTF8.self)
-        expect(body.model == "gemma-4-26b-a4b-it", "request should use the Gemma model")
-        expect(!json.contains("response_format"), "Gemma request should omit response_format by default")
+        expect(body.model == "gemini-3.5-flash", "request should use the Gemini 3.5 Flash model")
+        expect(!json.contains("response_format"), "Gemini request should omit response_format by default")
     }
 
     private static func pipelineGeneratesAIArticleAndCards() async throws {

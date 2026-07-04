@@ -197,7 +197,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         }
         request.httpBody = try JSONEncoder().encode(body)
 
-        let data = try await performLoggedRequest(request, operation: "generateRuby", model: settings.providerConfig.model)
+        let data = try await performLoggedRequest(request, operation: "generateRuby", model: settings.providerConfig.fastModel)
         Self.debugLog("ruby 回應原始 body：\n\(String(decoding: data, as: UTF8.self))")
         let content = try Self.extractContent(from: data)
         let results = try Self.decodeRubyBackfill(from: content, sourceCards: cards)
@@ -230,7 +230,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         }
         request.httpBody = try JSONEncoder().encode(body)
 
-        let data = try await performLoggedRequest(request, operation: "generateQuiz", model: settings.providerConfig.model)
+        let data = try await performLoggedRequest(request, operation: "generateQuiz", model: settings.providerConfig.fastModel)
         Self.debugLog("回應原始 body：\n\(String(decoding: data, as: UTF8.self))")
         let content = try Self.extractContent(from: data)
         let quizzes = try Self.decodeQuiz(from: content, cards: cards)
@@ -248,7 +248,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         }
 
         let body = ChatCompletionRequest(
-            model: settings.providerConfig.model,
+            model: settings.providerConfig.fastModel,
             messages: [
                 .init(role: "system", content: """
                 你是日文假名標註器。只輸出 JSON，不要 Markdown。
@@ -276,7 +276,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         }
         request.httpBody = try JSONEncoder().encode(body)
 
-        let data = try await performLoggedRequest(request, operation: "generateExampleReading", model: settings.providerConfig.model)
+        let data = try await performLoggedRequest(request, operation: "generateExampleReading", model: settings.providerConfig.fastModel)
         Self.debugLog("回應原始 body：\n\(String(decoding: data, as: UTF8.self))")
         let content = try Self.extractContent(from: data)
         let reading = try Self.decodeExampleReading(from: content)
@@ -573,7 +573,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
             """
         }.joined(separator: "\n")
         return ChatCompletionRequest(
-            model: settings.providerConfig.model,
+            model: settings.providerConfig.fastModel,
             messages: [
                 .init(role: "system", content: """
                 你是日文 ruby / furigana 標註器。只輸出 JSON，不要 Markdown。
@@ -638,7 +638,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         }.joined(separator: "\n")
 
         return ChatCompletionRequest(
-            model: settings.providerConfig.model,
+            model: settings.providerConfig.fastModel,
             messages: [
                 .init(role: "system", content: """
                 你是日文學習測驗老師。只輸出 JSON，不要 Markdown。

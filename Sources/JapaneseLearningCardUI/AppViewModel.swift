@@ -464,8 +464,8 @@ public final class AppViewModel: ObservableObject {
                 .sorted { $0.createdAt < $1.createdAt }
                 .first
         }
-        if availableModels.isEmpty || !availableModels.contains(snapshot.settings.providerConfig.model) {
-            availableModels = Array(Set(snapshot.settings.providerConfig.preset.fallbackModels + [snapshot.settings.providerConfig.model])).sorted()
+        if availableModels.isEmpty || !availableModels.contains(snapshot.settings.providerConfig.model) || !availableModels.contains(snapshot.settings.providerConfig.fastModel) {
+            availableModels = Array(Set(snapshot.settings.providerConfig.preset.fallbackModels + [snapshot.settings.providerConfig.model, snapshot.settings.providerConfig.fastModel])).sorted()
         }
         migrateProviderKeychainReferencesIfNeeded()
         refreshActiveProviderKeyStatus()
@@ -920,7 +920,7 @@ public final class AppViewModel: ObservableObject {
         settings.activeProviderProfileId = id
         settings.normalizeProviderProfiles()
         applyProviderSettings(settings)
-        availableModels = Array(Set(settings.providerConfig.preset.fallbackModels + [settings.providerConfig.model])).sorted()
+        availableModels = Array(Set(settings.providerConfig.preset.fallbackModels + [settings.providerConfig.model, settings.providerConfig.fastModel])).sorted()
         apiKeyInput = ""
     }
 
@@ -981,7 +981,7 @@ public final class AppViewModel: ObservableObject {
         }
         settings.normalizeProviderProfiles()
         applyProviderSettings(settings)
-        availableModels = Array(Set(settings.providerConfig.preset.fallbackModels + [settings.providerConfig.model])).sorted()
+        availableModels = Array(Set(settings.providerConfig.preset.fallbackModels + [settings.providerConfig.model, settings.providerConfig.fastModel])).sorted()
         apiKeyInput = ""
     }
 
@@ -1007,6 +1007,7 @@ public final class AppViewModel: ObservableObject {
             profile.config.preset = preset
             profile.config.baseURL = preset.defaultBaseURL
             profile.config.model = preset.defaultModel
+            profile.config.fastModel = preset.defaultFastModel
             profile.config.structuredOutput = preset.defaultStructuredOutput
         }
         availableModels = preset.fallbackModels
@@ -1067,6 +1068,11 @@ public final class AppViewModel: ObservableObject {
                        let firstModel = self.availableModels.first {
                         settings.providerConfig.model = firstModel
                         settings.providerProfiles[activeIndex].config.model = firstModel
+                    }
+                    if !self.availableModels.contains(settings.providerConfig.fastModel),
+                       let firstModel = self.availableModels.first {
+                        settings.providerConfig.fastModel = firstModel
+                        settings.providerProfiles[activeIndex].config.fastModel = firstModel
                     }
                     settings.providerProfiles[activeIndex].lastVerifiedAt = Date()
                     settings.providerProfiles[activeIndex].lastVerificationStatus = .success

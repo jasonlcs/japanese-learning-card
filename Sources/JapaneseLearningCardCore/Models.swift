@@ -176,7 +176,7 @@ public enum ProviderPreset: String, Codable, CaseIterable, Identifiable, Sendabl
         case .openCodeZen:
             "OpenCode Zen"
         case .googleAIStudio:
-            "Google AI Studio (Gemma)"
+            "Google AI Studio (Gemini)"
         case .custom:
             "Custom"
         }
@@ -207,8 +207,22 @@ public enum ProviderPreset: String, Codable, CaseIterable, Identifiable, Sendabl
         case .openCodeZen:
             "deepseek-v4-flash"
         case .googleAIStudio:
-            // Gemma 4 小而快、有免費額度(A4B = 活躍約 4B 參數)。
-            "gemma-4-26b-a4b-it"
+            "gemini-3.5-flash"
+        case .custom:
+            "gpt-4.1-mini"
+        }
+    }
+
+    public var defaultFastModel: String {
+        switch self {
+        case .openAI:
+            "gpt-4.1-mini"
+        case .openCodeGo:
+            "glm-5.2"
+        case .openCodeZen:
+            "deepseek-v4-flash"
+        case .googleAIStudio:
+            "gemini-3.1-flash-lite"
         case .custom:
             "gpt-4.1-mini"
         }
@@ -219,7 +233,7 @@ public enum ProviderPreset: String, Codable, CaseIterable, Identifiable, Sendabl
     /// 免費額度寬鬆的 Gemma；驗證時仍會打 `/models` 確認 API key 有效。
     public var usesCuratedModelList: Bool {
         switch self {
-        case .googleAIStudio: true
+        case .googleAIStudio: false
         case .openAI, .openCodeGo, .openCodeZen, .custom: false
         }
     }
@@ -233,10 +247,7 @@ public enum ProviderPreset: String, Codable, CaseIterable, Identifiable, Sendabl
         case .openCodeZen:
             ["deepseek-v4-flash", "deepseek-v4-pro", "minimax-m2.7", "minimax-m2.5", "glm-5.2", "glm-5.1", "kimi-k2.6", "big-pickle"]
         case .googleAIStudio:
-            // 只列 Gemma：免費額度寬鬆(15 RPM、token 無上限、每日 1500 次)。
-            // 不放 Gemini Flash——其免費額度每日僅約 20 次，生卡片很快就爆。
-            // 想用其他模型可在「驗證並儲存」後從 /models 抓到的清單選。
-            ["gemma-4-26b-a4b-it", "gemma-4-31b-it"]
+            ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemma-4-26b-a4b-it", "gemma-4-31b-it"]
         case .custom:
             [defaultModel]
         }
@@ -393,6 +404,7 @@ public struct ProviderConfig: Codable, Equatable, Sendable {
     public var preset: ProviderPreset
     public var baseURL: URL
     public var model: String
+    public var fastModel: String
     public var apiKeyKeychainRef: String
     public var organization: String?
     public var project: String?
@@ -403,6 +415,7 @@ public struct ProviderConfig: Codable, Equatable, Sendable {
         preset: ProviderPreset = .openAI,
         baseURL: URL = URL(string: "https://api.openai.com/v1")!,
         model: String = "gpt-4.1-mini",
+        fastModel: String = "gpt-4.1-mini",
         apiKeyKeychainRef: String = "default",
         organization: String? = nil,
         project: String? = nil,
@@ -412,6 +425,7 @@ public struct ProviderConfig: Codable, Equatable, Sendable {
         self.preset = preset
         self.baseURL = baseURL
         self.model = model
+        self.fastModel = fastModel
         self.apiKeyKeychainRef = apiKeyKeychainRef
         self.organization = organization
         self.project = project
@@ -424,6 +438,7 @@ public struct ProviderConfig: Codable, Equatable, Sendable {
         self.preset = try container.decodeIfPresent(ProviderPreset.self, forKey: .preset) ?? .openAI
         self.baseURL = try container.decodeIfPresent(URL.self, forKey: .baseURL) ?? preset.defaultBaseURL
         self.model = try container.decodeIfPresent(String.self, forKey: .model) ?? preset.defaultModel
+        self.fastModel = try container.decodeIfPresent(String.self, forKey: .fastModel) ?? container.decodeIfPresent(String.self, forKey: .model) ?? preset.defaultFastModel
         self.apiKeyKeychainRef = try container.decodeIfPresent(String.self, forKey: .apiKeyKeychainRef) ?? "default"
         self.organization = try container.decodeIfPresent(String.self, forKey: .organization)
         self.project = try container.decodeIfPresent(String.self, forKey: .project)
