@@ -527,8 +527,18 @@ public struct ArticleParagraph: Codable, Equatable, Sendable {
     }
 }
 
+/// GeneratedArticle 的種類。歷史資料沒有這個欄位，解碼時以
+/// 「有沒有 paragraphs」推斷（短文一定有段落，AI 擷取文章沒有）。
+public enum GeneratedArticleKind: String, Codable, Sendable {
+    /// AI 產生文章並擷取單字卡（造卡用）。
+    case extraction
+    /// 以既有單字卡產生的複習短文。
+    case essay
+}
+
 public struct GeneratedArticle: Codable, Identifiable, Equatable, Sendable {
     public let id: UUID
+    public var kind: GeneratedArticleKind
     public var theme: String
     public var jlptLevels: [JLPTLevel]
     public var title: String
@@ -546,6 +556,7 @@ public struct GeneratedArticle: Codable, Identifiable, Equatable, Sendable {
 
     public init(
         id: UUID = UUID(),
+        kind: GeneratedArticleKind = .extraction,
         theme: String,
         jlptLevels: [JLPTLevel],
         title: String,
@@ -562,6 +573,7 @@ public struct GeneratedArticle: Codable, Identifiable, Equatable, Sendable {
         titleRuby: [RubySegment]? = nil
     ) {
         self.id = id
+        self.kind = kind
         self.theme = theme
         self.jlptLevels = jlptLevels
         self.title = title
@@ -595,6 +607,19 @@ public struct GeneratedArticle: Codable, Identifiable, Equatable, Sendable {
         self.vocabularySource = try container.decodeIfPresent(String.self, forKey: .vocabularySource)
         self.vocabularyWords = try container.decodeIfPresent([String].self, forKey: .vocabularyWords)
         self.titleRuby = try container.decodeIfPresent([RubySegment].self, forKey: .titleRuby)
+        // 舊資料沒有 kind；未知的新值也退回以 paragraphs 推斷。
+        self.kind = (try? container.decodeIfPresent(GeneratedArticleKind.self, forKey: .kind))
+            .flatMap { $0 } ?? (self.paragraphs != nil ? .essay : .extraction)
+    }
+
+    /// 顯示、注音與匯出用的段落。擷取文章還沒有 paragraphs 時，
+    /// 以換行把 plainText 切成純日文段落（translation 留空）。
+    public var resolvedParagraphs: [ArticleParagraph] {
+        if let paragraphs, !paragraphs.isEmpty { return paragraphs }
+        return plainText
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { ArticleParagraph(japanese: $0.trimmingCharacters(in: .whitespaces), translation: "") }
+            .filter { !$0.japanese.isEmpty }
     }
 }
 

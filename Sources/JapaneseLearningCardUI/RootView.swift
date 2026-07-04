@@ -2510,7 +2510,7 @@ struct HistoryView: View {
                 } label: {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(alignment: .center, spacing: 6) {
-                            if article.paragraphs != nil {
+                            if article.kind == .essay {
                                 Label("AI 短文", systemImage: "doc.text")
                                     .font(.system(size: 9, weight: .bold))
                                     .padding(.horizontal, 5)
@@ -2931,6 +2931,19 @@ struct AIEssayView: View {
                             Text("產生的短文結果")
                                 .font(.headline)
                             Spacer()
+                            if viewModel.articleNeedsRubyAnnotation(article) {
+                                Button {
+                                    viewModel.annotateArticleRuby(articleId: article.id)
+                                } label: {
+                                    if viewModel.isAnnotatingArticleRuby {
+                                        Label("標註中...", systemImage: "hourglass")
+                                    } else {
+                                        Label("重新標註注音", systemImage: "character.phonetic")
+                                    }
+                                }
+                                .disabled(viewModel.isAnnotatingArticleRuby)
+                                .help("注音產生失敗時，可重新標註漢字讀音")
+                            }
                             Menu {
                                 Button("匯出為 PDF (.pdf)") {
                                     viewModel.exportEssay(article: article, format: "pdf")
@@ -3309,6 +3322,11 @@ struct AIArticleDetailView: View {
     @ObservedObject var viewModel: AppViewModel
     @Environment(\.dismiss) private var dismiss
 
+    /// 補標注音後 snapshot 會更新，這裡改讀最新版本，讓畫面立即反映。
+    private var liveArticle: GeneratedArticle {
+        viewModel.snapshot.generatedArticles.first(where: { $0.id == article.id }) ?? article
+    }
+
     private var relatedCards: [LearningCard] {
         viewModel.snapshot.cards.filter { $0.sourceUrl.absoluteString.contains(article.contentHash.prefix(12).description) }
     }
@@ -3318,43 +3336,54 @@ struct AIArticleDetailView: View {
             HStack {
                 VStack(alignment: .leading) {
                     RubyText(
-                        segments: article.titleRuby ?? [],
-                        fallback: article.title,
+                        segments: liveArticle.titleRuby ?? [],
+                        fallback: liveArticle.title,
                         baseFont: .title2.weight(.semibold),
                         rubyFont: .caption2,
                         baseColor: .primary,
                         rubyColor: .secondary
                     )
-                    Text("主題：\(article.theme)")
+                    Text("主題：\(liveArticle.theme)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                if article.paragraphs != nil {
-                    Menu {
-                        Button("匯出為 PDF (.pdf)") {
-                            viewModel.exportEssay(article: article, format: "pdf")
-                        }
-                        Button("匯出為 PNG 圖片 (.png)") {
-                            viewModel.exportEssay(article: article, format: "png")
-                        }
-                        Button("匯出為 Word 文檔 (.doc)") {
-                            viewModel.exportEssay(article: article, format: "word")
-                        }
+                if viewModel.articleNeedsRubyAnnotation(liveArticle) {
+                    Button {
+                        viewModel.annotateArticleRuby(articleId: article.id)
                     } label: {
-                        Label("匯出", systemImage: "square.and.arrow.up")
-                    }
-                    #if !os(macOS)
-                    .sheet(isPresented: Binding(
-                        get: { viewModel.exportedEssayURL != nil },
-                        set: { if !$0 { viewModel.exportedEssayURL = nil } }
-                    )) {
-                        if let url = viewModel.exportedEssayURL {
-                            ShareLink(item: url, message: Text("AI 產生日文短文：\(article.title)"))
+                        if viewModel.isAnnotatingArticleRuby {
+                            Label("標註中...", systemImage: "hourglass")
+                        } else {
+                            Label("重新標註注音", systemImage: "character.phonetic")
                         }
                     }
-                    #endif
+                    .disabled(viewModel.isAnnotatingArticleRuby)
+                    .help("為缺少注音的段落重新標註漢字讀音")
                 }
+                Menu {
+                    Button("匯出為 PDF (.pdf)") {
+                        viewModel.exportEssay(article: liveArticle, format: "pdf")
+                    }
+                    Button("匯出為 PNG 圖片 (.png)") {
+                        viewModel.exportEssay(article: liveArticle, format: "png")
+                    }
+                    Button("匯出為 Word 文檔 (.docx)") {
+                        viewModel.exportEssay(article: liveArticle, format: "word")
+                    }
+                } label: {
+                    Label("匯出", systemImage: "square.and.arrow.up")
+                }
+                #if !os(macOS)
+                .sheet(isPresented: Binding(
+                    get: { viewModel.exportedEssayURL != nil },
+                    set: { if !$0 { viewModel.exportedEssayURL = nil } }
+                )) {
+                    if let url = viewModel.exportedEssayURL {
+                        ShareLink(item: url, message: Text("AI 產生日文文章：\(article.title)"))
+                    }
+                }
+                #endif
                 Button {
                     viewModel.copyArticle(article)
                 } label: {
@@ -3374,9 +3403,9 @@ struct AIArticleDetailView: View {
 
             GroupBox("文章本文") {
                 ScrollView {
-                    let paras = article.paragraphs ?? []
+                    let paras = liveArticle.paragraphs ?? []
                     if paras.isEmpty {
-                        Text(article.plainText)
+                        Text(liveArticle.plainText)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .textSelection(.enabled)
                             .padding(.vertical, 4)
@@ -3393,11 +3422,13 @@ struct AIArticleDetailView: View {
                                         rubyColor: .secondary
                                     )
                                     .frame(maxWidth: .infinity, alignment: .leading)
-                                    
-                                    Text(para.translation)
-                                        .font(.subheadline)
-                                        .foregroundStyle(.secondary)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                                    if !para.translation.isEmpty {
+                                        Text(para.translation)
+                                            .font(.subheadline)
+                                            .foregroundStyle(.secondary)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                    }
                                 }
                                 .padding(.vertical, 4)
                             }

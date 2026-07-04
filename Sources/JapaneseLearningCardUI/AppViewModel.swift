@@ -104,6 +104,7 @@ public final class AppViewModel: ObservableObject {
     @Published public var lastGeneratedEssay: GeneratedArticle? = nil
     @Published public var exportedEssayURL: URL? = nil
     @Published public var essayGenerationError: String? = nil
+    @Published public var isAnnotatingArticleRuby = false
     @Published public var essayCurrentStep: EssayGenerationStep? = nil
     private var essayGenerationTask: Task<Void, Never>?
     @Published private(set) var visibleCardTimerState = VisibleCardTimerState(
@@ -1877,6 +1878,7 @@ public final class AppViewModel: ObservableObject {
                 let contentHash = ContentHash.sha256(plainText)
                 
                 let article = GeneratedArticle(
+                    kind: .essay,
                     theme: userEssayPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "生活化主題" : userEssayPrompt,
                     jlptLevels: levels,
                     title: payload.title,
@@ -1930,6 +1932,72 @@ public final class AppViewModel: ObservableObject {
         statusMessage = "短文產生已取消"
     }
 
+    /// 文章任一段落（或標題）缺少可用注音時為 true，供 UI 顯示「重新標註注音」。
+    /// 擷取文章尚未段落化時以 resolvedParagraphs 判斷，標註後會一併補上段落。
+    public func articleNeedsRubyAnnotation(_ article: GeneratedArticle) -> Bool {
+        let paragraphs = article.resolvedParagraphs
+        guard !paragraphs.isEmpty else { return false }
+        if RubySupport.validated(article.titleRuby, for: article.title).isEmpty && !article.title.isEmpty {
+            return true
+        }
+        return paragraphs.contains { RubySupport.validated($0.ruby, for: $0.japanese).isEmpty }
+    }
+
+    /// 補標既有文章的漢字注音（短文產生時失敗降級、或擷取文章／舊資料沒有注音時使用）。
+    public func annotateArticleRuby(articleId: UUID) {
+        guard !isAnnotatingArticleRuby else { return }
+        guard let article = snapshot.generatedArticles.first(where: { $0.id == articleId }) else { return }
+        let paragraphs = article.resolvedParagraphs
+        guard !paragraphs.isEmpty else { return }
+
+        isAnnotatingArticleRuby = true
+        statusMessage = "正在標註漢字讀音..."
+
+        Task {
+            do {
+                var textsToAnnotate = [article.title]
+                textsToAnnotate.append(contentsOf: paragraphs.map(\.japanese))
+                let rubyResults = try await providerClient.generateRubyForTexts(
+                    texts: textsToAnnotate,
+                    settings: snapshot.settings
+                )
+
+                let titleRuby = RubySupport.validated(rubyResults.first, for: article.title)
+                var updatedParagraphs = paragraphs
+                for index in updatedParagraphs.indices {
+                    let ruby = (index + 1 < rubyResults.count) ? rubyResults[index + 1] : []
+                    if !RubySupport.validated(ruby, for: updatedParagraphs[index].japanese).isEmpty {
+                        updatedParagraphs[index].ruby = ruby
+                    }
+                }
+
+                let finalParagraphs = updatedParagraphs
+                try await store.update { state in
+                    guard let index = state.generatedArticles.firstIndex(where: { $0.id == articleId }) else { return }
+                    if !titleRuby.isEmpty {
+                        state.generatedArticles[index].titleRuby = titleRuby
+                    }
+                    state.generatedArticles[index].paragraphs = finalParagraphs
+                    state.generatedArticles[index].updatedAt = Date()
+                }
+                await reload()
+
+                await MainActor.run {
+                    if self.lastGeneratedEssay?.id == articleId {
+                        self.lastGeneratedEssay = self.snapshot.generatedArticles.first(where: { $0.id == articleId })
+                    }
+                    self.isAnnotatingArticleRuby = false
+                    self.statusMessage = "注音標註完成"
+                }
+            } catch {
+                await MainActor.run {
+                    self.isAnnotatingArticleRuby = false
+                    self.statusMessage = "注音標註失敗：\(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
     public func exportEssay(article: GeneratedArticle, format: String) {
         let title = article.title
         let fileExtension: String
@@ -1974,7 +2042,7 @@ public final class AppViewModel: ObservableObject {
     private func performWriteEssay(article: GeneratedArticle, to url: URL, format: String) throws {
         let title = article.title
         let theme = article.theme
-        let paragraphs = article.paragraphs ?? [ArticleParagraph(japanese: article.plainText, translation: "")]
+        let paragraphs = article.resolvedParagraphs
         if format == "word" {
             let contentTypes = """
             <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -2033,10 +2101,12 @@ public final class AppViewModel: ObservableObject {
                         baseFont: .system(size: 16),
                         rubyFont: .system(size: 9)
                     )
-                    
-                    Text(para.translation)
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
+
+                    if !para.translation.isEmpty {
+                        Text(para.translation)
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 .padding(.bottom, 12)
             }
@@ -2114,8 +2184,9 @@ extension AppViewModel {
                 <w:spacing w:after="240"/>
               </w:pPr>
         """
-        if let titleRuby = titleRuby, !titleRuby.isEmpty {
-            for segment in titleRuby {
+        let usableTitleRuby = RubySupport.validated(titleRuby, for: title)
+        if !usableTitleRuby.isEmpty {
+            for segment in usableTitleRuby {
                 xml += buildRunXML(segment: segment, baseSize: 36, rubySize: 18, bold: true)
             }
         } else {
@@ -2155,25 +2226,34 @@ extension AppViewModel {
                     <w:spacing w:before="240" w:after="120" w:line="360" w:lineRule="auto"/>
                   </w:pPr>
             """
-            for segment in para.ruby {
-                xml += buildRunXML(segment: segment, baseSize: 24, rubySize: 12)
+            // 注音資料缺漏或與原文對不上時退回純日文，避免整行消失。
+            let usableRuby = RubySupport.validated(para.ruby, for: para.japanese)
+            if !usableRuby.isEmpty {
+                for segment in usableRuby {
+                    xml += buildRunXML(segment: segment, baseSize: 24, rubySize: 12)
+                }
+            } else {
+                xml += buildRunXML(segment: RubySegment(base: para.japanese), baseSize: 24, rubySize: 12)
             }
             xml += "</w:p>"
-            
-            xml += """
-                <w:p>
-                  <w:pPr>
-                    <w:spacing w:before="60" w:after="240"/>
-                  </w:pPr>
-                  <w:r>
-                    <w:rPr>
-                      <w:sz w:val="20"/>
-                      <w:color w:val="555555"/>
-                    </w:rPr>
-                    <w:t>\(escapeXML(para.translation))</w:t>
-                  </w:r>
-                </w:p>
-            """
+
+            // 擷取文章的段落沒有翻譯，略過空的翻譯段落。
+            if !para.translation.trimmingCharacters(in: .whitespaces).isEmpty {
+                xml += """
+                    <w:p>
+                      <w:pPr>
+                        <w:spacing w:before="60" w:after="240"/>
+                      </w:pPr>
+                      <w:r>
+                        <w:rPr>
+                          <w:sz w:val="20"/>
+                          <w:color w:val="555555"/>
+                        </w:rPr>
+                        <w:t>\(escapeXML(para.translation))</w:t>
+                      </w:r>
+                    </w:p>
+                """
+            }
         }
         
         xml += """
