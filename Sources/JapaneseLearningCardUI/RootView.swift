@@ -2386,7 +2386,7 @@ struct HistoryView: View {
     @State private var selectedArticle: GeneratedArticle?
 
     enum HistoryMode: String, CaseIterable, Identifiable {
-        case articles = "AI 文章"
+        case articles = "AI 文章與短文"
         case cards = "複習卡片"
         case quizzes = "考試紀錄"
         case database = "資料庫"
@@ -2453,11 +2453,31 @@ struct HistoryView: View {
                     selectedArticle = article
                 } label: {
                     VStack(alignment: .leading, spacing: 4) {
-                        HStack {
+                        HStack(alignment: .center, spacing: 6) {
+                            if article.paragraphs != nil {
+                                Label("AI 短文", systemImage: "doc.text")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 2)
+                                    .background(Color.blue.opacity(0.12))
+                                    .foregroundStyle(Color.blue)
+                                    .cornerRadius(4)
+                            } else {
+                                Label("AI 擷取", systemImage: "sparkles.rectangle.stack")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 2)
+                                    .background(Color.green.opacity(0.12))
+                                    .foregroundStyle(Color.green)
+                                    .cornerRadius(4)
+                            }
+                            
                             Text(article.title.isEmpty ? article.theme : article.title)
                                 .font(.headline)
                                 .lineLimit(1)
+                            
                             Spacer()
+                            
                             Text(article.generatedAt.formatted(date: .numeric, time: .shortened))
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
@@ -2483,7 +2503,7 @@ struct HistoryView: View {
         }
         .overlay {
             if viewModel.snapshot.generatedArticles.isEmpty {
-                ContentUnavailableView("還沒有 AI 文章", systemImage: "doc.text")
+                ContentUnavailableView("還沒有 AI 文章與短文", systemImage: "doc.text")
             }
         }
     }
@@ -2746,17 +2766,65 @@ struct AIEssayView: View {
                 HStack {
                     Spacer()
                     if viewModel.isGeneratingEssay {
-                        VStack(spacing: 8) {
-                            ProgressView()
-                            Text(viewModel.essayGenerationProgress)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                        VStack(spacing: 16) {
+                            if let currentStep = viewModel.essayCurrentStep {
+                                HStack(spacing: 8) {
+                                    ForEach(EssayGenerationStep.allCases, id: \.self) { step in
+                                        let isCurrent = step == currentStep
+                                        let isCompleted = step.rawValue < currentStep.rawValue
+                                        
+                                        VStack(spacing: 6) {
+                                            ZStack {
+                                                Circle()
+                                                    .fill(isCompleted ? Color.green : (isCurrent ? Color.accentColor : Color.secondary.opacity(0.2)))
+                                                    .frame(width: 24, height: 24)
+                                                
+                                                if isCompleted {
+                                                    Image(systemName: "checkmark")
+                                                        .font(.system(size: 11, weight: .bold))
+                                                        .foregroundStyle(.white)
+                                                } else {
+                                                    Text("\(step.rawValue + 1)")
+                                                        .font(.system(size: 11, weight: .bold))
+                                                        .foregroundStyle(isCurrent ? .white : .secondary)
+                                                }
+                                            }
+                                            
+                                            Text(step.title)
+                                                .font(.caption2)
+                                                .foregroundStyle(isCurrent ? .primary : .secondary)
+                                        }
+                                        
+                                        if step != .done {
+                                            Rectangle()
+                                                .fill(isCompleted ? Color.green : Color.secondary.opacity(0.2))
+                                                .frame(height: 2)
+                                                .frame(maxWidth: .infinity)
+                                                .padding(.bottom, 22)
+                                        }
+                                    }
+                                }
+                                .padding(.horizontal, 8)
+                            }
+                            
+                            HStack(spacing: 8) {
+                                ProgressView()
+                                    .scaleEffect(0.8)
+                                Text(viewModel.essayGenerationProgress)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            
                             Button("取消產生") {
                                 viewModel.cancelEssayGeneration()
                             }
                             .buttonStyle(.bordered)
                             .tint(.red)
+                            .controlSize(.small)
                         }
+                        .padding()
+                        .background(Color.secondary.opacity(0.08))
+                        .cornerRadius(12)
                         .frame(maxWidth: .infinity)
                     } else {
                         Button {
