@@ -49,7 +49,11 @@ public struct RootView: View {
                 Picker("", selection: $viewModel.selectedTab) {
                     Label("卡片", systemImage: "rectangle.stack").tag(0)
                     Label("考題", systemImage: "checklist").tag(2)
+                    // 造卡（AI 文章／短文／手動造卡）屬於內容產生，只在 macOS 提供；
+                    // iOS 專注學習與同步，卡片由 Mac 產生後經 CloudKit 同步過來。
+                    #if os(macOS)
                     Label("造卡", systemImage: "sparkles.rectangle.stack").tag(1)
+                    #endif
                     Label("設定", systemImage: "gearshape").tag(4)
                     Label("歷史", systemImage: "clock").tag(5)
                 }
@@ -83,8 +87,10 @@ public struct RootView: View {
                 if viewModel.selectedTab != 0 {
                     Group {
                         switch viewModel.selectedTab {
+                        #if os(macOS)
                         case 1:
                             CardMakerView(viewModel: viewModel)
+                        #endif
                         case 2:
                             QuizView(viewModel: viewModel)
                         case 4:
@@ -365,17 +371,26 @@ struct QuizView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("考題")
                         .font(.title2.weight(.semibold))
+                    #if os(macOS)
                     Text("由 AI 根據已產生的學習卡出題，作答後顯示解析。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    #else
+                    Text("考題在 Mac 版產生，透過 iCloud 同步到這裡作答。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    #endif
                 }
                 Spacer()
+                // AI 出題屬於內容產生，只在 macOS 提供。
+                #if os(macOS)
                 Button {
                     viewModel.generateQuiz()
                 } label: {
                     Label(viewModel.isGeneratingQuiz ? "出題中..." : "AI 出題", systemImage: "sparkles")
                 }
                 .disabled(viewModel.isGeneratingQuiz)
+                #endif
             }
 
             if let quiz = viewModel.currentQuiz {
@@ -445,7 +460,7 @@ struct QuizView: View {
                 ContentUnavailableView(
                     "還沒有待作答考題",
                     systemImage: "checklist",
-                    description: Text("先按 AI 出題，系統會從已儲存的學習卡產生選擇題。")
+                    description: quizEmptyDescription
                 )
                 Spacer()
             }
@@ -457,6 +472,14 @@ struct QuizView: View {
             }
         }
         .padding()
+    }
+
+    private var quizEmptyDescription: Text {
+        #if os(macOS)
+        return Text("先按 AI 出題，系統會從已儲存的學習卡產生選擇題。")
+        #else
+        return Text("在 Mac 版按 AI 出題產生考題，同步後就會出現在這裡。")
+        #endif
     }
 
     private func optionLabel(_ index: Int) -> String {
@@ -496,6 +519,7 @@ struct CardView: View {
                     nextCard: viewModel.showNextCard
                 )
             } else {
+                #if os(macOS)
                 ContentUnavailableView(
                     "還沒有學習卡",
                     systemImage: "sparkles",
@@ -507,6 +531,20 @@ struct CardView: View {
                     Label(viewModel.isRefreshing ? "更新中..." : "立即更新", systemImage: "arrow.clockwise")
                 }
                 .disabled(viewModel.isRefreshing)
+                #else
+                // iOS 不產生內容：卡片由 Mac 版產生，這裡只做 CloudKit 同步。
+                ContentUnavailableView(
+                    "還沒有學習卡",
+                    systemImage: "icloud.and.arrow.down",
+                    description: Text("在 Mac 版產生卡片後，透過 iCloud 同步到這裡。")
+                )
+                Button {
+                    Task { await viewModel.performPull() }
+                } label: {
+                    Label(viewModel.iCloudIsSyncing ? "同步中..." : "立即同步", systemImage: "arrow.clockwise.icloud")
+                }
+                .disabled(viewModel.iCloudIsSyncing || !viewModel.isICloudSyncAvailable)
+                #endif
                 Spacer()
             }
         }
@@ -1264,7 +1302,7 @@ struct SettingsView: View {
     /// 既有來源網址的編輯緩衝區（key 為 Source.id），送出前不寫回資料。
     @State private var editingSourceURLs: [UUID: String] = [:]
     /// 設定分類：用上方分段直接切換，不再藏在「系統設定」子頁裡。
-    @State private var section: SettingsSection = .sources
+    @State private var section: SettingsSection = SettingsSection.initial
 
     enum SettingsSection: String, CaseIterable, Identifiable {
         case sources = "來源"
@@ -1273,6 +1311,23 @@ struct SettingsView: View {
         case data = "資料"
         case system = "系統"
         var id: String { rawValue }
+
+        /// 來源與 AI provider 只服務內容產生，iOS 版不顯示（產生內容留在 macOS）。
+        static var visibleCases: [SettingsSection] {
+            #if os(macOS)
+            allCases
+            #else
+            [.display, .data, .system]
+            #endif
+        }
+
+        static var initial: SettingsSection {
+            #if os(macOS)
+            .sources
+            #else
+            .display
+            #endif
+        }
     }
 
     private enum SettingsField: Hashable {
@@ -1285,7 +1340,7 @@ struct SettingsView: View {
     var body: some View {
         VStack(spacing: 0) {
             Picker("", selection: $section) {
-                ForEach(SettingsSection.allCases) { item in
+                ForEach(SettingsSection.visibleCases) { item in
                     Text(item.rawValue).tag(item)
                 }
             }
@@ -1469,7 +1524,9 @@ struct SettingsView: View {
                     Stepper("停留秒數：\(viewModel.snapshot.settings.visibleDurationSeconds) 秒", value: binding(\.visibleDurationSeconds), in: 3...300)
                     Stepper("快速複習時間：\(viewModel.snapshot.settings.quickReviewDurationMinutes) 分鐘", value: binding(\.quickReviewDurationMinutes), in: 1...30)
                     Stepper("快速換卡：\(viewModel.snapshot.settings.quickReviewCardIntervalSeconds) 秒", value: binding(\.quickReviewCardIntervalSeconds), in: 5...120)
+                    #if os(macOS)
                     Stepper("爬文頻率：\(viewModel.snapshot.settings.crawlIntervalHours) 小時", value: binding(\.crawlIntervalHours), in: 1...168)
+                    #endif
                 }
     }
 
@@ -1699,6 +1756,7 @@ struct SettingsView: View {
                     }
                 }
 
+                #if os(macOS)
                 settingsBox("批次重生既有卡片") {
                     Text("使用已儲存的文章內容與目前 prompt 重新產生結構化欄位，只更新缺少新版欄位的舊卡，並保留既有複習狀態。")
                         .font(.caption)
@@ -1716,6 +1774,7 @@ struct SettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                #endif
 
                 settingsBox("資料庫") {
                     Button {
@@ -1769,15 +1828,13 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var systemSection: some View {
+                // AI Log 只記錄內容產生的請求，iOS 版不做產生所以不顯示。
+                #if os(macOS)
                 settingsBox("AI Log") {
                     Button {
                         viewModel.openAIRequestLog()
                     } label: {
-                        #if os(macOS)
                         Label("在 Finder 顯示 AI Log", systemImage: "folder")
-                        #else
-                        Label("顯示 AI Log 路徑", systemImage: "folder")
-                        #endif
                     }
                     Text(AIRequestLogStore.logFileURL.path)
                         .font(.caption)
@@ -1785,7 +1842,6 @@ struct SettingsView: View {
                         .textSelection(.enabled)
                 }
 
-                #if os(macOS)
                 settingsBox("更新") {
                     if UpdateChecker.isLocalBuild {
                         HStack {

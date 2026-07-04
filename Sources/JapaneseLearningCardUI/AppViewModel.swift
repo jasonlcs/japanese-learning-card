@@ -1615,11 +1615,15 @@ public final class AppViewModel: ObservableObject {
             Task { @MainActor in self?.showNextCard() }
         }
 
+        // 爬蟲與 AI 文章排程屬於內容產生，只在 macOS 執行；
+        // iOS 專注學習與 CloudKit 同步，內容由 Mac 版產生。
+        #if os(macOS)
         crawlTimer = Timer.scheduledTimer(withTimeInterval: schedulerPolicy.crawlInterval(settings: snapshot.settings), repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshNow() }
         }
 
         scheduleNextAIArticleTimer()
+        #endif
     }
 
     /// 依排程時間 / 星期幾安排下一次觸發。觸發後會自行重新排程下一輪。
