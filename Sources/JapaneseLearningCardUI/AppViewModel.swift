@@ -104,6 +104,7 @@ public final class AppViewModel: ObservableObject {
     @Published public var lastGeneratedEssay: GeneratedArticle? = nil
     @Published public var exportedEssayURL: URL? = nil
     @Published public var essayGenerationError: String? = nil
+    @Published public var essayCurrentStep: EssayGenerationStep? = nil
     private var essayGenerationTask: Task<Void, Never>?
     @Published private(set) var visibleCardTimerState = VisibleCardTimerState(
         duration: 20,
@@ -1806,6 +1807,7 @@ public final class AppViewModel: ObservableObject {
         }
 
         isGeneratingEssay = true
+        essayCurrentStep = .validating
         essayGenerationProgress = "正在驗證提示詞並擬定短文..."
         essayValidationError = nil
         essayGenerationError = nil
@@ -1821,6 +1823,7 @@ public final class AppViewModel: ObservableObject {
                 guard payload.isValidPrompt else {
                     await MainActor.run {
                         self.isGeneratingEssay = false
+                        self.essayCurrentStep = nil
                         self.essayValidationError = payload.validationError
                         self.essayGenerationProgress = ""
                     }
@@ -1830,7 +1833,8 @@ public final class AppViewModel: ObservableObject {
                 try Task.checkCancellation()
                 
                 await MainActor.run {
-                    self.essayGenerationProgress = "正在標註漢字讀音..."
+                    self.essayCurrentStep = .generatingRuby
+                    self.essayGenerationProgress = "正在標註漢字讀音 (預計 5-10 秒)..."
                 }
                 
                 var textsToAnnotate = [payload.title]
@@ -1886,6 +1890,7 @@ public final class AppViewModel: ObservableObject {
                 )
                 
                 await MainActor.run {
+                    self.essayCurrentStep = .done
                     self.lastGeneratedEssay = article
                     self.isGeneratingEssay = false
                     self.essayGenerationProgress = ""
@@ -1898,12 +1903,14 @@ public final class AppViewModel: ObservableObject {
             } catch is CancellationError {
                 await MainActor.run {
                     self.isGeneratingEssay = false
+                    self.essayCurrentStep = nil
                     self.essayGenerationProgress = ""
                     self.statusMessage = "短文產生已取消"
                 }
             } catch {
                 await MainActor.run {
                     self.isGeneratingEssay = false
+                    self.essayCurrentStep = nil
                     self.essayGenerationProgress = ""
                     self.essayGenerationError = "產生失敗：\(error.localizedDescription)"
                 }
@@ -1913,7 +1920,7 @@ public final class AppViewModel: ObservableObject {
     
     public func cancelEssayGeneration() {
         essayGenerationTask?.cancel()
-        essayGenerationTask = nil
+        essayCurrentStep = nil
         isGeneratingEssay = false
         essayGenerationProgress = ""
         statusMessage = "短文產生已取消"
@@ -2083,6 +2090,20 @@ public final class AppViewModel: ObservableObject {
             }
             try pngData.write(to: url)
             #endif
+        }
+    }
+}
+
+public enum EssayGenerationStep: Int, CaseIterable, Sendable {
+    case validating = 0
+    case generatingRuby = 1
+    case done = 2
+    
+    public var title: String {
+        switch self {
+        case .validating: return "驗證與擬定短文"
+        case .generatingRuby: return "漢字注音標註"
+        case .done: return "完成"
         }
     }
 }

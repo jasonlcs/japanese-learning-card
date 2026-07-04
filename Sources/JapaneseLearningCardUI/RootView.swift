@@ -2746,17 +2746,65 @@ struct AIEssayView: View {
                 HStack {
                     Spacer()
                     if viewModel.isGeneratingEssay {
-                        VStack(spacing: 8) {
-                            ProgressView()
-                            Text(viewModel.essayGenerationProgress)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                        VStack(spacing: 16) {
+                            if let currentStep = viewModel.essayCurrentStep {
+                                HStack(spacing: 8) {
+                                    ForEach(EssayGenerationStep.allCases, id: \.self) { step in
+                                        let isCurrent = step == currentStep
+                                        let isCompleted = step.rawValue < currentStep.rawValue
+                                        
+                                        VStack(spacing: 6) {
+                                            ZStack {
+                                                Circle()
+                                                    .fill(isCompleted ? Color.green : (isCurrent ? Color.accentColor : Color.secondary.opacity(0.2)))
+                                                    .frame(width: 24, height: 24)
+                                                
+                                                if isCompleted {
+                                                    Image(systemName: "checkmark")
+                                                        .font(.system(size: 11, weight: .bold))
+                                                        .foregroundStyle(.white)
+                                                } else {
+                                                    Text("\(step.rawValue + 1)")
+                                                        .font(.system(size: 11, weight: .bold))
+                                                        .foregroundStyle(isCurrent ? .white : .secondary)
+                                                }
+                                            }
+                                            
+                                            Text(step.title)
+                                                .font(.caption2)
+                                                .foregroundStyle(isCurrent ? .primary : .secondary)
+                                        }
+                                        
+                                        if step != .done {
+                                            Rectangle()
+                                                .fill(isCompleted ? Color.green : Color.secondary.opacity(0.2))
+                                                .frame(height: 2)
+                                                .frame(maxWidth: .infinity)
+                                                .padding(.bottom, 22)
+                                        }
+                                    }
+                                }
+                                .padding(.horizontal, 8)
+                            }
+                            
+                            HStack(spacing: 8) {
+                                ProgressView()
+                                    .scaleEffect(0.8)
+                                Text(viewModel.essayGenerationProgress)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            
                             Button("取消產生") {
                                 viewModel.cancelEssayGeneration()
                             }
                             .buttonStyle(.bordered)
                             .tint(.red)
+                            .controlSize(.small)
                         }
+                        .padding()
+                        .background(Color.secondary.opacity(0.08))
+                        .cornerRadius(12)
                         .frame(maxWidth: .infinity)
                     } else {
                         Button {
