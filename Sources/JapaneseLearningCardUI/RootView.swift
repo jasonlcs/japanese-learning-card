@@ -1554,8 +1554,17 @@ struct SettingsView: View {
                             .onSubmit { commitBaseURLDraft() }
                         }
 
-                        labeledRow("Model") {
+                        labeledRow("主要模型 (生卡片/文章)") {
                             Picker("", selection: activeProviderModelBinding()) {
+                                ForEach(viewModel.availableModels, id: \.self) { model in
+                                    Text(model).tag(model)
+                                }
+                            }
+                            .labelsHidden()
+                        }
+
+                        labeledRow("輕量模型 (標音/測驗)") {
+                            Picker("", selection: activeProviderFastModelBinding()) {
                                 ForEach(viewModel.availableModels, id: \.self) { model in
                                     Text(model).tag(model)
                                 }
@@ -2338,6 +2347,16 @@ struct SettingsView: View {
         } set: { model in
             viewModel.updateActiveProviderProfileConfig(resetVerification: false) { config in
                 config.model = model
+            }
+        }
+    }
+
+    private func activeProviderFastModelBinding() -> Binding<String> {
+        Binding {
+            viewModel.activeProviderProfile?.config.fastModel ?? viewModel.snapshot.settings.providerConfig.fastModel
+        } set: { fastModel in
+            viewModel.updateActiveProviderProfileConfig(resetVerification: false) { config in
+                config.fastModel = fastModel
             }
         }
     }
