@@ -2938,7 +2938,7 @@ struct AIEssayView: View {
                                 Button("匯出為 PNG 圖片 (.png)") {
                                     viewModel.exportEssay(article: article, format: "png")
                                 }
-                                Button("匯出為 Word 文檔 (.doc)") {
+                                Button("匯出為 Word 文檔 (.docx)") {
                                     viewModel.exportEssay(article: article, format: "word")
                                 }
                             } label: {

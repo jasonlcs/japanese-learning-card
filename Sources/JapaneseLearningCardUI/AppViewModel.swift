@@ -2116,7 +2116,7 @@ extension AppViewModel {
         """
         if let titleRuby = titleRuby, !titleRuby.isEmpty {
             for segment in titleRuby {
-                xml += buildRunXML(segment: segment, baseSize: 36, rubySize: 18)
+                xml += buildRunXML(segment: segment, baseSize: 36, rubySize: 18, bold: true)
             }
         } else {
             xml += """
@@ -2152,8 +2152,7 @@ extension AppViewModel {
             xml += """
                 <w:p>
                   <w:pPr>
-                    <w:spacing w:before="240" w:after="120"/>
-                    <w:line w:lineRule="auto" w:line="360"/>
+                    <w:spacing w:before="240" w:after="120" w:line="360" w:lineRule="auto"/>
                   </w:pPr>
             """
             for segment in para.ruby {
@@ -2184,14 +2183,16 @@ extension AppViewModel {
         return xml
     }
     
-    private func buildRunXML(segment: RubySegment, baseSize: Int, rubySize: Int) -> String {
+    private func buildRunXML(segment: RubySegment, baseSize: Int, rubySize: Int, bold: Bool = false) -> String {
         let text = escapeXML(segment.base)
+        let boldTag = bold ? "<w:b/>" : ""
         guard !segment.ruby.isEmpty else {
             return """
                   <w:r>
                     <w:rPr>
                       <w:sz w:val="\(baseSize)"/>
                       <w:szCs w:val="\(baseSize)"/>
+                      \(boldTag)
                     </w:rPr>
                     <w:t>\(text)</w:t>
                   </w:r>
@@ -2199,7 +2200,10 @@ extension AppViewModel {
         }
         
         let escapedRuby = escapeXML(segment.ruby)
-        let offset = rubySize
+        // hpsRaise 是注音相對基準文字「基線」的抬升量 (half-point)。
+        // Word 自己產生的檔案慣例是 hpsRaise ≈ hpsBaseText - 2；
+        // 設太小 (例如只設 rubySize) 注音會直接壓在漢字上。
+        let offset = max(baseSize - 2, rubySize)
         return """
               <w:r>
                 <w:ruby>
@@ -2208,6 +2212,7 @@ extension AppViewModel {
                     <w:hps w:val="\(rubySize)"/>
                     <w:hpsRaise w:val="\(offset)"/>
                     <w:hpsBaseText w:val="\(baseSize)"/>
+                    <w:lid w:val="ja-JP"/>
                   </w:rubyPr>
                   <w:rt>
                     <w:r>
@@ -2223,6 +2228,7 @@ extension AppViewModel {
                       <w:rPr>
                         <w:sz w:val="\(baseSize)"/>
                         <w:szCs w:val="\(baseSize)"/>
+                        \(boldTag)
                       </w:rPr>
                       <w:t>\(text)</w:t>
                     </w:r>
