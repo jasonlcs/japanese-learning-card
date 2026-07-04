@@ -61,9 +61,9 @@ struct IOSRootView: View {
         .onReceive(
             NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)
         ) { _ in
-            // Crawl + card refresh when the user brings the app to foreground.
+            // iOS 只做學習與同步：回前景時從 CloudKit 拉最新資料，
+            // 內容產生（爬蟲 / AI 造卡）留在 macOS 版。
             Task { await viewModel.performPull() }
-            viewModel.refreshNow()
         }
         #endif
     }
