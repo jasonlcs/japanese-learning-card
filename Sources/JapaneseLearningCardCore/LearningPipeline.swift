@@ -439,6 +439,7 @@ public actor LearningPipeline {
             )
 
             let article = GeneratedArticle(
+                kind: .extraction,
                 theme: draft.theme,
                 jlptLevels: levels,
                 title: draft.title,

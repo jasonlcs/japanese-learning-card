@@ -42,6 +42,7 @@ struct CoreChecks {
         try await pipelineGeneratesAIArticleAndCards()
         try await pipelineParseAndStoreForValidationRegistersSourceAndCards()
         try await storePersistsGeneratedArticles()
+        try generatedArticleKindDecodingBackfillsLegacyData()
         try syncedBaseStoreRoundTrips()
         try mergerKeepsLocalOnlyChanges()
         try mergerKeepsRemoteOnlyChanges()
@@ -889,6 +890,25 @@ struct CoreChecks {
         let afterDup = await store.read()
         expect(afterDup.cards.count == 1, "duplicate content should not add more cards")
         expect(afterDup.sources.filter { $0.url == url }.count == 1, "duplicate content should not duplicate the source")
+    }
+
+    private static func generatedArticleKindDecodingBackfillsLegacyData() throws {
+        // 舊資料沒有 kind 欄位：有 paragraphs 視為短文，沒有視為擷取文章。
+        let legacyExtraction = """
+        {"id":"6F1F1D40-0000-4000-8000-000000000001","theme":"旅行","title":"京都","plainText":"今日は京都に行きました。","contentHash":"h1","sourceId":"6F1F1D40-0000-4000-8000-0000000000AA"}
+        """
+        let legacyEssay = """
+        {"id":"6F1F1D40-0000-4000-8000-000000000002","theme":"生活","title":"朝","plainText":"毎朝走ります。","contentHash":"h2","sourceId":"6F1F1D40-0000-4000-8000-0000000000AA","paragraphs":[{"japanese":"毎朝走ります。","ruby":[],"translation":"每天早上跑步。"}]}
+        """
+        let decoder = JSONDecoder()
+        let extraction = try decoder.decode(GeneratedArticle.self, from: Data(legacyExtraction.utf8))
+        let essay = try decoder.decode(GeneratedArticle.self, from: Data(legacyEssay.utf8))
+        expect(extraction.kind == .extraction, "legacy article without paragraphs should decode as extraction")
+        expect(essay.kind == .essay, "legacy article with paragraphs should decode as essay")
+        expect(extraction.resolvedParagraphs.map(\.japanese) == ["今日は京都に行きました。"], "resolvedParagraphs should split plainText for extraction articles")
+
+        let roundTrip = try decoder.decode(GeneratedArticle.self, from: JSONEncoder().encode(essay))
+        expect(roundTrip.kind == .essay, "kind should round trip through encoding")
     }
 
     private static func storePersistsGeneratedArticles() async throws {
