@@ -2644,17 +2644,18 @@ private struct QuizSummaryTile: View {
     }
 }
 
-/// 造卡頁：把「AI 文章」與「貼上造卡」收進同一個頁籤，用上方分段切換。
+/// 造卡頁：把「AI 擷取」、「AI 短文」與「貼上造卡」收進同一個頁籤，用上方分段切換。
 struct CardMakerView: View {
     @ObservedObject var viewModel: AppViewModel
     @State private var mode: Mode = .aiArticle
 
-    enum Mode: Hashable { case aiArticle, manual }
+    enum Mode: Hashable { case aiArticle, aiEssay, manual }
 
     var body: some View {
         VStack(spacing: 0) {
             Picker("", selection: $mode) {
-                Label("AI 文章", systemImage: "sparkles.rectangle.stack").tag(Mode.aiArticle)
+                Label("AI 擷取", systemImage: "sparkles.rectangle.stack").tag(Mode.aiArticle)
+                Label("AI 短文", systemImage: "doc.text").tag(Mode.aiEssay)
                 Label("貼上造卡", systemImage: "doc.text.magnifyingglass").tag(Mode.manual)
             }
             .pickerStyle(.segmented)
@@ -2664,12 +2665,221 @@ struct CardMakerView: View {
             switch mode {
             case .aiArticle:
                 AIArticleView(viewModel: viewModel)
+            case .aiEssay:
+                AIEssayView(viewModel: viewModel)
             case .manual:
                 ManualCardView(viewModel: viewModel)
             }
         }
     }
 }
+
+struct AIEssayView: View {
+    @ObservedObject var viewModel: AppViewModel
+    
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("利用你庫存的單字產生貼近生活或工作實務的日文短文與中文段落對照。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                
+                GroupBox("1. 選擇單字來源") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Picker("", selection: Binding(
+                            get: { viewModel.selectedVocabularySource },
+                            set: { viewModel.setSelectedVocabularySource($0) }
+                        )) {
+                            ForEach(VocabularySourceType.allCases, id: \.self) { source in
+                                Text(source.rawValue).tag(source)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text("預計融入的單字 (最多 5 個)：")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                Button {
+                                    viewModel.shufflePreviewVocabulary()
+                                } label: {
+                                    Label("換一批", systemImage: "shuffle")
+                                }
+                                .buttonStyle(.borderless)
+                                .font(.caption)
+                            }
+                            
+                            if viewModel.previewVocabularyCards.isEmpty {
+                                Text("目前此分類沒有單字，請先新增卡片。")
+                                    .font(.caption2)
+                                    .foregroundStyle(.orange)
+                            } else {
+                                FlowLayout(spacing: 6) {
+                                    ForEach(viewModel.previewVocabularyCards) { card in
+                                        Text(card.word)
+                                            .font(.caption)
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 4)
+                                            .background(Color.secondary.opacity(0.15))
+                                            .clipShape(Capsule())
+                                    }
+                                }
+                            }
+                        }
+                        .padding(.top, 4)
+                    }
+                }
+                
+                GroupBox("2. 附加提示詞 (與日文或日常生活/工作相關)") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        TextField("例如：寫一篇居酒屋點餐的對話，或留空隨機生成", text: $viewModel.userEssayPrompt)
+                            .textFieldStyle(.roundedBorder)
+                        
+                        Text("請勿輸入無關或違反規定（如寫程式、算數學、問無關常識）的提示。")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                
+                HStack {
+                    Spacer()
+                    if viewModel.isGeneratingEssay {
+                        VStack(spacing: 8) {
+                            ProgressView()
+                            Text(viewModel.essayGenerationProgress)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Button("取消產生") {
+                                viewModel.cancelEssayGeneration()
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(.red)
+                        }
+                        .frame(maxWidth: .infinity)
+                    } else {
+                        Button {
+                            viewModel.generateAIEssayNow()
+                        } label: {
+                            Label("開始產生短文", systemImage: "sparkles")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(viewModel.previewVocabularyCards.isEmpty)
+                    }
+                    Spacer()
+                }
+                .padding(.vertical, 8)
+                
+                if let valError = viewModel.essayValidationError {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label("提示詞無效", systemImage: "exclamationmark.triangle.fill")
+                            .font(.headline)
+                            .foregroundStyle(.orange)
+                        Text(valError)
+                            .font(.body)
+                    }
+                    .padding()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.orange.opacity(0.1))
+                    .cornerRadius(8)
+                }
+                
+                if let genError = viewModel.essayGenerationError {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label("產生失敗", systemImage: "xmark.octagon.fill")
+                            .font(.headline)
+                            .foregroundStyle(.red)
+                        Text(genError)
+                            .font(.body)
+                    }
+                    .padding()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.red.opacity(0.1))
+                    .cornerRadius(8)
+                }
+                
+                if let article = viewModel.lastGeneratedEssay {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Divider()
+                        
+                        HStack {
+                            Text("產生的短文結果")
+                                .font(.headline)
+                            Spacer()
+                            Menu {
+                                Button("匯出為 PDF (.pdf)") {
+                                    viewModel.exportEssay(article: article, format: "pdf")
+                                }
+                                Button("匯出為 PNG 圖片 (.png)") {
+                                    viewModel.exportEssay(article: article, format: "png")
+                                }
+                                Button("匯出為 Word 文檔 (.doc)") {
+                                    viewModel.exportEssay(article: article, format: "word")
+                                }
+                            } label: {
+                                Label("匯出檔案", systemImage: "square.and.arrow.up")
+                            }
+                            #if !os(macOS)
+                            .sheet(isPresented: Binding(
+                                get: { viewModel.exportedEssayURL != nil },
+                                set: { if !$0 { viewModel.exportedEssayURL = nil } }
+                            )) {
+                                if let url = viewModel.exportedEssayURL {
+                                    ShareLink(item: url, message: Text("AI 產生日文短文：\(article.title)"))
+                                }
+                            }
+                            #endif
+                        }
+                        
+                        GroupBox(content: {
+                            VStack(alignment: .leading, spacing: 14) {
+                                let paras = article.paragraphs ?? []
+                                if paras.isEmpty {
+                                    Text(article.plainText)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                } else {
+                                    ForEach(Array(paras.enumerated()), id: \.offset) { _, para in
+                                        VStack(alignment: .leading, spacing: 6) {
+                                            RubyText(
+                                                segments: para.ruby,
+                                                fallback: para.japanese,
+                                                baseFont: .system(size: 15),
+                                                rubyFont: .system(size: 8),
+                                                baseColor: .primary,
+                                                rubyColor: .secondary
+                                            )
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            
+                                            Text(para.translation)
+                                                .font(.subheadline)
+                                                .foregroundStyle(.secondary)
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                        }
+                                        .padding(.vertical, 4)
+                                    }
+                                }
+                            }
+                            .padding(.vertical, 6)
+                        }, label: {
+                            RubyText(
+                                segments: article.titleRuby ?? [],
+                                fallback: article.title.isEmpty ? "日文短文" : article.title,
+                                baseFont: .headline,
+                                rubyFont: .caption2,
+                                baseColor: .primary,
+                                rubyColor: .secondary
+                            )
+                        })
+                    }
+                    .transition(.opacity)
+                }
+            }
+            .padding()
+        }
+    }
+}
+
 
 struct AIArticleView: View {
     @ObservedObject var viewModel: AppViewModel
@@ -2983,13 +3193,44 @@ struct AIArticleDetailView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 VStack(alignment: .leading) {
-                    Text(article.title)
-                        .font(.title2.weight(.semibold))
+                    RubyText(
+                        segments: article.titleRuby ?? [],
+                        fallback: article.title,
+                        baseFont: .title2.weight(.semibold),
+                        rubyFont: .caption2,
+                        baseColor: .primary,
+                        rubyColor: .secondary
+                    )
                     Text("主題：\(article.theme)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                if article.paragraphs != nil {
+                    Menu {
+                        Button("匯出為 PDF (.pdf)") {
+                            viewModel.exportEssay(article: article, format: "pdf")
+                        }
+                        Button("匯出為 PNG 圖片 (.png)") {
+                            viewModel.exportEssay(article: article, format: "png")
+                        }
+                        Button("匯出為 Word 文檔 (.doc)") {
+                            viewModel.exportEssay(article: article, format: "word")
+                        }
+                    } label: {
+                        Label("匯出", systemImage: "square.and.arrow.up")
+                    }
+                    #if !os(macOS)
+                    .sheet(isPresented: Binding(
+                        get: { viewModel.exportedEssayURL != nil },
+                        set: { if !$0 { viewModel.exportedEssayURL = nil } }
+                    )) {
+                        if let url = viewModel.exportedEssayURL {
+                            ShareLink(item: url, message: Text("AI 產生日文短文：\(article.title)"))
+                        }
+                    }
+                    #endif
+                }
                 Button {
                     viewModel.copyArticle(article)
                 } label: {
@@ -3009,13 +3250,39 @@ struct AIArticleDetailView: View {
 
             GroupBox("文章本文") {
                 ScrollView {
-                    Text(article.plainText)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
-                        .padding(.vertical, 4)
+                    let paras = article.paragraphs ?? []
+                    if paras.isEmpty {
+                        Text(article.plainText)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                            .padding(.vertical, 4)
+                    } else {
+                        VStack(alignment: .leading, spacing: 14) {
+                            ForEach(Array(paras.enumerated()), id: \.offset) { _, para in
+                                VStack(alignment: .leading, spacing: 6) {
+                                    RubyText(
+                                        segments: para.ruby,
+                                        fallback: para.japanese,
+                                        baseFont: .system(size: 15),
+                                        rubyFont: .system(size: 8),
+                                        baseColor: .primary,
+                                        rubyColor: .secondary
+                                    )
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    
+                                    Text(para.translation)
+                                        .font(.subheadline)
+                                        .foregroundStyle(.secondary)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                                .padding(.vertical, 4)
+                            }
+                        }
+                    }
                 }
-                .frame(maxHeight: 220)
+                .frame(maxHeight: 240)
             }
+
 
             if !relatedCards.isEmpty {
                 GroupBox("從本文擷取的學習卡") {

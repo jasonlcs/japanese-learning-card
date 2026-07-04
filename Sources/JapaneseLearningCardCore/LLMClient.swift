@@ -33,6 +33,8 @@ public protocol LLMClient: Sendable {
     func generateArticle(theme: String, jlptLevels: [JLPTLevel], settings: AppSettings) async throws -> AIArticleDraft
     /// 由使用者貼上的文字（文章或單字清單）直接產生學習卡。
     func generateManualCards(text: String, instruction: String, sourceURL: URL, settings: AppSettings) async throws -> [LearningCard]
+    func generateEssay(theme: String, vocabularyWords: [String], settings: AppSettings) async throws -> AIEssayPayload
+    func generateRubyForTexts(texts: [String], settings: AppSettings) async throws -> [[RubySegment]]
 }
 
 public extension LLMClient {
@@ -52,6 +54,14 @@ public extension LLMClient {
     func generateRuby(for cards: [LearningCard], settings: AppSettings) async throws -> [RubyBackfillResult] {
         throw LLMClientError.invalidResponse
     }
+
+    func generateEssay(theme: String, vocabularyWords: [String], settings: AppSettings) async throws -> AIEssayPayload {
+        throw LLMClientError.invalidResponse
+    }
+
+    func generateRubyForTexts(texts: [String], settings: AppSettings) async throws -> [[RubySegment]] {
+        throw LLMClientError.invalidResponse
+    }
 }
 
 public struct RubyBackfillResult: Equatable, Sendable {
@@ -63,6 +73,30 @@ public struct RubyBackfillResult: Equatable, Sendable {
         self.cardId = cardId
         self.wordRuby = wordRuby
         self.exampleRuby = exampleRuby
+    }
+}
+
+public struct AIEssayPayload: Codable, Sendable {
+    public var isValidPrompt: Bool
+    public var validationError: String
+    public var title: String
+    public var paragraphs: [AIEssayParagraph]
+
+    public struct AIEssayParagraph: Codable, Sendable {
+        public var japanese: String
+        public var translation: String
+        
+        public init(japanese: String, translation: String) {
+            self.japanese = japanese
+            self.translation = translation
+        }
+    }
+    
+    public init(isValidPrompt: Bool, validationError: String, title: String, paragraphs: [AIEssayParagraph]) {
+        self.isValidPrompt = isValidPrompt
+        self.validationError = validationError
+        self.title = title
+        self.paragraphs = paragraphs
     }
 }
 
@@ -324,6 +358,79 @@ public struct OpenAICompatibleLLMClient: LLMClient {
             ]
         )
         return draft
+    }
+
+    public func generateEssay(theme: String, vocabularyWords: [String], settings: AppSettings) async throws -> AIEssayPayload {
+        guard let apiKey = try secretStore.apiKey(reference: settings.providerConfig.apiKeyKeychainRef), !apiKey.isEmpty else {
+            throw LLMClientError.missingAPIKey
+        }
+
+        let body = Self.essayRequestBody(theme: theme, vocabularyWords: vocabularyWords, settings: settings)
+        var request = URLRequest(url: settings.providerConfig.baseURL.appendingPathComponent("chat/completions"))
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let organization = settings.providerConfig.organization, !organization.isEmpty {
+            request.setValue(organization, forHTTPHeaderField: "OpenAI-Organization")
+        }
+        if let project = settings.providerConfig.project, !project.isEmpty {
+            request.setValue(project, forHTTPHeaderField: "OpenAI-Project")
+        }
+        for (key, value) in settings.providerConfig.extraHeaders {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        request.httpBody = try JSONEncoder().encode(body)
+
+        Self.debugLog("essay 請求 → \(request.url?.absoluteString ?? "")，model=\(settings.providerConfig.model)")
+        let data = try await performLoggedRequest(request, operation: "generateEssay", model: settings.providerConfig.model)
+        Self.debugLog("essay 回應原始 body：\n\(String(decoding: data, as: UTF8.self))")
+        let content = try Self.extractContent(from: data)
+        let payload = try Self.decodeEssay(from: content)
+        
+        await AIRequestLogStore.shared.appendEvent(
+            "llm.decode.completed",
+            operation: "generateEssay",
+            output: [
+                "isValidPrompt": "\(payload.isValidPrompt)",
+                "title": payload.title,
+                "paragraphCount": "\(payload.paragraphs.count)"
+            ]
+        )
+        return payload
+    }
+
+    public func generateRubyForTexts(texts: [String], settings: AppSettings) async throws -> [[RubySegment]] {
+        guard let apiKey = try secretStore.apiKey(reference: settings.providerConfig.apiKeyKeychainRef), !apiKey.isEmpty else {
+            throw LLMClientError.missingAPIKey
+        }
+
+        let body = Self.rubyForTextsRequestBody(texts: texts, settings: settings)
+        var request = URLRequest(url: settings.providerConfig.baseURL.appendingPathComponent("chat/completions"))
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let organization = settings.providerConfig.organization, !organization.isEmpty {
+            request.setValue(organization, forHTTPHeaderField: "OpenAI-Organization")
+        }
+        if let project = settings.providerConfig.project, !project.isEmpty {
+            request.setValue(project, forHTTPHeaderField: "OpenAI-Project")
+        }
+        for (key, value) in settings.providerConfig.extraHeaders {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        request.httpBody = try JSONEncoder().encode(body)
+
+        let data = try await performLoggedRequest(request, operation: "generateRubyForTexts", model: settings.providerConfig.fastModel)
+        Self.debugLog("rubyForTexts 回應原始 body：\n\(String(decoding: data, as: UTF8.self))")
+        let content = try Self.extractContent(from: data)
+        let results = try Self.decodeRubyForTexts(from: content, sourceTexts: texts)
+        
+        await AIRequestLogStore.shared.appendEvent(
+            "llm.decode.completed",
+            operation: "generateRubyForTexts",
+            output: ["resultCount": "\(results.count)"]
+        )
+        return results
     }
 
     /// 解析 provider 的外層回應並取出 message.content；失敗時印出原始 body 方便除錯。
@@ -808,7 +915,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
     }
 
     /// 一律印到 stderr，方便 `swift run` 時直接在終端機看到。
-    static func log(_ message: @autoclosure () -> String) {
+    public static func log(_ message: @autoclosure () -> String) {
         FileHandle.standardError.write(Data(("[LLM] " + message() + "\n").utf8))
     }
 
@@ -1057,6 +1164,156 @@ public struct OpenAICompatibleLLMClient: LLMClient {
             return decodingError.localizedDescription
         }
     }
+
+    public static func essayRequestBody(theme: String, vocabularyWords: [String], settings: AppSettings) -> ChatCompletionRequest {
+        let isRandomTheme = theme.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let resolvedTheme = isRandomTheme ? "(請隨機挑選一個生活化或工作相關的日文主題，撰寫一篇有趣的短文)" : theme
+        
+        let systemPrompt = """
+        你是日文學習短文作者。你的任務是根據所給單字和提示詞，寫一篇日常生活或工作實務相關的自然日文短文與繁體中文段落翻譯。
+        
+        特別注意：
+        1. 你必須先驗證使用者輸入的提示詞。提示詞（主題）必須與日文學習、日常生活、或工作場景相關。
+        2. 禁止任何編程代碼（如 Python, Swift, Java 等）、數學計算（如代數、微積分等）、或與學習日文及生活工作完全無關的亂問（如「如何製造核彈」）。
+        3. 如果發現提示詞違反規定，你必須將 JSON 的 "isValidPrompt" 設為 false，並在 "validationError" 中用繁體中文指出具體原因（例如：「提示詞必須與日文學習、生活或工作場景相關，不可寫程式或算數學。」），此時不需要填寫 title 和 paragraphs 內容。
+        4. 如果提示詞合規，則 "isValidPrompt" 設為 true，"validationError" 設為 empty string ""，且必須生成符合要求的 "title" 和 "paragraphs"。
+        5. 全文約 3~4 個段落。在日文段落中請自然融入指定的單字，並將融入的單字用雙星號標記（如：**單字**），讓使用者一眼看出。
+        6. 使用「です/ます」體。段落翻譯必須使用繁體中文，禁止簡體中文。
+        
+        只輸出 JSON，不要 Markdown 包裹。JSON schema 格式必須嚴格如下：
+        {
+          "isValidPrompt": true,
+          "validationError": "",
+          "title": "標題文字",
+          "paragraphs": [
+            {
+              "japanese": "日文段落本文...",
+              "translation": "繁體中文段落翻譯..."
+            }
+          ]
+        }
+        """
+
+        let userPrompt = """
+        主題／提示詞：\(resolvedTheme)
+        必須包含的單字列表：\(vocabularyWords.joined(separator: "、"))
+        """
+
+        return ChatCompletionRequest(
+            model: settings.providerConfig.model,
+            messages: [
+                .init(role: "system", content: systemPrompt),
+                .init(role: "user", content: userPrompt)
+            ],
+            temperature: 0.7,
+            responseFormat: responseFormat(for: settings)
+        )
+    }
+
+    public static func decodeEssay(from content: String) throws -> AIEssayPayload {
+        let payload: EssayPayload
+        do {
+            payload = try decodeJSON(EssayPayload.self, from: content)
+        } catch {
+            log("無法解析短文 JSON 回應：\(describeDecodingError(error))\n內容：\(content)")
+            throw error
+        }
+
+        let isValid = payload.isValidPrompt
+        let errorMsg = payload.validationError?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        
+        if !isValid {
+            return AIEssayPayload(
+                isValidPrompt: false,
+                validationError: errorMsg.isEmpty ? "請輸入有效的日文學習或日常生活提示詞。" : errorMsg,
+                title: "",
+                paragraphs: []
+            )
+        }
+
+        let title = payload.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "無標題"
+        let paragraphs = (payload.paragraphs ?? []).map {
+            AIEssayPayload.AIEssayParagraph(
+                japanese: $0.japanese.trimmingCharacters(in: .whitespacesAndNewlines),
+                translation: $0.translation.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        }
+
+        guard !paragraphs.isEmpty else {
+            throw LLMClientError.noContent
+        }
+
+        return AIEssayPayload(
+            isValidPrompt: true,
+            validationError: "",
+            title: title,
+            paragraphs: paragraphs
+        )
+    }
+
+    public static func rubyForTextsRequestBody(texts: [String], settings: AppSettings) -> ChatCompletionRequest {
+        let source = texts.enumerated().map { index, text in
+            """
+            - index: \(index)
+              text: \(text)
+            """
+        }.joined(separator: "\n")
+
+        return ChatCompletionRequest(
+            model: settings.providerConfig.fastModel,
+            messages: [
+                .init(role: "system", content: """
+                你是日文 ruby / furigana 標註器。只輸出 JSON，不要 Markdown 包裹。
+                JSON schema:
+                {
+                  "results": [
+                    {
+                      "index": 0,
+                      "ruby": [
+                        {"base": "...", "ruby": "..."}
+                      ]
+                    }
+                  ]
+                }
+                每個輸入 index 都必須對應輸出一筆。
+                ruby 的 base 片段依序串接後必須完全等於原始的 text。
+                包含漢字的段落 ruby 填平假名；純假名、助詞、標點使用空字串 ""。
+                不要改寫原文、不要加入羅馬拼音、不要省略標點。
+                """),
+                .init(role: "user", content: source)
+            ],
+            temperature: 0.1,
+            responseFormat: responseFormat(for: settings)
+        )
+    }
+
+    public static func decodeRubyForTexts(from content: String, sourceTexts: [String]) throws -> [[RubySegment]] {
+        let payload: RubyForTextsPayload
+        do {
+            payload = try decodeJSON(RubyForTextsPayload.self, from: content)
+        } catch {
+            log("無法解析 RubyForTexts JSON 回應：\(describeDecodingError(error))\n內容：\(content)")
+            throw error
+        }
+
+        var resultsMap = [Int: [RubySegment]]()
+        for item in payload.results {
+            let segments = item.ruby.map { RubySegment(base: $0.base, ruby: $0.ruby) }
+            resultsMap[item.index] = segments
+        }
+
+        var finalResults = [[RubySegment]]()
+        for (index, text) in sourceTexts.enumerated() {
+            let segments = resultsMap[index] ?? []
+            if RubySupport.isUsable(segments, for: text) {
+                finalResults.append(segments)
+            } else {
+                log("段落 [\(index)] Ruby 標記拼接不符原始內容，使用空 Ruby 降級渲染。")
+                finalResults.append([])
+            }
+        }
+        return finalResults
+    }
 }
 
 public struct ChatCompletionRequest: Codable, Equatable, Sendable {
@@ -1174,4 +1431,30 @@ private struct ArticlePayload: Codable {
     var theme: String
     var title: String
     var text: String
+}
+
+private struct EssayPayload: Codable {
+    var isValidPrompt: Bool
+    var validationError: String?
+    var title: String?
+    var paragraphs: [Paragraph]?
+
+    struct Paragraph: Codable {
+        var japanese: String
+        var translation: String
+    }
+}
+
+private struct RubyForTextsPayload: Codable {
+    var results: [ResultItem]
+
+    struct ResultItem: Codable {
+        var index: Int
+        var ruby: [RubySegmentItem]
+    }
+
+    struct RubySegmentItem: Codable {
+        var base: String
+        var ruby: String
+    }
 }

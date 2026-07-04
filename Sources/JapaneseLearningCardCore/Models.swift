@@ -515,6 +515,18 @@ public struct ProviderProfile: Codable, Identifiable, Equatable, Sendable {
     }
 }
 
+public struct ArticleParagraph: Codable, Equatable, Sendable {
+    public var japanese: String
+    public var ruby: [RubySegment]
+    public var translation: String
+
+    public init(japanese: String, ruby: [RubySegment] = [], translation: String) {
+        self.japanese = japanese
+        self.ruby = ruby
+        self.translation = translation
+    }
+}
+
 public struct GeneratedArticle: Codable, Identifiable, Equatable, Sendable {
     public let id: UUID
     public var theme: String
@@ -526,6 +538,11 @@ public struct GeneratedArticle: Codable, Identifiable, Equatable, Sendable {
     public var generatedAt: Date
     public var cardCount: Int
     public var updatedAt: Date
+    public var paragraphs: [ArticleParagraph]?
+    public var userPrompt: String?
+    public var vocabularySource: String?
+    public var vocabularyWords: [String]?
+    public var titleRuby: [RubySegment]?
 
     public init(
         id: UUID = UUID(),
@@ -537,7 +554,12 @@ public struct GeneratedArticle: Codable, Identifiable, Equatable, Sendable {
         sourceId: UUID,
         generatedAt: Date = Date(),
         cardCount: Int = 0,
-        updatedAt: Date = Date()
+        updatedAt: Date = Date(),
+        paragraphs: [ArticleParagraph]? = nil,
+        userPrompt: String? = nil,
+        vocabularySource: String? = nil,
+        vocabularyWords: [String]? = nil,
+        titleRuby: [RubySegment]? = nil
     ) {
         self.id = id
         self.theme = theme
@@ -549,6 +571,11 @@ public struct GeneratedArticle: Codable, Identifiable, Equatable, Sendable {
         self.generatedAt = generatedAt
         self.cardCount = cardCount
         self.updatedAt = updatedAt
+        self.paragraphs = paragraphs
+        self.userPrompt = userPrompt
+        self.vocabularySource = vocabularySource
+        self.vocabularyWords = vocabularyWords
+        self.titleRuby = titleRuby
     }
 
     public init(from decoder: Decoder) throws {
@@ -563,8 +590,14 @@ public struct GeneratedArticle: Codable, Identifiable, Equatable, Sendable {
         self.generatedAt = try container.decodeIfPresent(Date.self, forKey: .generatedAt) ?? Date()
         self.cardCount = try container.decodeIfPresent(Int.self, forKey: .cardCount) ?? 0
         self.updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+        self.paragraphs = try container.decodeIfPresent([ArticleParagraph].self, forKey: .paragraphs)
+        self.userPrompt = try container.decodeIfPresent(String.self, forKey: .userPrompt)
+        self.vocabularySource = try container.decodeIfPresent(String.self, forKey: .vocabularySource)
+        self.vocabularyWords = try container.decodeIfPresent([String].self, forKey: .vocabularyWords)
+        self.titleRuby = try container.decodeIfPresent([RubySegment].self, forKey: .titleRuby)
     }
 }
+
 
 public struct AppSettings: Codable, Equatable, Sendable {
     public static let legacyDefaultExtractionPrompt = "請從網頁文字中挑選適合日文學習的自然日文句子與重要單字。"
@@ -709,3 +742,10 @@ extension LearningCard: MergeTrackable {}
 extension QuizQuestion: MergeTrackable {}
 extension GeneratedArticle: MergeTrackable {}
 extension AppSettings: MergeTrackable {}
+
+public enum VocabularySourceType: String, Codable, CaseIterable, Sendable {
+    case all = "全部的單字"
+    case recent = "最近加入的單字"
+    case unfamiliar = "不熟的單字"
+}
+
