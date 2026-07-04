@@ -1932,7 +1932,7 @@ public final class AppViewModel: ObservableObject {
         switch format {
         case "pdf": fileExtension = "pdf"
         case "png": fileExtension = "png"
-        case "word": fileExtension = "doc"
+        case "word": fileExtension = "docx"
         default: return
         }
 
@@ -1940,7 +1940,7 @@ public final class AppViewModel: ObservableObject {
 
         #if os(macOS)
         let savePanel = NSSavePanel()
-        let docType = UTType(filenameExtension: "doc") ?? .data
+        let docType = UTType(filenameExtension: "docx") ?? .data
         savePanel.allowedContentTypes = [
             format == "pdf" ? .pdf : (format == "png" ? .png : docType)
         ]
@@ -1972,50 +1972,37 @@ public final class AppViewModel: ObservableObject {
         let theme = article.theme
         let paragraphs = article.paragraphs ?? [ArticleParagraph(japanese: article.plainText, translation: "")]
         if format == "word" {
-            var html = """
-            <!DOCTYPE html>
-            <html>
-            <head>
-              <meta charset="utf-8">
-              <style>
-                body { font-family: 'MS Mincho', 'Hiragino Mincho Pro', serif; line-height: 2.0; color: #333333; padding: 40px; }
-                h1 { text-align: center; color: #111111; font-size: 24pt; margin-bottom: 5pt; }
-                .theme { text-align: center; font-size: 11pt; color: #666666; margin-bottom: 30pt; font-style: italic; }
-                .paragraph { margin-bottom: 24pt; }
-                .japanese { font-size: 14pt; margin-bottom: 6pt; }
-                .translation { font-size: 11pt; color: #555555; }
-                ruby { font-size: 1em; }
-                rt { font-size: 0.6em; color: #777777; }
-              </style>
-            </head>
-            <body>
-              <h1>\(title)</h1>
-              <div class="theme">主題／提示詞：\(theme)</div>
+            let contentTypes = """
+            <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+            <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+              <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+              <Default Extension="xml" ContentType="application/xml"/>
+              <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+            </Types>
             """
-
-            for para in paragraphs {
-                html += "<div class=\"paragraph\"><div class=\"japanese\">"
-                if RubySupport.isUsable(para.ruby, for: para.japanese) {
-                    for segment in para.ruby {
-                        if segment.ruby.isEmpty {
-                            html += segment.base
-                        } else {
-                            html += "<ruby>\(segment.base)<rt>\(segment.ruby)</rt></ruby>"
-                        }
-                    }
-                } else {
-                    html += para.japanese
-                }
-                html += "</div>"
-                html += "<div class=\"translation\">\(para.translation)</div>"
-                html += "</div>"
-            }
-
-            html += """
-            </body>
-            </html>
+            
+            let rels = """
+            <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+            <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+            </Relationships>
             """
-            try html.write(to: url, atomically: true, encoding: .utf8)
+            
+            let docXML = buildDocumentXML(
+                title: title,
+                titleRuby: article.titleRuby,
+                theme: theme,
+                paragraphs: paragraphs
+            )
+            
+            let entries = [
+                SimpleZipWriter.Entry(name: "_rels/.rels", data: Data(rels.utf8)),
+                SimpleZipWriter.Entry(name: "[Content_Types].xml", data: Data(contentTypes.utf8)),
+                SimpleZipWriter.Entry(name: "word/document.xml", data: Data(docXML.utf8))
+            ]
+            
+            let docxData = SimpleZipWriter.write(entries: entries)
+            try docxData.write(to: url)
             return
         }
 
@@ -2105,5 +2092,270 @@ public enum EssayGenerationStep: Int, CaseIterable, Sendable {
         case .generatingRuby: return "漢字注音標註"
         case .done: return "完成"
         }
+    }
+}
+
+extension AppViewModel {
+    private func buildDocumentXML(title: String, titleRuby: [RubySegment]?, theme: String, paragraphs: [ArticleParagraph]) -> String {
+        var xml = """
+        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:body>
+        """
+        
+        xml += """
+            <w:p>
+              <w:pPr>
+                <w:jc w:val="center"/>
+                <w:spacing w:after="240"/>
+              </w:pPr>
+        """
+        if let titleRuby = titleRuby, !titleRuby.isEmpty {
+            for segment in titleRuby {
+                xml += buildRunXML(segment: segment, baseSize: 36, rubySize: 18)
+            }
+        } else {
+            xml += """
+              <w:r>
+                <w:rPr>
+                  <w:sz w:val="36"/>
+                  <w:szCs w:val="36"/>
+                  <w:b/>
+                </w:rPr>
+                <w:t>\(escapeXML(title))</w:t>
+              </w:r>
+            """
+        }
+        xml += "</w:p>"
+        
+        xml += """
+            <w:p>
+              <w:pPr>
+                <w:jc w:val="center"/>
+                <w:spacing w:after="480"/>
+              </w:pPr>
+              <w:r>
+                <w:rPr>
+                  <w:sz w:val="20"/>
+                  <w:color w:val="666666"/>
+                </w:rPr>
+                <w:t>主題：\(escapeXML(theme))</w:t>
+              </w:r>
+            </w:p>
+        """
+        
+        for para in paragraphs {
+            xml += """
+                <w:p>
+                  <w:pPr>
+                    <w:spacing w:before="240" w:after="120"/>
+                    <w:line w:lineRule="auto" w:line="360"/>
+                  </w:pPr>
+            """
+            for segment in para.ruby {
+                xml += buildRunXML(segment: segment, baseSize: 24, rubySize: 12)
+            }
+            xml += "</w:p>"
+            
+            xml += """
+                <w:p>
+                  <w:pPr>
+                    <w:spacing w:before="60" w:after="240"/>
+                  </w:pPr>
+                  <w:r>
+                    <w:rPr>
+                      <w:sz w:val="20"/>
+                      <w:color w:val="555555"/>
+                    </w:rPr>
+                    <w:t>\(escapeXML(para.translation))</w:t>
+                  </w:r>
+                </w:p>
+            """
+        }
+        
+        xml += """
+          </w:body>
+        </w:document>
+        """
+        return xml
+    }
+    
+    private func buildRunXML(segment: RubySegment, baseSize: Int, rubySize: Int) -> String {
+        let text = escapeXML(segment.base)
+        guard !segment.ruby.isEmpty else {
+            return """
+                  <w:r>
+                    <w:rPr>
+                      <w:sz w:val="\(baseSize)"/>
+                      <w:szCs w:val="\(baseSize)"/>
+                    </w:rPr>
+                    <w:t>\(text)</w:t>
+                  </w:r>
+            """
+        }
+        
+        let escapedRuby = escapeXML(segment.ruby)
+        let offset = rubySize
+        return """
+              <w:r>
+                <w:ruby>
+                  <w:rubyPr>
+                    <w:rubyAlign w:val="center"/>
+                    <w:hps w:val="\(rubySize)"/>
+                    <w:hpsRaise w:val="\(offset)"/>
+                    <w:hpsBaseText w:val="\(baseSize)"/>
+                  </w:rubyPr>
+                  <w:rt>
+                    <w:r>
+                      <w:rPr>
+                        <w:sz w:val="\(rubySize)"/>
+                        <w:szCs w:val="\(rubySize)"/>
+                      </w:rPr>
+                      <w:t>\(escapedRuby)</w:t>
+                    </w:r>
+                  </w:rt>
+                  <w:rubyBase>
+                    <w:r>
+                      <w:rPr>
+                        <w:sz w:val="\(baseSize)"/>
+                        <w:szCs w:val="\(baseSize)"/>
+                      </w:rPr>
+                      <w:t>\(text)</w:t>
+                    </w:r>
+                  </w:rubyBase>
+                </w:ruby>
+              </w:r>
+        """
+    }
+    
+    private func escapeXML(_ string: String) -> String {
+        var escaped = string
+        escaped = escaped.replacingOccurrences(of: "&", with: "&amp;")
+        escaped = escaped.replacingOccurrences(of: "<", with: "&lt;")
+        escaped = escaped.replacingOccurrences(of: ">", with: "&gt;")
+        escaped = escaped.replacingOccurrences(of: "\"", with: "&quot;")
+        escaped = escaped.replacingOccurrences(of: "'", with: "&apos;")
+        return escaped
+    }
+}
+
+fileprivate struct CRC32 {
+    static let table: [UInt32] = {
+        var table = [UInt32](repeating: 0, count: 256)
+        for i in 0..<256 {
+            var c = UInt32(i)
+            for _ in 0..<8 {
+                if (c & 1) != 0 {
+                    c = 0xedb88320 ^ (c >> 1)
+                } else {
+                    c = c >> 1
+                }
+            }
+            table[i] = c
+        }
+        return table
+    }()
+    
+    static func calculate(_ data: Data) -> UInt32 {
+        var crc: UInt32 = 0xffffffff
+        for byte in data {
+            let index = Int((crc ^ UInt32(byte)) & 0xff)
+            crc = table[index] ^ (crc >> 8)
+        }
+        return crc ^ 0xffffffff
+    }
+}
+
+fileprivate struct SimpleZipWriter {
+    struct Entry {
+        let name: String
+        let data: Data
+    }
+    
+    static func write(entries: [Entry]) -> Data {
+        var zipData = Data()
+        var localHeaderOffsets = [String: Int]()
+        
+        for entry in entries {
+            localHeaderOffsets[entry.name] = zipData.count
+            
+            let nameBytes = Data(entry.name.utf8)
+            let crc = CRC32.calculate(entry.data)
+            
+            zipData.append(contentsOf: [0x50, 0x4b, 0x03, 0x04])
+            zipData.append(contentsOf: [10, 0])
+            zipData.append(contentsOf: [0, 0])
+            zipData.append(contentsOf: [0, 0])
+            zipData.append(contentsOf: [0, 0, 0, 0])
+            
+            writeUInt32(crc, into: &zipData)
+            let size = UInt32(entry.data.count)
+            writeUInt32(size, into: &zipData)
+            writeUInt32(size, into: &zipData)
+            
+            let nameLen = UInt16(nameBytes.count)
+            writeUInt16(nameLen, into: &zipData)
+            zipData.append(contentsOf: [0, 0])
+            
+            zipData.append(nameBytes)
+            zipData.append(entry.data)
+        }
+        
+        let startOfCentralDirectory = zipData.count
+        
+        for entry in entries {
+            let nameBytes = Data(entry.name.utf8)
+            let crc = CRC32.calculate(entry.data)
+            let size = UInt32(entry.data.count)
+            let offset = UInt32(localHeaderOffsets[entry.name] ?? 0)
+            
+            zipData.append(contentsOf: [0x50, 0x4b, 0x01, 0x02])
+            zipData.append(contentsOf: [20, 0])
+            zipData.append(contentsOf: [10, 0])
+            zipData.append(contentsOf: [0, 0])
+            zipData.append(contentsOf: [0, 0])
+            zipData.append(contentsOf: [0, 0, 0, 0])
+            
+            writeUInt32(crc, into: &zipData)
+            writeUInt32(size, into: &zipData)
+            writeUInt32(size, into: &zipData)
+            
+            let nameLen = UInt16(nameBytes.count)
+            writeUInt16(nameLen, into: &zipData)
+            zipData.append(contentsOf: [0, 0])
+            zipData.append(contentsOf: [0, 0])
+            zipData.append(contentsOf: [0, 0])
+            zipData.append(contentsOf: [0, 0])
+            zipData.append(contentsOf: [0, 0, 0, 0])
+            writeUInt32(offset, into: &zipData)
+            
+            zipData.append(nameBytes)
+        }
+        
+        let endOfCentralDirectory = zipData.count
+        let sizeOfCentralDirectory = UInt32(endOfCentralDirectory - startOfCentralDirectory)
+        let offsetOfCentralDirectory = UInt32(startOfCentralDirectory)
+        let numFiles = UInt16(entries.count)
+        
+        zipData.append(contentsOf: [0x50, 0x4b, 0x05, 0x06])
+        zipData.append(contentsOf: [0, 0])
+        zipData.append(contentsOf: [0, 0])
+        writeUInt16(numFiles, into: &zipData)
+        writeUInt16(numFiles, into: &zipData)
+        writeUInt32(sizeOfCentralDirectory, into: &zipData)
+        writeUInt32(offsetOfCentralDirectory, into: &zipData)
+        zipData.append(contentsOf: [0, 0])
+        
+        return zipData
+    }
+    
+    private static func writeUInt16(_ value: UInt16, into data: inout Data) {
+        var val = value.littleEndian
+        withUnsafeBytes(of: &val) { data.append(contentsOf: $0) }
+    }
+    
+    private static func writeUInt32(_ value: UInt32, into data: inout Data) {
+        var val = value.littleEndian
+        withUnsafeBytes(of: &val) { data.append(contentsOf: $0) }
     }
 }

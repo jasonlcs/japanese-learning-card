@@ -2386,7 +2386,7 @@ struct HistoryView: View {
     @State private var selectedArticle: GeneratedArticle?
 
     enum HistoryMode: String, CaseIterable, Identifiable {
-        case articles = "AI 文章"
+        case articles = "AI 文章與短文"
         case cards = "複習卡片"
         case quizzes = "考試紀錄"
         case database = "資料庫"
@@ -2453,11 +2453,31 @@ struct HistoryView: View {
                     selectedArticle = article
                 } label: {
                     VStack(alignment: .leading, spacing: 4) {
-                        HStack {
+                        HStack(alignment: .center, spacing: 6) {
+                            if article.paragraphs != nil {
+                                Label("AI 短文", systemImage: "doc.text")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 2)
+                                    .background(Color.blue.opacity(0.12))
+                                    .foregroundStyle(Color.blue)
+                                    .cornerRadius(4)
+                            } else {
+                                Label("AI 擷取", systemImage: "sparkles.rectangle.stack")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 2)
+                                    .background(Color.green.opacity(0.12))
+                                    .foregroundStyle(Color.green)
+                                    .cornerRadius(4)
+                            }
+                            
                             Text(article.title.isEmpty ? article.theme : article.title)
                                 .font(.headline)
                                 .lineLimit(1)
+                            
                             Spacer()
+                            
                             Text(article.generatedAt.formatted(date: .numeric, time: .shortened))
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
@@ -2483,7 +2503,7 @@ struct HistoryView: View {
         }
         .overlay {
             if viewModel.snapshot.generatedArticles.isEmpty {
-                ContentUnavailableView("還沒有 AI 文章", systemImage: "doc.text")
+                ContentUnavailableView("還沒有 AI 文章與短文", systemImage: "doc.text")
             }
         }
     }
