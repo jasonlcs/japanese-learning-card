@@ -1,4 +1,6 @@
 import Combine
+import SwiftUI
+import UniformTypeIdentifiers
 #if canImport(AppKit)
 import AppKit
 #elseif canImport(UIKit)
@@ -93,6 +95,16 @@ public final class AppViewModel: ObservableObject {
     @Published var manualCardInstruction = ""
     @Published var aiArticleCustomTheme = ""
     @Published var selectedTab = 0
+    @Published public var selectedVocabularySource: VocabularySourceType = .all
+    @Published public var userEssayPrompt = ""
+    @Published public var previewVocabularyCards: [LearningCard] = []
+    @Published public var isGeneratingEssay = false
+    @Published public var essayGenerationProgress = ""
+    @Published public var essayValidationError: String? = nil
+    @Published public var lastGeneratedEssay: GeneratedArticle? = nil
+    @Published public var exportedEssayURL: URL? = nil
+    @Published public var essayGenerationError: String? = nil
+    private var essayGenerationTask: Task<Void, Never>?
     @Published private(set) var visibleCardTimerState = VisibleCardTimerState(
         duration: 20,
         deadline: nil,
@@ -446,6 +458,9 @@ public final class AppViewModel: ObservableObject {
         }
         updateVisibleCardTimerState()
         aiArticleCustomTheme = snapshot.settings.aiArticleCustomTheme
+        if previewVocabularyCards.isEmpty {
+            shufflePreviewVocabulary()
+        }
         if let currentCard,
            let updatedCard = snapshot.cards.first(where: { $0.id == currentCard.id }),
            updatedCard.status != .skipped,
@@ -1721,6 +1736,353 @@ public final class AppViewModel: ObservableObject {
                 }
             }
             await reload()
+        }
+    }
+
+    public func setSelectedVocabularySource(_ source: VocabularySourceType) {
+        selectedVocabularySource = source
+        shufflePreviewVocabulary()
+    }
+
+    public func shufflePreviewVocabulary() {
+        let activeCards = snapshot.cards.filter { $0.status != .skipped }
+        guard !activeCards.isEmpty else {
+            previewVocabularyCards = []
+            return
+        }
+
+        let candidates: [LearningCard]
+        switch selectedVocabularySource {
+        case .all:
+            candidates = activeCards
+        case .recent:
+            candidates = Array(activeCards.sorted(by: { $0.createdAt > $1.createdAt }).prefix(20))
+        case .unfamiliar:
+            let unfamiliarCards = activeCards.filter { $0.status == .new || $0.status == .reviewing }
+            if unfamiliarCards.isEmpty {
+                candidates = activeCards.sorted(by: { $0.shownCount > $1.shownCount })
+            } else {
+                candidates = unfamiliarCards
+            }
+        }
+
+        guard !candidates.isEmpty else {
+            previewVocabularyCards = selectBalancedCards(from: activeCards)
+            return
+        }
+
+        previewVocabularyCards = selectBalancedCards(from: candidates)
+    }
+
+    private func selectBalancedCards(from list: [LearningCard]) -> [LearningCard] {
+        var shuffledGrammar = list.filter { $0.partOfSpeech == "文法句型" }.shuffled()
+        var shuffledVerbs = list.filter { $0.partOfSpeech.contains("動詞") || ($0.verbFormType != .notVerb && $0.verbFormType != .unknown) }.shuffled()
+        var shuffledOthers = list.filter { $0.partOfSpeech != "文法句型" && !$0.partOfSpeech.contains("動詞") && $0.verbFormType == .notVerb }.shuffled()
+
+        var selected = [LearningCard]()
+        let targetCount = Int.random(in: 5...10)
+        
+        while selected.count < targetCount && !(shuffledGrammar.isEmpty && shuffledVerbs.isEmpty && shuffledOthers.isEmpty) {
+            if !shuffledGrammar.isEmpty {
+                selected.append(shuffledGrammar.removeFirst())
+            }
+            if selected.count < targetCount && !shuffledVerbs.isEmpty {
+                selected.append(shuffledVerbs.removeFirst())
+            }
+            if selected.count < targetCount && !shuffledOthers.isEmpty {
+                selected.append(shuffledOthers.removeFirst())
+            }
+        }
+        return selected
+    }
+
+    public func generateAIEssayNow() {
+        guard !isGeneratingEssay else { return }
+        
+        let words = previewVocabularyCards.map(\.word)
+        guard !words.isEmpty else {
+            essayGenerationError = "請先新增或選擇一些單字。"
+            return
+        }
+
+        isGeneratingEssay = true
+        essayGenerationProgress = "正在驗證提示詞並擬定短文..."
+        essayValidationError = nil
+        essayGenerationError = nil
+        
+        essayGenerationTask = Task {
+            do {
+                let payload = try await providerClient.generateEssay(
+                    theme: userEssayPrompt,
+                    vocabularyWords: words,
+                    settings: snapshot.settings
+                )
+                
+                guard payload.isValidPrompt else {
+                    await MainActor.run {
+                        self.isGeneratingEssay = false
+                        self.essayValidationError = payload.validationError
+                        self.essayGenerationProgress = ""
+                    }
+                    return
+                }
+                
+                try Task.checkCancellation()
+                
+                await MainActor.run {
+                    self.essayGenerationProgress = "正在標註漢字讀音..."
+                }
+                
+                var textsToAnnotate = [payload.title]
+                for para in payload.paragraphs {
+                    textsToAnnotate.append(para.japanese)
+                }
+                
+                let rubyResults: [[RubySegment]]
+                do {
+                    rubyResults = try await providerClient.generateRubyForTexts(
+                        texts: textsToAnnotate,
+                        settings: snapshot.settings
+                    )
+                } catch {
+                    OpenAICompatibleLLMClient.log("漢字讀音生成失敗（可能逾時），降級使用無標記模式：\(error.localizedDescription)")
+                    rubyResults = Array(repeating: [], count: textsToAnnotate.count)
+                }
+                
+                try Task.checkCancellation()
+                
+                let titleRuby = rubyResults.first ?? []
+                var paragraphs = [ArticleParagraph]()
+                for (index, para) in payload.paragraphs.enumerated() {
+                    let ruby = (index + 1 < rubyResults.count) ? rubyResults[index + 1] : []
+                    paragraphs.append(
+                        ArticleParagraph(
+                            japanese: para.japanese,
+                            ruby: ruby,
+                            translation: para.translation
+                        )
+                    )
+                }
+                
+                let plainText = payload.paragraphs.map { "\($0.japanese)\n\($0.translation)" }.joined(separator: "\n\n")
+                let levels = Array(Set(previewVocabularyCards.map(\.jlptLevel)))
+                let contentHash = ContentHash.sha256(plainText)
+                
+                let article = GeneratedArticle(
+                    theme: userEssayPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "生活化主題" : userEssayPrompt,
+                    jlptLevels: levels,
+                    title: payload.title,
+                    plainText: plainText,
+                    contentHash: contentHash,
+                    sourceId: AISource.sentinelSourceId,
+                    generatedAt: Date(),
+                    cardCount: previewVocabularyCards.count,
+                    updatedAt: Date(),
+                    paragraphs: paragraphs,
+                    userPrompt: userEssayPrompt,
+                    vocabularySource: selectedVocabularySource.rawValue,
+                    vocabularyWords: words,
+                    titleRuby: titleRuby
+                )
+                
+                await MainActor.run {
+                    self.lastGeneratedEssay = article
+                    self.isGeneratingEssay = false
+                    self.essayGenerationProgress = ""
+                    self.statusMessage = "短文「\(payload.title)」產生成功！"
+                }
+                
+                try await store.update { $0.generatedArticles.insert(article, at: 0) }
+                await reload()
+                
+            } catch is CancellationError {
+                await MainActor.run {
+                    self.isGeneratingEssay = false
+                    self.essayGenerationProgress = ""
+                    self.statusMessage = "短文產生已取消"
+                }
+            } catch {
+                await MainActor.run {
+                    self.isGeneratingEssay = false
+                    self.essayGenerationProgress = ""
+                    self.essayGenerationError = "產生失敗：\(error.localizedDescription)"
+                }
+            }
+        }
+    }
+    
+    public func cancelEssayGeneration() {
+        essayGenerationTask?.cancel()
+        essayGenerationTask = nil
+        isGeneratingEssay = false
+        essayGenerationProgress = ""
+        statusMessage = "短文產生已取消"
+    }
+
+    public func exportEssay(article: GeneratedArticle, format: String) {
+        let title = article.title
+        let fileExtension: String
+        switch format {
+        case "pdf": fileExtension = "pdf"
+        case "png": fileExtension = "png"
+        case "word": fileExtension = "doc"
+        default: return
+        }
+
+        let fileName = "\(title.isEmpty ? "AI短文" : title).\(fileExtension)"
+
+        #if os(macOS)
+        let savePanel = NSSavePanel()
+        let docType = UTType(filenameExtension: "doc") ?? .data
+        savePanel.allowedContentTypes = [
+            format == "pdf" ? .pdf : (format == "png" ? .png : docType)
+        ]
+        savePanel.nameFieldStringValue = fileName
+        savePanel.begin { [weak self] response in
+            guard response == .OK, let url = savePanel.url else { return }
+            do {
+                try self?.performWriteEssay(article: article, to: url, format: format)
+                self?.statusMessage = "已匯出至：\(url.lastPathComponent)"
+            } catch {
+                self?.statusMessage = "匯出失敗：\(error.localizedDescription)"
+            }
+        }
+        #else
+        let tempDir = FileManager.default.temporaryDirectory
+        let fileURL = tempDir.appendingPathComponent(fileName)
+        do {
+            try performWriteEssay(article: article, to: fileURL, format: format)
+            self.exportedEssayURL = fileURL
+        } catch {
+            self.statusMessage = "匯出失敗：\(error.localizedDescription)"
+        }
+        #endif
+    }
+
+    @MainActor
+    private func performWriteEssay(article: GeneratedArticle, to url: URL, format: String) throws {
+        let title = article.title
+        let theme = article.theme
+        let paragraphs = article.paragraphs ?? [ArticleParagraph(japanese: article.plainText, translation: "")]
+        if format == "word" {
+            var html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <meta charset="utf-8">
+              <style>
+                body { font-family: 'MS Mincho', 'Hiragino Mincho Pro', serif; line-height: 2.0; color: #333333; padding: 40px; }
+                h1 { text-align: center; color: #111111; font-size: 24pt; margin-bottom: 5pt; }
+                .theme { text-align: center; font-size: 11pt; color: #666666; margin-bottom: 30pt; font-style: italic; }
+                .paragraph { margin-bottom: 24pt; }
+                .japanese { font-size: 14pt; margin-bottom: 6pt; }
+                .translation { font-size: 11pt; color: #555555; }
+                ruby { font-size: 1em; }
+                rt { font-size: 0.6em; color: #777777; }
+              </style>
+            </head>
+            <body>
+              <h1>\(title)</h1>
+              <div class="theme">主題／提示詞：\(theme)</div>
+            """
+
+            for para in paragraphs {
+                html += "<div class=\"paragraph\"><div class=\"japanese\">"
+                if RubySupport.isUsable(para.ruby, for: para.japanese) {
+                    for segment in para.ruby {
+                        if segment.ruby.isEmpty {
+                            html += segment.base
+                        } else {
+                            html += "<ruby>\(segment.base)<rt>\(segment.ruby)</rt></ruby>"
+                        }
+                    }
+                } else {
+                    html += para.japanese
+                }
+                html += "</div>"
+                html += "<div class=\"translation\">\(para.translation)</div>"
+                html += "</div>"
+            }
+
+            html += """
+            </body>
+            </html>
+            """
+            try html.write(to: url, atomically: true, encoding: .utf8)
+            return
+        }
+
+        let exportView = VStack(alignment: .leading, spacing: 18) {
+            RubyText(
+                segments: article.titleRuby ?? [],
+                fallback: title,
+                baseFont: .system(size: 24, weight: .bold),
+                rubyFont: .system(size: 12)
+            )
+            .frame(maxWidth: .infinity, alignment: .center)
+            
+            Text("主題：\(theme)")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.bottom, 10)
+            
+            ForEach(Array(paragraphs.enumerated()), id: \.offset) { _, para in
+                VStack(alignment: .leading, spacing: 8) {
+                    RubyText(
+                        segments: para.ruby,
+                        fallback: para.japanese,
+                        baseFont: .system(size: 16),
+                        rubyFont: .system(size: 9)
+                    )
+                    
+                    Text(para.translation)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.bottom, 12)
+            }
+        }
+        .padding(36)
+        .background(Color.white)
+        .colorScheme(.light)
+        .frame(width: 595)
+
+        let renderer = ImageRenderer(content: exportView)
+
+        if format == "pdf" {
+            renderer.render { size, context in
+                var mediaBox = CGRect(origin: .zero, size: size)
+                guard let consumer = CGDataConsumer(url: url as CFURL),
+                      let pdfContext = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else {
+                    return
+                }
+                pdfContext.beginPDFPage(nil)
+                context(pdfContext)
+                pdfContext.endPDFPage()
+                pdfContext.closePDF()
+            }
+        } else if format == "png" {
+            renderer.scale = 2.0
+            #if os(macOS)
+            guard let nsImage = renderer.nsImage else {
+                throw NSError(domain: "ImageRenderer", code: 0, userInfo: [NSLocalizedDescriptionKey: "Failed to generate NSImage"])
+            }
+            guard let tiffData = nsImage.tiffRepresentation,
+                  let bitmap = NSBitmapImageRep(data: tiffData),
+                  let pngData = bitmap.representation(using: .png, properties: [:]) else {
+                throw NSError(domain: "ImageRenderer", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to render PNG data"])
+            }
+            try pngData.write(to: url)
+            #else
+            guard let uiImage = renderer.uiImage else {
+                throw NSError(domain: "ImageRenderer", code: 0, userInfo: [NSLocalizedDescriptionKey: "Failed to generate UIImage"])
+            }
+            guard let pngData = uiImage.pngData() else {
+                throw NSError(domain: "ImageRenderer", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to render PNG data"])
+            }
+            try pngData.write(to: url)
+            #endif
         }
     }
 }
