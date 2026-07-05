@@ -120,6 +120,21 @@ public struct OpenAICompatibleLLMClient: LLMClient {
     /// 逾時 / 5xx 等暫時性錯誤最多再重試 2 次（共 3 次嘗試）。
     private static let maxRequestAttempts = 3
     private static let retryDelaysSeconds: [TimeInterval] = [2, 5]
+    // 注音走 SSE 串流：只要 token 持續流動連線就活著，繞開 gateway 對
+    // 非串流長請求的時間預算（實測 opencode.ai 約 270 秒就回 503）。
+    // 逾時因此改以「閒置無資料」計，另設總時長上限避免無限拖延。
+    private static let rubyMaxRequestAttempts = 2
+    private static let streamingIdleTimeout: TimeInterval = 90
+    private static let streamingResourceTimeout: TimeInterval = 600
+
+    private static let streamingSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = streamingIdleTimeout
+        config.timeoutIntervalForResource = streamingResourceTimeout
+        config.waitsForConnectivity = false
+        config.httpAdditionalHeaders = ["User-Agent": userAgent]
+        return URLSession(configuration: config)
+    }()
 
     private let secretStore: SecretStore
     private let session: URLSession
@@ -139,14 +154,14 @@ public struct OpenAICompatibleLLMClient: LLMClient {
     }
 
     public func generateCards(document: CrawledDocument, sourcePrompt: String, settings: AppSettings) async throws -> [LearningCard] {
-        guard let apiKey = try secretStore.apiKey(reference: settings.providerConfig.apiKeyKeychainRef), !apiKey.isEmpty else {
-            throw LLMClientError.missingAPIKey
-        }
+        let apiKey = try resolvedAPIKey(settings: settings)
 
         let body = Self.requestBody(document: document, sourcePrompt: sourcePrompt, settings: settings)
         var request = URLRequest(url: settings.providerConfig.baseURL.appendingPathComponent("chat/completions"))
         request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        if !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let organization = settings.providerConfig.organization, !organization.isEmpty {
             request.setValue(organization, forHTTPHeaderField: "OpenAI-Organization")
@@ -175,14 +190,14 @@ public struct OpenAICompatibleLLMClient: LLMClient {
     }
 
     public func generateManualCards(text: String, instruction: String, sourceURL: URL, settings: AppSettings) async throws -> [LearningCard] {
-        guard let apiKey = try secretStore.apiKey(reference: settings.providerConfig.apiKeyKeychainRef), !apiKey.isEmpty else {
-            throw LLMClientError.missingAPIKey
-        }
+        let apiKey = try resolvedAPIKey(settings: settings)
 
         let body = Self.manualCardsRequestBody(text: text, instruction: instruction, settings: settings)
         var request = URLRequest(url: settings.providerConfig.baseURL.appendingPathComponent("chat/completions"))
         request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        if !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let organization = settings.providerConfig.organization, !organization.isEmpty {
             request.setValue(organization, forHTTPHeaderField: "OpenAI-Organization")
@@ -211,14 +226,14 @@ public struct OpenAICompatibleLLMClient: LLMClient {
     }
 
     public func generateRuby(for cards: [LearningCard], settings: AppSettings) async throws -> [RubyBackfillResult] {
-        guard let apiKey = try secretStore.apiKey(reference: settings.providerConfig.apiKeyKeychainRef), !apiKey.isEmpty else {
-            throw LLMClientError.missingAPIKey
-        }
+        let apiKey = try resolvedAPIKey(settings: settings)
 
         let body = Self.rubyBackfillRequestBody(cards: cards, settings: settings)
         var request = URLRequest(url: settings.providerConfig.baseURL.appendingPathComponent("chat/completions"))
         request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        if !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let organization = settings.providerConfig.organization, !organization.isEmpty {
             request.setValue(organization, forHTTPHeaderField: "OpenAI-Organization")
@@ -244,14 +259,14 @@ public struct OpenAICompatibleLLMClient: LLMClient {
     }
 
     public func generateQuiz(cards: [LearningCard], settings: AppSettings) async throws -> [QuizQuestion] {
-        guard let apiKey = try secretStore.apiKey(reference: settings.providerConfig.apiKeyKeychainRef), !apiKey.isEmpty else {
-            throw LLMClientError.missingAPIKey
-        }
+        let apiKey = try resolvedAPIKey(settings: settings)
 
         let body = Self.quizRequestBody(cards: cards, settings: settings)
         var request = URLRequest(url: settings.providerConfig.baseURL.appendingPathComponent("chat/completions"))
         request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        if !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let organization = settings.providerConfig.organization, !organization.isEmpty {
             request.setValue(organization, forHTTPHeaderField: "OpenAI-Organization")
@@ -277,9 +292,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
     }
 
     public func generateExampleReading(exampleJa: String, settings: AppSettings) async throws -> String {
-        guard let apiKey = try secretStore.apiKey(reference: settings.providerConfig.apiKeyKeychainRef), !apiKey.isEmpty else {
-            throw LLMClientError.missingAPIKey
-        }
+        let apiKey = try resolvedAPIKey(settings: settings)
 
         let body = ChatCompletionRequest(
             model: settings.providerConfig.fastModel,
@@ -297,7 +310,9 @@ public struct OpenAICompatibleLLMClient: LLMClient {
 
         var request = URLRequest(url: settings.providerConfig.baseURL.appendingPathComponent("chat/completions"))
         request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        if !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let organization = settings.providerConfig.organization, !organization.isEmpty {
             request.setValue(organization, forHTTPHeaderField: "OpenAI-Organization")
@@ -323,14 +338,14 @@ public struct OpenAICompatibleLLMClient: LLMClient {
     }
 
     public func generateArticle(theme: String, jlptLevels: [JLPTLevel], settings: AppSettings) async throws -> AIArticleDraft {
-        guard let apiKey = try secretStore.apiKey(reference: settings.providerConfig.apiKeyKeychainRef), !apiKey.isEmpty else {
-            throw LLMClientError.missingAPIKey
-        }
+        let apiKey = try resolvedAPIKey(settings: settings)
 
         let body = Self.articleRequestBody(theme: theme, jlptLevels: jlptLevels, settings: settings)
         var request = URLRequest(url: settings.providerConfig.baseURL.appendingPathComponent("chat/completions"))
         request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        if !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let organization = settings.providerConfig.organization, !organization.isEmpty {
             request.setValue(organization, forHTTPHeaderField: "OpenAI-Organization")
@@ -361,14 +376,14 @@ public struct OpenAICompatibleLLMClient: LLMClient {
     }
 
     public func generateEssay(theme: String, vocabularyWords: [String], settings: AppSettings) async throws -> AIEssayPayload {
-        guard let apiKey = try secretStore.apiKey(reference: settings.providerConfig.apiKeyKeychainRef), !apiKey.isEmpty else {
-            throw LLMClientError.missingAPIKey
-        }
+        let apiKey = try resolvedAPIKey(settings: settings)
 
         let body = Self.essayRequestBody(theme: theme, vocabularyWords: vocabularyWords, settings: settings)
         var request = URLRequest(url: settings.providerConfig.baseURL.appendingPathComponent("chat/completions"))
         request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        if !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let organization = settings.providerConfig.organization, !organization.isEmpty {
             request.setValue(organization, forHTTPHeaderField: "OpenAI-Organization")
@@ -382,9 +397,13 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         request.httpBody = try JSONEncoder().encode(body)
 
         Self.debugLog("essay 請求 → \(request.url?.absoluteString ?? "")，model=\(settings.providerConfig.model)")
-        let data = try await performLoggedRequest(request, operation: "generateEssay", model: settings.providerConfig.model)
-        Self.debugLog("essay 回應原始 body：\n\(String(decoding: data, as: UTF8.self))")
-        let content = try Self.extractContent(from: data)
+        let content = try await performLoggedStreamingRequest(
+            request,
+            operation: "generateEssay",
+            model: settings.providerConfig.model,
+            maxAttempts: Self.maxRequestAttempts
+        )
+        Self.debugLog("essay 串流組裝內容：\n\(content)")
         let payload = try Self.decodeEssay(from: content)
         
         await AIRequestLogStore.shared.appendEvent(
@@ -400,14 +419,14 @@ public struct OpenAICompatibleLLMClient: LLMClient {
     }
 
     public func generateRubyForTexts(texts: [String], settings: AppSettings) async throws -> [[RubySegment]] {
-        guard let apiKey = try secretStore.apiKey(reference: settings.providerConfig.apiKeyKeychainRef), !apiKey.isEmpty else {
-            throw LLMClientError.missingAPIKey
-        }
+        let apiKey = try resolvedAPIKey(settings: settings)
 
         let body = Self.rubyForTextsRequestBody(texts: texts, settings: settings)
         var request = URLRequest(url: settings.providerConfig.baseURL.appendingPathComponent("chat/completions"))
         request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        if !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let organization = settings.providerConfig.organization, !organization.isEmpty {
             request.setValue(organization, forHTTPHeaderField: "OpenAI-Organization")
@@ -420,17 +439,40 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         }
         request.httpBody = try JSONEncoder().encode(body)
 
-        let data = try await performLoggedRequest(request, operation: "generateRubyForTexts", model: settings.providerConfig.fastModel)
-        Self.debugLog("rubyForTexts 回應原始 body：\n\(String(decoding: data, as: UTF8.self))")
-        let content = try Self.extractContent(from: data)
+        // 注音是輔助步驟，失敗可事後用「重新標註注音」補救；
+        // 走 SSE 串流避開 gateway 的非串流時間預算，重試次數也較少。
+        let content = try await performLoggedStreamingRequest(
+            request,
+            operation: "generateRubyForTexts",
+            model: settings.providerConfig.fastModel,
+            maxAttempts: Self.rubyMaxRequestAttempts
+        )
+        Self.debugLog("rubyForTexts 串流組裝內容：\n\(content)")
         let results = try Self.decodeRubyForTexts(from: content, sourceTexts: texts)
         
+        // emptyRubyCount > 0 代表模型回覆的 ruby 拼接與原文不符，該段已降級為空 ruby。
+        let emptyRubyCount = results.filter(\.isEmpty).count
         await AIRequestLogStore.shared.appendEvent(
             "llm.decode.completed",
             operation: "generateRubyForTexts",
-            output: ["resultCount": "\(results.count)"]
+            message: emptyRubyCount > 0 ? "部分段落 ruby 拼接與原文不符，已降級為空 ruby。" : nil,
+            output: [
+                "resultCount": "\(results.count)",
+                "emptyRubyCount": "\(emptyRubyCount)"
+            ]
         )
         return results
+    }
+
+    /// 取得 API key；Ollama 等本地 endpoint 不需要 key，回空字串（請求時不送 Authorization）。
+    private func resolvedAPIKey(settings: AppSettings) throws -> String {
+        if let stored = try secretStore.apiKey(reference: settings.providerConfig.apiKeyKeychainRef), !stored.isEmpty {
+            return stored
+        }
+        guard !settings.providerConfig.preset.requiresAPIKey else {
+            throw LLMClientError.missingAPIKey
+        }
+        return ""
     }
 
     /// 解析 provider 的外層回應並取出 message.content；失敗時印出原始 body 方便除錯。
@@ -455,15 +497,14 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         if let apiKeyOverride, !apiKeyOverride.isEmpty {
             apiKey = apiKeyOverride
         } else {
-            guard let stored = try secretStore.apiKey(reference: settings.providerConfig.apiKeyKeychainRef), !stored.isEmpty else {
-                throw LLMClientError.missingAPIKey
-            }
-            apiKey = stored
+            apiKey = try resolvedAPIKey(settings: settings)
         }
 
         var request = URLRequest(url: settings.providerConfig.baseURL.appendingPathComponent("models"))
         request.httpMethod = "GET"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        if !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
         if let organization = settings.providerConfig.organization, !organization.isEmpty {
             request.setValue(organization, forHTTPHeaderField: "OpenAI-Organization")
         }
@@ -477,7 +518,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         let data = try await performLoggedRequest(request, operation: "listModels", model: settings.providerConfig.model)
 
         let decoded = try JSONDecoder().decode(ModelsResponse.self, from: data)
-        let models = decoded.data.map(\.id).sorted()
+        let models = (decoded.data ?? []).map(\.id).sorted()
         await AIRequestLogStore.shared.appendEvent(
             "llm.decode.completed",
             operation: "listModels",
@@ -486,13 +527,19 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         return models
     }
 
-    private func performLoggedRequest(_ request: URLRequest, operation: String, model: String) async throws -> Data {
+    private func performLoggedRequest(
+        _ request: URLRequest,
+        operation: String,
+        model: String,
+        timeout: TimeInterval = OpenAICompatibleLLMClient.providerRequestTimeout,
+        maxAttempts: Int = OpenAICompatibleLLMClient.maxRequestAttempts
+    ) async throws -> Data {
         var request = request
-        request.timeoutInterval = Self.providerRequestTimeout
+        request.timeoutInterval = timeout
         let requestBytes = request.httpBody?.count ?? 0
 
         var lastError: Error = LLMClientError.invalidResponse
-        for attempt in 1...Self.maxRequestAttempts {
+        for attempt in 1...maxAttempts {
             let startedAt = Date()
             await Self.logRequestStart(
                 operation: operation,
@@ -521,8 +568,8 @@ public struct OpenAICompatibleLLMClient: LLMClient {
                     operation: operation,
                     detail: Self.transportErrorSummary(error, model: model, timeout: request.timeoutInterval)
                 )
-                if Self.isRetryableTransportError(error), attempt < Self.maxRequestAttempts {
-                    await logRetry(operation: operation, attempt: attempt, reason: error.localizedDescription)
+                if Self.isRetryableTransportError(error), attempt < maxAttempts {
+                    await logRetry(operation: operation, attempt: attempt, maxAttempts: maxAttempts, reason: error.localizedDescription)
                     continue
                 }
                 throw lastError
@@ -548,13 +595,153 @@ public struct OpenAICompatibleLLMClient: LLMClient {
                 operation: operation,
                 detail: "供應商（\(model)）回傳 HTTP \(statusCode)：\(Self.responseSnippet(from: data))"
             )
-            if Self.isRetryableStatusCode(statusCode), attempt < Self.maxRequestAttempts {
-                await logRetry(operation: operation, attempt: attempt, reason: "HTTP \(statusCode)")
+            if Self.isRetryableStatusCode(statusCode), attempt < maxAttempts {
+                await logRetry(operation: operation, attempt: attempt, maxAttempts: maxAttempts, reason: "HTTP \(statusCode)")
                 continue
             }
             throw lastError
         }
         throw lastError
+    }
+
+    private enum StreamAttemptOutcome {
+        case success(String)
+        case retryable(reason: String, error: Error)
+        case fatal(Error)
+    }
+
+    /// SSE 串流版請求：回傳組裝完成的 message content。
+    /// token 邊生成邊回傳，連線持續活躍，避開 gateway 對非串流長請求的時間預算。
+    private func performLoggedStreamingRequest(
+        _ request: URLRequest,
+        operation: String,
+        model: String,
+        maxAttempts: Int
+    ) async throws -> String {
+        var request = request
+        request.timeoutInterval = Self.streamingIdleTimeout
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        let requestBytes = request.httpBody?.count ?? 0
+
+        var lastError: Error = LLMClientError.invalidResponse
+        for attempt in 1...maxAttempts {
+            switch await performStreamingAttempt(request, operation: operation, model: model, requestBytes: requestBytes) {
+            case .success(let content):
+                return content
+            case .retryable(let reason, let error):
+                lastError = error
+                if attempt < maxAttempts {
+                    await logRetry(operation: operation, attempt: attempt, maxAttempts: maxAttempts, reason: reason)
+                }
+            case .fatal(let error):
+                throw error
+            }
+        }
+        throw lastError
+    }
+
+    private func performStreamingAttempt(
+        _ request: URLRequest,
+        operation: String,
+        model: String,
+        requestBytes: Int
+    ) async -> StreamAttemptOutcome {
+        let startedAt = Date()
+        await Self.logRequestStart(operation: operation, request: request, model: model, requestBytes: requestBytes)
+        do {
+            let (bytes, response) = try await Self.streamingSession.bytes(for: request)
+            let statusCode = (response as? HTTPURLResponse)?.statusCode
+
+            if let statusCode, !(200..<300).contains(statusCode) {
+                var errorBody = Data()
+                for try await byte in bytes {
+                    errorBody.append(byte)
+                    if errorBody.count >= 4096 { break }
+                }
+                await Self.logRequest(
+                    operation: operation,
+                    request: request,
+                    model: model,
+                    startedAt: startedAt,
+                    statusCode: statusCode,
+                    requestBytes: requestBytes,
+                    responseData: errorBody,
+                    errorSummary: Self.responseSnippet(from: errorBody)
+                )
+                let error = AIStageError(
+                    stage: .aiRequest,
+                    operation: operation,
+                    detail: "供應商（\(model)）回傳 HTTP \(statusCode)：\(Self.responseSnippet(from: errorBody))"
+                )
+                return Self.isRetryableStatusCode(statusCode)
+                    ? .retryable(reason: "HTTP \(statusCode)", error: error)
+                    : .fatal(error)
+            }
+
+            var content = ""
+            for try await line in bytes.lines {
+                if let delta = Self.streamedContentDelta(fromSSELine: line) {
+                    content += delta
+                }
+            }
+            await Self.logRequest(
+                operation: operation,
+                request: request,
+                model: model,
+                startedAt: startedAt,
+                statusCode: statusCode,
+                requestBytes: requestBytes,
+                responseData: Data(content.utf8),
+                errorSummary: content.isEmpty ? "串流結束但沒有任何內容。" : nil
+            )
+            guard !content.isEmpty else {
+                let error = AIStageError(
+                    stage: .aiRequest,
+                    operation: operation,
+                    detail: "供應商（\(model)）串流結束但沒有任何內容。"
+                )
+                return .retryable(reason: "空的串流回應", error: error)
+            }
+            return .success(content)
+        } catch {
+            let summary = Self.transportErrorSummary(error, model: model, timeout: request.timeoutInterval)
+            await Self.logRequest(
+                operation: operation,
+                request: request,
+                model: model,
+                startedAt: startedAt,
+                statusCode: nil,
+                requestBytes: requestBytes,
+                responseData: Data(),
+                errorSummary: summary
+            )
+            let stageError = AIStageError(stage: .aiRequest, operation: operation, detail: summary)
+            return Self.isRetryableTransportError(error)
+                ? .retryable(reason: summary, error: stageError)
+                : .fatal(stageError)
+        }
+    }
+
+    /// 解析單行 SSE，取出 chat chunk 的 `delta.content`。
+    /// reasoning 增量、註解行、`[DONE]`、非 data 行都回 nil。
+    public static func streamedContentDelta(fromSSELine line: String) -> String? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix("data:") else { return nil }
+        let payload = trimmed.dropFirst(5).trimmingCharacters(in: .whitespaces)
+        guard !payload.isEmpty, payload != "[DONE]" else { return nil }
+        guard let data = payload.data(using: .utf8),
+              let chunk = try? JSONDecoder().decode(StreamChunk.self, from: data) else { return nil }
+        return chunk.choices?.first?.delta?.content
+    }
+
+    private struct StreamChunk: Codable {
+        struct Choice: Codable {
+            struct Delta: Codable {
+                var content: String?
+            }
+            var delta: Delta?
+        }
+        var choices: [Choice]?
     }
 
     /// 逾時、連線中斷等暫時性錯誤值得重試；憑證錯誤、URL 錯誤等重試無意義。
@@ -581,13 +768,13 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         return error.localizedDescription
     }
 
-    private func logRetry(operation: String, attempt: Int, reason: String) async {
+    private func logRetry(operation: String, attempt: Int, maxAttempts: Int, reason: String) async {
         let delay = Self.retryDelaysSeconds[min(attempt - 1, Self.retryDelaysSeconds.count - 1)]
         await AIRequestLogStore.shared.appendEvent(
             "llm.request.retry",
             operation: operation,
             message: "Attempt \(attempt) failed; retrying in \(Int(delay))s.",
-            input: ["attempt": "\(attempt)", "maxAttempts": "\(Self.maxRequestAttempts)"],
+            input: ["attempt": "\(attempt)", "maxAttempts": "\(maxAttempts)"],
             errorSummary: reason
         )
         try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
@@ -1177,7 +1364,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         2. 禁止任何編程代碼（如 Python, Swift, Java 等）、數學計算（如代數、微積分等）、或與學習日文及生活工作完全無關的亂問（如「如何製造核彈」）。
         3. 如果發現提示詞違反規定，你必須將 JSON 的 "isValidPrompt" 設為 false，並在 "validationError" 中用繁體中文指出具體原因（例如：「提示詞必須與日文學習、生活或工作場景相關，不可寫程式或算數學。」），此時不需要填寫 title 和 paragraphs 內容。
         4. 如果提示詞合規，則 "isValidPrompt" 設為 true，"validationError" 設為 empty string ""，且必須生成符合要求的 "title" 和 "paragraphs"。
-        5. 全文約 3~4 個段落。在日文段落中請自然融入指定的單字，並將融入的單字用雙星號標記（如：**單字**），讓使用者一眼看出。
+        5. 全文約 3~4 個段落。在日文段落中請自然融入指定的單字。輸出純文字，禁止使用任何 Markdown 標記（如 **粗體**）。
         6. 使用「です/ます」體。段落翻譯必須使用繁體中文，禁止簡體中文。
         
         只輸出 JSON，不要 Markdown 包裹。JSON schema 格式必須嚴格如下：
@@ -1206,7 +1393,8 @@ public struct OpenAICompatibleLLMClient: LLMClient {
                 .init(role: "user", content: userPrompt)
             ],
             temperature: 0.7,
-            responseFormat: responseFormat(for: settings)
+            responseFormat: responseFormat(for: settings),
+            stream: true
         )
     }
 
@@ -1231,11 +1419,13 @@ public struct OpenAICompatibleLLMClient: LLMClient {
             )
         }
 
-        let title = payload.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "無標題"
+        // 即使 prompt 已禁止，模型仍可能習慣性輸出 **強調**；app 沒有任何地方
+        // 渲染 Markdown，星號會原樣顯示，也會害注音的 base 拼接對不上原文。
+        let title = RubySupport.strippingEmphasis(payload.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "無標題")
         let paragraphs = (payload.paragraphs ?? []).map {
             AIEssayPayload.AIEssayParagraph(
-                japanese: $0.japanese.trimmingCharacters(in: .whitespacesAndNewlines),
-                translation: $0.translation.trimmingCharacters(in: .whitespacesAndNewlines)
+                japanese: RubySupport.strippingEmphasis($0.japanese.trimmingCharacters(in: .whitespacesAndNewlines)),
+                translation: RubySupport.strippingEmphasis($0.translation.trimmingCharacters(in: .whitespacesAndNewlines))
             )
         }
 
@@ -1283,7 +1473,8 @@ public struct OpenAICompatibleLLMClient: LLMClient {
                 .init(role: "user", content: source)
             ],
             temperature: 0.1,
-            responseFormat: responseFormat(for: settings)
+            responseFormat: responseFormat(for: settings),
+            stream: true
         )
     }
 
@@ -1332,17 +1523,20 @@ public struct ChatCompletionRequest: Codable, Equatable, Sendable {
     public var temperature: Double
     /// 對應 OpenAI 的 response_format；nil 時不送出此欄位(相容不支援的 endpoint)。
     public var responseFormat: ResponseFormat?
+    /// SSE 串流回應；nil 時不送出此欄位（維持非串流）。
+    public var stream: Bool?
 
     enum CodingKeys: String, CodingKey {
-        case model, messages, temperature
+        case model, messages, temperature, stream
         case responseFormat = "response_format"
     }
 
-    public init(model: String, messages: [Message], temperature: Double, responseFormat: ResponseFormat? = nil) {
+    public init(model: String, messages: [Message], temperature: Double, responseFormat: ResponseFormat? = nil, stream: Bool? = nil) {
         self.model = model
         self.messages = messages
         self.temperature = temperature
         self.responseFormat = responseFormat
+        self.stream = stream
     }
 }
 
@@ -1376,7 +1570,8 @@ private struct ModelsResponse: Codable {
         var id: String
     }
 
-    var data: [Model]
+    // Ollama 沒有安裝任何模型時會回 {"data": null}，設為 optional 才能解碼。
+    var data: [Model]?
 }
 
 private struct CardPayload: Codable {

@@ -175,7 +175,7 @@ public actor LearningPipeline {
                 "skippedDocuments": "\(outcome.skippedDocuments)",
                 "failureCount": "\(outcome.failures.count)"
             ],
-            durationMilliseconds: Self.durationMilliseconds(since: startedAt)
+            startedAt: startedAt
         )
         return outcome
     }
@@ -312,7 +312,7 @@ public actor LearningPipeline {
             output: [
                 "processedSourceCount": "\(enabledSources.count)"
             ],
-            durationMilliseconds: Self.durationMilliseconds(since: startedAt)
+            startedAt: startedAt
         )
     }
 
@@ -427,7 +427,7 @@ public actor LearningPipeline {
                     operation: "generateAIArticleNow",
                     message: "Generated article content hash already exists.",
                     input: ["contentHash": contentHash],
-                    durationMilliseconds: Self.durationMilliseconds(since: startedAt)
+                    startedAt: startedAt
                 )
                 return .duplicate
             }
@@ -468,7 +468,7 @@ public actor LearningPipeline {
                     "contentHash": article.contentHash,
                     "cardCount": "\(cards.count)"
                 ],
-                durationMilliseconds: Self.durationMilliseconds(since: startedAt)
+                startedAt: startedAt
             )
             return .generated(article)
         } catch {
@@ -480,7 +480,7 @@ public actor LearningPipeline {
             await AIRequestLogStore.shared.appendEvent(
                 "flow.failed",
                 operation: "generateAIArticleNow",
-                durationMilliseconds: Self.durationMilliseconds(since: startedAt),
+                startedAt: startedAt,
                 errorSummary: error.localizedDescription
             )
             return .failed(error.localizedDescription)
@@ -537,7 +537,7 @@ public actor LearningPipeline {
                     "flow.empty",
                     operation: "generateCardsFromText",
                     message: "No cards produced from manual text.",
-                    durationMilliseconds: Self.durationMilliseconds(since: startedAt)
+                    startedAt: startedAt
                 )
                 return .empty
             }
@@ -552,14 +552,14 @@ public actor LearningPipeline {
                 "flow.completed",
                 operation: "generateCardsFromText",
                 output: ["cardCount": "\(cards.count)"],
-                durationMilliseconds: Self.durationMilliseconds(since: startedAt)
+                startedAt: startedAt
             )
             return .generated(count: cards.count)
         } catch {
             await AIRequestLogStore.shared.appendEvent(
                 "flow.failed",
                 operation: "generateCardsFromText",
-                durationMilliseconds: Self.durationMilliseconds(since: startedAt),
+                startedAt: startedAt,
                 errorSummary: error.localizedDescription
             )
             return .failed(error.localizedDescription)

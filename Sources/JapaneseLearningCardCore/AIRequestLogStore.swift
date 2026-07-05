@@ -31,6 +31,8 @@ public struct AIRequestLogEntry: Codable, Sendable {
     public var bytesPerSecond: Double?
     public var tokensPerSecond: Double?
     public var errorSummary: String?
+    public var startedAt: Date?
+    public var finishedAt: Date?
 
     public init(
         timestamp: Date = Date(),
@@ -57,7 +59,9 @@ public struct AIRequestLogEntry: Codable, Sendable {
         totalTokens: Int? = nil,
         bytesPerSecond: Double? = nil,
         tokensPerSecond: Double? = nil,
-        errorSummary: String? = nil
+        errorSummary: String? = nil,
+        startedAt: Date? = nil,
+        finishedAt: Date? = nil
     ) {
         self.timestamp = timestamp
         self.traceId = traceId
@@ -84,6 +88,8 @@ public struct AIRequestLogEntry: Codable, Sendable {
         self.bytesPerSecond = bytesPerSecond
         self.tokensPerSecond = tokensPerSecond
         self.errorSummary = errorSummary
+        self.startedAt = startedAt
+        self.finishedAt = finishedAt
     }
 }
 
@@ -91,12 +97,17 @@ public actor AIRequestLogStore {
     public static let shared = AIRequestLogStore()
 
     private let encoder: JSONEncoder
+    private nonisolated let directory: URL
+    /// ai-latest.log 目前鏡射的 traceId；只有 flow.start 會切換，
+    /// 避免並行執行的舊流程尾段把最新流程的檔案洗掉。
+    private var latestTraceId: String?
 
-    public init() {
+    public init(directory: URL? = nil) {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.sortedKeys]
         self.encoder = encoder
+        self.directory = directory ?? AppPaths.appSupportFolder
     }
 
     public nonisolated static var logFileURL: URL {
@@ -104,9 +115,22 @@ public actor AIRequestLogStore {
             .appendingPathComponent("ai-requests.jsonl")
     }
 
+    public nonisolated static var latestLogFileURL: URL {
+        AppPaths.appSupportFolder
+            .appendingPathComponent("ai-latest.log")
+    }
+
+    public nonisolated var logFileURL: URL {
+        directory.appendingPathComponent("ai-requests.jsonl")
+    }
+
+    public nonisolated var latestLogFileURL: URL {
+        directory.appendingPathComponent("ai-latest.log")
+    }
+
     @discardableResult
     public func ensureLogFile() throws -> URL {
-        let url = Self.logFileURL
+        let url = logFileURL
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         if !FileManager.default.fileExists(atPath: url.path) {
             FileManager.default.createFile(atPath: url.path, contents: nil)
@@ -119,32 +143,63 @@ public actor AIRequestLogStore {
             let url = try ensureLogFile()
             var data = try encoder.encode(entry)
             data.append(0x0A)
-            let handle = try FileHandle(forWritingTo: url)
-            defer { try? handle.close() }
-            try handle.seekToEnd()
-            try handle.write(contentsOf: data)
+            try appendData(data, to: url)
+            try mirrorToLatestLog(entry, data: data)
         } catch {
             FileHandle.standardError.write(Data(("[LLM] 無法寫入 AI request log：\(error.localizedDescription)\n").utf8))
         }
     }
 
+    /// 記錄流程事件。傳入 `startedAt` 時會自動補上 `finishedAt`（＝寫入當下）
+    /// 與 `durationMilliseconds`，讓 flow 結尾事件帶有完整起迄時間。
     public func appendEvent(
         _ event: String,
         operation: String? = nil,
         message: String? = nil,
         input: [String: String]? = nil,
         output: [String: String]? = nil,
+        startedAt: Date? = nil,
         durationMilliseconds: Int? = nil,
         errorSummary: String? = nil
     ) {
+        let now = Date()
+        var duration = durationMilliseconds
+        if duration == nil, let startedAt {
+            duration = Int(now.timeIntervalSince(startedAt) * 1000)
+        }
         append(AIRequestLogEntry(
+            timestamp: now,
             event: event,
             operation: operation,
             message: message,
             input: input,
             output: output,
-            durationMilliseconds: durationMilliseconds,
-            errorSummary: errorSummary
+            durationMilliseconds: duration,
+            errorSummary: errorSummary,
+            startedAt: startedAt,
+            finishedAt: startedAt != nil ? now : nil
         ))
+    }
+
+    private func appendData(_ data: Data, to url: URL) throws {
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: data)
+    }
+
+    /// ai-latest.log 只保留最近一次啟動的流程：看到 flow.start（或啟動後第一筆
+    /// 有 traceId 的事件）就重置檔案，之後只鏡射同一 traceId 的事件。
+    private func mirrorToLatestLog(_ entry: AIRequestLogEntry, data: Data) throws {
+        guard let traceId = entry.traceId else { return }
+        if entry.event == "flow.start" || latestTraceId == nil {
+            latestTraceId = traceId
+            FileManager.default.createFile(atPath: latestLogFileURL.path, contents: nil)
+        }
+        guard traceId == latestTraceId else { return }
+        try appendData(data, to: latestLogFileURL)
     }
 }
