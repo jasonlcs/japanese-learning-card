@@ -25,6 +25,59 @@ public enum RubySupport {
         text.replacingOccurrences(of: "**", with: "")
     }
 
+    /// 嘗試修復模型偶爾漏掉標點/空白造成的 base 拼接誤差：
+    /// 只在「原文比拼接多出的字元全部是標點、空白等非文字字元，且缺漏位置
+    /// 恰好落在既有 segment 邊界」時才補上一個無 ruby 的 segment；
+    /// 只要牽涉到漢字/假名等實際內容不符，一律回傳 nil，交由呼叫端降級。
+    public static func repaired(_ segments: [RubySegment], toMatch text: String) -> [RubySegment]? {
+        guard !segments.isEmpty else { return nil }
+        let joined = segments.map(\.base).joined()
+        guard joined != text else { return segments }
+
+        let origChars = Array(text)
+        let joinedChars = Array(joined)
+        var insertionsByPosition: [Int: [Character]] = [:]
+        var i = 0, j = 0
+        while i < origChars.count && j < joinedChars.count {
+            if origChars[i] == joinedChars[j] {
+                i += 1
+                j += 1
+            } else if isRepairableGap(origChars[i]) {
+                insertionsByPosition[j, default: []].append(origChars[i])
+                i += 1
+            } else {
+                return nil
+            }
+        }
+        while i < origChars.count {
+            guard isRepairableGap(origChars[i]) else { return nil }
+            insertionsByPosition[j, default: []].append(origChars[i])
+            i += 1
+        }
+        guard j == joinedChars.count, !insertionsByPosition.isEmpty else { return nil }
+
+        var result: [RubySegment] = []
+        var pos = 0
+        for segment in segments {
+            if let toInsert = insertionsByPosition[pos] {
+                result.append(contentsOf: toInsert.map { RubySegment(base: String($0)) })
+            }
+            result.append(segment)
+            pos += segment.base.count
+        }
+        if let trailing = insertionsByPosition[pos] {
+            result.append(contentsOf: trailing.map { RubySegment(base: String($0)) })
+        }
+
+        guard isUsable(result, for: text) else { return nil }
+        return result
+    }
+
+    /// 缺漏的字元必須是標點/空白等不需要注音的字元，漢字、假名、英數字一律不修復。
+    private static func isRepairableGap(_ character: Character) -> Bool {
+        !character.isLetter && !character.isNumber
+    }
+
     /// 找出 words 在 text 中所有出現位置（以 Character 為單位的 offset 區間），
     /// 供 UI 高亮融入的單字。相鄰或重疊的命中會合併成一個區間。
     public static func highlightRanges(in text: String, words: [String]) -> [Range<Int>] {

@@ -43,6 +43,7 @@ struct CoreChecks {
         try rubyRequestStreamsAndSSELinesAssemble()
         try essayOutputStripsEmphasisMarkers()
         vocabularyHighlightMatchesWordsAndSegments()
+        rubyRepairFixesDroppedPunctuationButNotContentMismatch()
         try await pipelineGeneratesAIArticleAndCards()
         try await pipelineParseAndStoreForValidationRegistersSourceAndCards()
         try await storePersistsGeneratedArticles()
@@ -929,6 +930,53 @@ struct CoreChecks {
         // 「面白い」跨了「面白」「い。」兩個 segment，兩個都要亮。
         let crossFlags = RubySupport.highlightFlags(for: segments, words: ["面白い"])
         expect(crossFlags == [false, false, false, true, true], "a word spanning segments should highlight both, got: \(crossFlags)")
+    }
+
+    private static func rubyRepairFixesDroppedPunctuationButNotContentMismatch() {
+        // 真實案例（2026-07-05 log）：模型漏掉了「多いですが、日常的に」中間的頓號，
+        // 拼接因此比原文少一個字，導致整段被判定為不可用。
+        let text = "長年使っていないものも多いですが、日常的に利用する文房具はどれも役に立つものばかりです。"
+        let segments = [
+            RubySegment(base: "長年", ruby: "ちょうねん"),
+            RubySegment(base: "使", ruby: "つか"),
+            RubySegment(base: "っていないものも", ruby: ""),
+            RubySegment(base: "多", ruby: "おお"),
+            RubySegment(base: "いですが", ruby: ""),
+            RubySegment(base: "日常的", ruby: "にちじょうてき"),
+            RubySegment(base: "に", ruby: ""),
+            RubySegment(base: "利用", ruby: "りよう"),
+            RubySegment(base: "する", ruby: ""),
+            RubySegment(base: "文房具", ruby: "ぶんぼうぐ"),
+            RubySegment(base: "はどれも", ruby: ""),
+            RubySegment(base: "役", ruby: "やく"),
+            RubySegment(base: "に", ruby: ""),
+            RubySegment(base: "立", ruby: "た"),
+            RubySegment(base: "つものばかりです。", ruby: "")
+        ]
+        expect(!RubySupport.isUsable(segments, for: text), "precondition: dropped-punctuation output should fail strict validation")
+
+        guard let repaired = RubySupport.repaired(segments, toMatch: text) else {
+            expect(false, "repaired() should recover a paragraph that only dropped a 、")
+            return
+        }
+        expect(RubySupport.isUsable(repaired, for: text), "repaired segments should pass strict validation")
+        expect(repaired.map(\.base).joined() == text, "repaired base concatenation should equal the original text")
+        expect(repaired.contains { $0.base == "、" && $0.ruby.isEmpty }, "the dropped comma should be re-inserted without ruby")
+
+        // 反例：漢字內容真的被模型改寫（多→少），這是內容錯誤，不該被「修復」掩蓋。
+        let wrongContent = [
+            RubySegment(base: "長年", ruby: "ちょうねん"),
+            RubySegment(base: "使", ruby: "つか"),
+            RubySegment(base: "っていないものも", ruby: ""),
+            RubySegment(base: "少", ruby: "すく"), // 原文是「多」，這裡被改成「少」
+            RubySegment(base: "いですが、", ruby: "")
+        ]
+        expect(RubySupport.repaired(wrongContent, toMatch: text) == nil,
+               "repaired() must not paper over an actual kanji content mismatch")
+
+        // 反例：完全不相干的內容，理應直接回傳 nil。
+        expect(RubySupport.repaired([RubySegment(base: "全然違う文章です")], toMatch: text) == nil,
+               "repaired() must return nil for unrelated content")
     }
 
     private static func ollamaPresetSupportsLocalKeylessProvider() {
