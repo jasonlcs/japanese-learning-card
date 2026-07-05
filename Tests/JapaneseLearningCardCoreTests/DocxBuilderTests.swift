@@ -3,7 +3,7 @@ import XCTest
 
 final class DocxBuilderTests: XCTestCase {
 
-    // MARK: – escapeXML
+    // MARK: - escapeXML
 
     func testEscapeXMLHandlesSpecialCharacters() {
         XCTAssertEqual(DocxBuilder.escapeXML("a & b"), "a &amp; b")
@@ -13,7 +13,7 @@ final class DocxBuilderTests: XCTestCase {
         XCTAssertEqual(DocxBuilder.escapeXML("plain"), "plain")
     }
 
-    // MARK: – buildRunXML: plain run (no ruby)
+    // MARK: - buildRunXML: plain run (no ruby)
 
     func testBuildRunXMLPlainRunContainsXmlSpacePreserve() {
         let seg = RubySegment(base: "plain text", ruby: "")
@@ -37,7 +37,7 @@ final class DocxBuilderTests: XCTestCase {
         XCTAssertTrue(xml.contains("<w:b/>"))
     }
 
-    // MARK: – buildRunXML: ruby run
+    // MARK: - buildRunXML: ruby run
 
     func testBuildRunXMLRubyIsDirectChildOfParagraph() {
         // w:ruby must NOT be wrapped inside w:r
@@ -78,7 +78,7 @@ final class DocxBuilderTests: XCTestCase {
         XCTAssertTrue(xml.contains("あ&amp;い"))
     }
 
-    // MARK: – buildDocumentXML
+    // MARK: - buildDocumentXML
 
     func testBuildDocumentXMLContainsTitle() {
         let xml = DocxBuilder.buildDocumentXML(
@@ -174,7 +174,7 @@ final class DocxBuilderTests: XCTestCase {
         let _ = try XMLDocument(data: data, options: [])
     }
 
-    // MARK: – buildDocx (ZIP output)
+    // MARK: - buildDocx (ZIP output)
 
     func testBuildDocxProducesValidZipSignature() {
         let data = DocxBuilder.buildDocx(

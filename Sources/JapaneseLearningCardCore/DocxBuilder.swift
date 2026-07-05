@@ -10,7 +10,7 @@ import Foundation
 ///   word/document.xml
 public enum DocxBuilder {
 
-    // MARK: – Public API
+    // MARK: - Public API
 
     /// Assembles a complete `.docx` `Data` blob ready to be written to disk.
     public static func buildDocx(
@@ -58,7 +58,7 @@ public enum DocxBuilder {
         return DocxZipWriter.write(entries: entries)
     }
 
-    // MARK: – XML building (internal for unit tests)
+    // MARK: - XML building (internal for unit tests)
 
     static func buildDocumentXML(
         title: String,
@@ -236,7 +236,7 @@ public enum DocxBuilder {
     }
 }
 
-// MARK: – Minimal stored-mode ZIP writer
+// MARK: - Minimal stored-mode ZIP writer
 
 /// Writes a ZIP archive with all entries stored (compression method 0).
 enum DocxZipWriter {
@@ -325,7 +325,7 @@ enum DocxZipWriter {
     }
 }
 
-// MARK: – CRC-32
+// MARK: - CRC-32
 
 enum DocxCRC32 {
     private static let table: [UInt32] = {
