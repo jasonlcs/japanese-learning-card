@@ -1653,9 +1653,14 @@ struct SettingsView: View {
                         }
 
                         labeledRow("API key") {
-                            SecureField("貼上新 key；留空會沿用 Keychain 既有 key 驗證", text: $viewModel.apiKeyInput)
-                                .textFieldStyle(.roundedBorder)
-                                .focused($focusedSettingsField, equals: .apiKey)
+                            SecureField(
+                                profile.config.preset.requiresAPIKey
+                                    ? "貼上新 key；留空會沿用 Keychain 既有 key 驗證"
+                                    : "此 provider 不需要 API key，留空即可",
+                                text: $viewModel.apiKeyInput
+                            )
+                            .textFieldStyle(.roundedBorder)
+                            .focused($focusedSettingsField, equals: .apiKey)
                         }
 
                         Button {
@@ -1836,7 +1841,11 @@ struct SettingsView: View {
                     } label: {
                         Label("在 Finder 顯示 AI Log", systemImage: "folder")
                     }
-                    Text(AIRequestLogStore.logFileURL.path)
+                    Text("完整紀錄：\(AIRequestLogStore.logFileURL.path)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                    Text("最新一次流程：\(AIRequestLogStore.latestLogFileURL.path)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
@@ -2971,7 +2980,7 @@ struct AIEssayView: View {
                         
                         GroupBox(content: {
                             VStack(alignment: .leading, spacing: 14) {
-                                let paras = article.paragraphs ?? []
+                                let paras = article.resolvedParagraphs
                                 if paras.isEmpty {
                                     Text(article.plainText)
                                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2984,7 +2993,8 @@ struct AIEssayView: View {
                                                 baseFont: .system(size: 15),
                                                 rubyFont: .system(size: 8),
                                                 baseColor: .primary,
-                                                rubyColor: .secondary
+                                                rubyColor: .secondary,
+                                                highlightWords: article.vocabularyWords ?? []
                                             )
                                             .frame(maxWidth: .infinity, alignment: .leading)
                                             
@@ -3403,7 +3413,7 @@ struct AIArticleDetailView: View {
 
             GroupBox("文章本文") {
                 ScrollView {
-                    let paras = liveArticle.paragraphs ?? []
+                    let paras = liveArticle.resolvedParagraphs
                     if paras.isEmpty {
                         Text(liveArticle.plainText)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -3419,7 +3429,8 @@ struct AIArticleDetailView: View {
                                         baseFont: .system(size: 15),
                                         rubyFont: .system(size: 8),
                                         baseColor: .primary,
-                                        rubyColor: .secondary
+                                        rubyColor: .secondary,
+                                        highlightWords: liveArticle.vocabularyWords ?? []
                                     )
                                     .frame(maxWidth: .infinity, alignment: .leading)
 

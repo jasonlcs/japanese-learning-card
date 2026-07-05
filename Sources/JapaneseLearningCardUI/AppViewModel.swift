@@ -517,6 +517,16 @@ public final class AppViewModel: ObservableObject {
         await reload()
     }
 
+    #if os(macOS)
+    /// Menu bar app 的主視窗是 NSPopover，層級天生高於檔案面板（modal panel），
+    /// 面板不抬高會被 popover 蓋住。這裡把面板抬到 popover 之上並搶焦點；
+    /// 面板關閉後就消失，不影響 popover 原本的置頂行為。
+    private func presentAbovePopover(_ panel: NSSavePanel) {
+        panel.level = NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue + 1)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+    #endif
+
     func chooseICloudDriveFolderAndMigrate() {
         #if os(macOS)
         let panel = NSOpenPanel()
@@ -526,6 +536,7 @@ public final class AppViewModel: ObservableObject {
         panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
         panel.directoryURL = UserDataStoreFactory.defaultICloudDriveFolder().deletingLastPathComponent()
+        presentAbovePopover(panel)
         guard panel.runModal() == .OK, let folder = panel.url else { return }
         switchStorageMode(.iCloudDriveFolder, folder: folder)
         #else
@@ -1047,7 +1058,8 @@ public final class AppViewModel: ObservableObject {
                 let candidateKey: String?
                 if trimmedKey.isEmpty {
                     let hasStoredKey = try secretStore.hasAPIKey(reference: settings.providerConfig.apiKeyKeychainRef)
-                    guard hasStoredKey else {
+                    // Ollama 等本地 endpoint 不需要 key，沒 key 也放行直接驗證連線。
+                    guard hasStoredKey || !settings.providerConfig.preset.requiresAPIKey else {
                         await MainActor.run {
                             var missingKeySettings = self.snapshot.settings
                             missingKeySettings.normalizeProviderProfiles()
@@ -1242,24 +1254,48 @@ public final class AppViewModel: ObservableObject {
         isGeneratingQuiz = true
         statusMessage = "AI 出題中..."
         Task {
-            do {
-                let quizzes = try await providerClient.generateQuiz(cards: cards, settings: snapshot.settings)
-                await MainActor.run {
-                    guard !quizzes.isEmpty else {
-                        self.isGeneratingQuiz = false
-                        self.statusMessage = "AI 沒有產生有效考題"
-                        return
+            let traceId = UUID().uuidString
+            await AITraceContext.$traceId.withValue(traceId) {
+                await AITraceContext.$flow.withValue("generateQuiz") {
+                    let startedAt = Date()
+                    await AIRequestLogStore.shared.appendEvent(
+                        "flow.start",
+                        operation: "generateQuiz",
+                        message: "Generate quiz questions from learning cards.",
+                        input: ["cardCount": "\(cards.count)"]
+                    )
+                    do {
+                        let quizzes = try await providerClient.generateQuiz(cards: cards, settings: snapshot.settings)
+                        await AIRequestLogStore.shared.appendEvent(
+                            quizzes.isEmpty ? "flow.empty" : "flow.completed",
+                            operation: "generateQuiz",
+                            output: ["quizCount": "\(quizzes.count)"],
+                            startedAt: startedAt
+                        )
+                        await MainActor.run {
+                            guard !quizzes.isEmpty else {
+                                self.isGeneratingQuiz = false
+                                self.statusMessage = "AI 沒有產生有效考題"
+                                return
+                            }
+                            self.storeUpdate { state in
+                                state.quizzes.append(contentsOf: quizzes)
+                            }
+                            self.isGeneratingQuiz = false
+                            self.statusMessage = "已產生 \(quizzes.count) 題"
+                        }
+                    } catch {
+                        await AIRequestLogStore.shared.appendEvent(
+                            "flow.failed",
+                            operation: "generateQuiz",
+                            startedAt: startedAt,
+                            errorSummary: error.localizedDescription
+                        )
+                        await MainActor.run {
+                            self.isGeneratingQuiz = false
+                            self.statusMessage = "出題失敗：\(error.localizedDescription)"
+                        }
                     }
-                    self.storeUpdate { state in
-                        state.quizzes.append(contentsOf: quizzes)
-                    }
-                    self.isGeneratingQuiz = false
-                    self.statusMessage = "已產生 \(quizzes.count) 題"
-                }
-            } catch {
-                await MainActor.run {
-                    self.isGeneratingQuiz = false
-                    self.statusMessage = "出題失敗：\(error.localizedDescription)"
                 }
             }
         }
@@ -1327,6 +1363,7 @@ public final class AppViewModel: ObservableObject {
                 panel.allowedContentTypes = [.database]
                 panel.canCreateDirectories = true
 
+                self.presentAbovePopover(panel)
                 guard panel.runModal() == .OK, let destinationURL = panel.url else {
                     return
                 }
@@ -1818,108 +1855,176 @@ public final class AppViewModel: ObservableObject {
         essayGenerationError = nil
         
         essayGenerationTask = Task {
+            let traceId = UUID().uuidString
+            await AITraceContext.$traceId.withValue(traceId) {
+                await AITraceContext.$flow.withValue("generateAIEssay") {
+                    await self.runEssayGeneration(words: words)
+                }
+            }
+        }
+    }
+
+    private func runEssayGeneration(words: [String]) async {
+        let startedAt = Date()
+        await AIRequestLogStore.shared.appendEvent(
+            "flow.start",
+            operation: "generateAIEssay",
+            message: "Generate practice essay from vocabulary words.",
+            input: [
+                "theme": userEssayPrompt,
+                "wordCount": "\(words.count)"
+            ]
+        )
+        do {
+            let payload = try await providerClient.generateEssay(
+                theme: userEssayPrompt,
+                vocabularyWords: words,
+                settings: snapshot.settings
+            )
+
+            guard payload.isValidPrompt else {
+                await AIRequestLogStore.shared.appendEvent(
+                    "flow.rejected",
+                    operation: "generateAIEssay",
+                    message: "Prompt validation failed.",
+                    startedAt: startedAt,
+                    errorSummary: payload.validationError
+                )
+                await MainActor.run {
+                    self.isGeneratingEssay = false
+                    self.essayCurrentStep = nil
+                    self.essayValidationError = payload.validationError
+                    self.essayGenerationProgress = ""
+                }
+                return
+            }
+
+            try Task.checkCancellation()
+
+            await MainActor.run {
+                self.essayCurrentStep = .generatingRuby
+                self.essayGenerationProgress = "正在標註漢字讀音（失敗可事後補標）..."
+            }
+
+            var textsToAnnotate = [payload.title]
+            for para in payload.paragraphs {
+                textsToAnnotate.append(para.japanese)
+            }
+
+            let rubyStartedAt = Date()
+            var rubyDegradedReason: String?
+            let rubyResults: [[RubySegment]]
             do {
-                let payload = try await providerClient.generateEssay(
-                    theme: userEssayPrompt,
-                    vocabularyWords: words,
+                rubyResults = try await providerClient.generateRubyForTexts(
+                    texts: textsToAnnotate,
                     settings: snapshot.settings
                 )
-                
-                guard payload.isValidPrompt else {
-                    await MainActor.run {
-                        self.isGeneratingEssay = false
-                        self.essayCurrentStep = nil
-                        self.essayValidationError = payload.validationError
-                        self.essayGenerationProgress = ""
-                    }
-                    return
-                }
-                
-                try Task.checkCancellation()
-                
-                await MainActor.run {
-                    self.essayCurrentStep = .generatingRuby
-                    self.essayGenerationProgress = "正在標註漢字讀音 (預計 5-10 秒)..."
-                }
-                
-                var textsToAnnotate = [payload.title]
-                for para in payload.paragraphs {
-                    textsToAnnotate.append(para.japanese)
-                }
-                
-                let rubyResults: [[RubySegment]]
-                do {
-                    rubyResults = try await providerClient.generateRubyForTexts(
-                        texts: textsToAnnotate,
-                        settings: snapshot.settings
-                    )
-                } catch {
-                    OpenAICompatibleLLMClient.log("漢字讀音生成失敗（可能逾時），降級使用無標記模式：\(error.localizedDescription)")
-                    rubyResults = Array(repeating: [], count: textsToAnnotate.count)
-                }
-                
-                try Task.checkCancellation()
-                
-                let titleRuby = rubyResults.first ?? []
-                var paragraphs = [ArticleParagraph]()
-                for (index, para) in payload.paragraphs.enumerated() {
-                    let ruby = (index + 1 < rubyResults.count) ? rubyResults[index + 1] : []
-                    paragraphs.append(
-                        ArticleParagraph(
-                            japanese: para.japanese,
-                            ruby: ruby,
-                            translation: para.translation
-                        )
-                    )
-                }
-                
-                let plainText = payload.paragraphs.map { "\($0.japanese)\n\($0.translation)" }.joined(separator: "\n\n")
-                let levels = Array(Set(previewVocabularyCards.map(\.jlptLevel)))
-                let contentHash = ContentHash.sha256(plainText)
-                
-                let article = GeneratedArticle(
-                    kind: .essay,
-                    theme: userEssayPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "生活化主題" : userEssayPrompt,
-                    jlptLevels: levels,
-                    title: payload.title,
-                    plainText: plainText,
-                    contentHash: contentHash,
-                    sourceId: AISource.sentinelSourceId,
-                    generatedAt: Date(),
-                    cardCount: previewVocabularyCards.count,
-                    updatedAt: Date(),
-                    paragraphs: paragraphs,
-                    userPrompt: userEssayPrompt,
-                    vocabularySource: selectedVocabularySource.rawValue,
-                    vocabularyWords: words,
-                    titleRuby: titleRuby
+            } catch {
+                OpenAICompatibleLLMClient.log("漢字讀音生成失敗（可能逾時），降級使用無標記模式：\(error.localizedDescription)")
+                await AIRequestLogStore.shared.appendEvent(
+                    "ruby.degraded",
+                    operation: "generateRubyForTexts",
+                    message: "Ruby annotation failed; essay will be saved without ruby.",
+                    input: ["textCount": "\(textsToAnnotate.count)"],
+                    startedAt: rubyStartedAt,
+                    errorSummary: error.localizedDescription
                 )
-                
-                await MainActor.run {
-                    self.essayCurrentStep = .done
-                    self.lastGeneratedEssay = article
-                    self.isGeneratingEssay = false
-                    self.essayGenerationProgress = ""
+                rubyDegradedReason = error.localizedDescription
+                rubyResults = Array(repeating: [], count: textsToAnnotate.count)
+            }
+
+            try Task.checkCancellation()
+
+            let titleRuby = rubyResults.first ?? []
+            var paragraphs = [ArticleParagraph]()
+            for (index, para) in payload.paragraphs.enumerated() {
+                let ruby = (index + 1 < rubyResults.count) ? rubyResults[index + 1] : []
+                paragraphs.append(
+                    ArticleParagraph(
+                        japanese: para.japanese,
+                        ruby: ruby,
+                        translation: para.translation
+                    )
+                )
+            }
+
+            let plainText = payload.paragraphs.map { "\($0.japanese)\n\($0.translation)" }.joined(separator: "\n\n")
+            let levels = Array(Set(previewVocabularyCards.map(\.jlptLevel)))
+            let contentHash = ContentHash.sha256(plainText)
+
+            let article = GeneratedArticle(
+                kind: .essay,
+                theme: userEssayPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "生活化主題" : userEssayPrompt,
+                jlptLevels: levels,
+                title: payload.title,
+                plainText: plainText,
+                contentHash: contentHash,
+                sourceId: AISource.sentinelSourceId,
+                generatedAt: Date(),
+                cardCount: previewVocabularyCards.count,
+                updatedAt: Date(),
+                paragraphs: paragraphs,
+                userPrompt: userEssayPrompt,
+                vocabularySource: selectedVocabularySource.rawValue,
+                vocabularyWords: words,
+                titleRuby: titleRuby
+            )
+
+            let rubyDegraded = rubyDegradedReason != nil
+            await MainActor.run {
+                self.essayCurrentStep = .done
+                self.lastGeneratedEssay = article
+                self.isGeneratingEssay = false
+                self.essayGenerationProgress = ""
+                if rubyDegraded {
+                    self.statusMessage = "短文「\(payload.title)」已產生，但注音標註失敗（AI 供應商暫時無法使用），可稍後點「重新標註注音」補上。"
+                } else {
                     self.statusMessage = "短文「\(payload.title)」產生成功！"
                 }
-                
-                try await store.update { $0.generatedArticles.insert(article, at: 0) }
-                await reload()
-                
-            } catch is CancellationError {
-                await MainActor.run {
-                    self.isGeneratingEssay = false
-                    self.essayCurrentStep = nil
-                    self.essayGenerationProgress = ""
-                    self.statusMessage = "短文產生已取消"
-                }
-            } catch {
-                await MainActor.run {
-                    self.isGeneratingEssay = false
-                    self.essayCurrentStep = nil
-                    self.essayGenerationProgress = ""
-                    self.essayGenerationError = "產生失敗：\(error.localizedDescription)"
-                }
+            }
+
+            try await store.update { $0.generatedArticles.insert(article, at: 0) }
+            await reload()
+
+            let usableRubyParagraphs = paragraphs.filter { !RubySupport.validated($0.ruby, for: $0.japanese).isEmpty }.count
+            await AIRequestLogStore.shared.appendEvent(
+                "flow.completed",
+                operation: "generateAIEssay",
+                output: [
+                    "title": payload.title,
+                    "paragraphCount": "\(paragraphs.count)",
+                    "usableRubyParagraphs": "\(usableRubyParagraphs)",
+                    "titleRubyUsable": "\(!RubySupport.validated(titleRuby, for: payload.title).isEmpty)",
+                    "rubyDegraded": "\(rubyDegraded)"
+                ],
+                startedAt: startedAt,
+                errorSummary: rubyDegradedReason
+            )
+        } catch is CancellationError {
+            await AIRequestLogStore.shared.appendEvent(
+                "flow.cancelled",
+                operation: "generateAIEssay",
+                message: "Essay generation cancelled by user.",
+                startedAt: startedAt
+            )
+            await MainActor.run {
+                self.isGeneratingEssay = false
+                self.essayCurrentStep = nil
+                self.essayGenerationProgress = ""
+                self.statusMessage = "短文產生已取消"
+            }
+        } catch {
+            await AIRequestLogStore.shared.appendEvent(
+                "flow.failed",
+                operation: "generateAIEssay",
+                startedAt: startedAt,
+                errorSummary: error.localizedDescription
+            )
+            await MainActor.run {
+                self.isGeneratingEssay = false
+                self.essayCurrentStep = nil
+                self.essayGenerationProgress = ""
+                self.essayGenerationError = "產生失敗：\(error.localizedDescription)"
             }
         }
     }
@@ -1954,45 +2059,78 @@ public final class AppViewModel: ObservableObject {
         statusMessage = "正在標註漢字讀音..."
 
         Task {
-            do {
-                var textsToAnnotate = [article.title]
-                textsToAnnotate.append(contentsOf: paragraphs.map(\.japanese))
-                let rubyResults = try await providerClient.generateRubyForTexts(
-                    texts: textsToAnnotate,
-                    settings: snapshot.settings
-                )
+            let traceId = UUID().uuidString
+            await AITraceContext.$traceId.withValue(traceId) {
+                await AITraceContext.$flow.withValue("annotateArticleRuby") {
+                    let startedAt = Date()
+                    await AIRequestLogStore.shared.appendEvent(
+                        "flow.start",
+                        operation: "annotateArticleRuby",
+                        message: "Re-annotate ruby for an existing article.",
+                        input: [
+                            "articleId": articleId.uuidString,
+                            "paragraphCount": "\(paragraphs.count)"
+                        ]
+                    )
+                    do {
+                        var textsToAnnotate = [article.title]
+                        textsToAnnotate.append(contentsOf: paragraphs.map(\.japanese))
+                        let rubyResults = try await providerClient.generateRubyForTexts(
+                            texts: textsToAnnotate,
+                            settings: snapshot.settings
+                        )
 
-                let titleRuby = RubySupport.validated(rubyResults.first, for: article.title)
-                var updatedParagraphs = paragraphs
-                for index in updatedParagraphs.indices {
-                    let ruby = (index + 1 < rubyResults.count) ? rubyResults[index + 1] : []
-                    if !RubySupport.validated(ruby, for: updatedParagraphs[index].japanese).isEmpty {
-                        updatedParagraphs[index].ruby = ruby
-                    }
-                }
+                        let titleRuby = RubySupport.validated(rubyResults.first, for: article.title)
+                        var updatedParagraphs = paragraphs
+                        var annotatedCount = 0
+                        for index in updatedParagraphs.indices {
+                            let ruby = (index + 1 < rubyResults.count) ? rubyResults[index + 1] : []
+                            if !RubySupport.validated(ruby, for: updatedParagraphs[index].japanese).isEmpty {
+                                updatedParagraphs[index].ruby = ruby
+                                annotatedCount += 1
+                            }
+                        }
 
-                let finalParagraphs = updatedParagraphs
-                try await store.update { state in
-                    guard let index = state.generatedArticles.firstIndex(where: { $0.id == articleId }) else { return }
-                    if !titleRuby.isEmpty {
-                        state.generatedArticles[index].titleRuby = titleRuby
-                    }
-                    state.generatedArticles[index].paragraphs = finalParagraphs
-                    state.generatedArticles[index].updatedAt = Date()
-                }
-                await reload()
+                        let finalParagraphs = updatedParagraphs
+                        try await store.update { state in
+                            guard let index = state.generatedArticles.firstIndex(where: { $0.id == articleId }) else { return }
+                            if !titleRuby.isEmpty {
+                                state.generatedArticles[index].titleRuby = titleRuby
+                            }
+                            state.generatedArticles[index].paragraphs = finalParagraphs
+                            state.generatedArticles[index].updatedAt = Date()
+                        }
+                        await reload()
 
-                await MainActor.run {
-                    if self.lastGeneratedEssay?.id == articleId {
-                        self.lastGeneratedEssay = self.snapshot.generatedArticles.first(where: { $0.id == articleId })
+                        await AIRequestLogStore.shared.appendEvent(
+                            "flow.completed",
+                            operation: "annotateArticleRuby",
+                            output: [
+                                "annotatedParagraphs": "\(annotatedCount)",
+                                "paragraphCount": "\(finalParagraphs.count)",
+                                "titleRubyUsable": "\(!titleRuby.isEmpty)"
+                            ],
+                            startedAt: startedAt
+                        )
+                        await MainActor.run {
+                            if self.lastGeneratedEssay?.id == articleId {
+                                self.lastGeneratedEssay = self.snapshot.generatedArticles.first(where: { $0.id == articleId })
+                            }
+                            self.isAnnotatingArticleRuby = false
+                            self.statusMessage = "注音標註完成"
+                        }
+                    } catch {
+                        await AIRequestLogStore.shared.appendEvent(
+                            "flow.failed",
+                            operation: "annotateArticleRuby",
+                            startedAt: startedAt,
+                            errorSummary: error.localizedDescription
+                        )
+                        await MainActor.run {
+                            self.isAnnotatingArticleRuby = false
+                            self.statusMessage = "注音標註失敗：\(error.localizedDescription)"
+                        }
                     }
-                    self.isAnnotatingArticleRuby = false
-                    self.statusMessage = "注音標註完成"
-                }
-            } catch {
-                await MainActor.run {
-                    self.isAnnotatingArticleRuby = false
-                    self.statusMessage = "注音標註失敗：\(error.localizedDescription)"
                 }
             }
         }
@@ -2017,6 +2155,7 @@ public final class AppViewModel: ObservableObject {
             format == "pdf" ? .pdf : (format == "png" ? .png : docType)
         ]
         savePanel.nameFieldStringValue = fileName
+        presentAbovePopover(savePanel)
         savePanel.begin { [weak self] response in
             guard response == .OK, let url = savePanel.url else { return }
             do {
@@ -2044,6 +2183,7 @@ public final class AppViewModel: ObservableObject {
         let theme = article.theme
         let paragraphs = article.resolvedParagraphs
         if format == "word" {
+            let startedAt = Date()
             let docxData = DocxBuilder.buildDocx(
                 title: title,
                 titleRuby: article.titleRuby,
@@ -2051,6 +2191,43 @@ public final class AppViewModel: ObservableObject {
                 paragraphs: paragraphs
             )
             try docxData.write(to: url)
+
+            // 記錄「DB 裡有幾段 ruby、其中幾段通過驗證」——
+            // storedRuby > usableRuby 代表 ruby 拼接與原文不符，匯出時被降級成純文字。
+            let storedRubyParagraphs = paragraphs.filter { !$0.ruby.isEmpty }.count
+            let usableRubyParagraphs = paragraphs.filter { !RubySupport.validated($0.ruby, for: $0.japanese).isEmpty }.count
+            let titleRubyStored = !(article.titleRuby ?? []).isEmpty
+            let titleRubyUsable = !RubySupport.validated(article.titleRuby, for: title).isEmpty
+            let fileName = url.lastPathComponent
+            let paragraphCount = paragraphs.count
+            let articleId = article.id.uuidString
+            Task {
+                await AITraceContext.$traceId.withValue(UUID().uuidString) {
+                    await AITraceContext.$flow.withValue("exportEssayDocx") {
+                        await AIRequestLogStore.shared.appendEvent(
+                            "flow.start",
+                            operation: "exportEssayDocx",
+                            message: "Export essay to Word (.docx) with ruby annotations.",
+                            input: [
+                                "articleId": articleId,
+                                "paragraphCount": "\(paragraphCount)"
+                            ]
+                        )
+                        await AIRequestLogStore.shared.appendEvent(
+                            "flow.completed",
+                            operation: "exportEssayDocx",
+                            output: [
+                                "fileName": fileName,
+                                "storedRubyParagraphs": "\(storedRubyParagraphs)",
+                                "usableRubyParagraphs": "\(usableRubyParagraphs)",
+                                "titleRubyStored": "\(titleRubyStored)",
+                                "titleRubyUsable": "\(titleRubyUsable)"
+                            ],
+                            startedAt: startedAt
+                        )
+                    }
+                }
+            }
             return
         }
 
@@ -2075,7 +2252,8 @@ public final class AppViewModel: ObservableObject {
                         segments: para.ruby,
                         fallback: para.japanese,
                         baseFont: .system(size: 16),
-                        rubyFont: .system(size: 9)
+                        rubyFont: .system(size: 9),
+                        highlightWords: article.vocabularyWords ?? []
                     )
 
                     if !para.translation.isEmpty {

@@ -153,6 +153,7 @@ public enum ProviderPreset: String, Codable, CaseIterable, Identifiable, Sendabl
     case openCodeGo
     case openCodeZen
     case googleAIStudio
+    case ollama
     case custom
 
     public var id: String { rawValue }
@@ -160,10 +161,19 @@ public enum ProviderPreset: String, Codable, CaseIterable, Identifiable, Sendabl
     /// 各 preset 預設是否要求結構化輸出。OpenAI 官方支援，預設開；
     /// 其他第三方/本地 endpoint 不一定支援，預設關以免回 400。
     /// Gemma 透過 Google 的 OpenAI 相容層不保證支援 response_format，預設關。
+    /// Ollama 的 OpenAI 相容層支援 response_format，本地小模型更需要 JSON 約束，預設開。
     public var defaultStructuredOutput: StructuredOutputMode {
         switch self {
-        case .openAI: .jsonObject
+        case .openAI, .ollama: .jsonObject
         case .openCodeGo, .openCodeZen, .googleAIStudio, .custom: .off
+        }
+    }
+
+    /// 本地 endpoint（Ollama）不需要 API key；雲端 provider 一律需要。
+    public var requiresAPIKey: Bool {
+        switch self {
+        case .ollama: false
+        case .openAI, .openCodeGo, .openCodeZen, .googleAIStudio, .custom: true
         }
     }
 
@@ -177,6 +187,8 @@ public enum ProviderPreset: String, Codable, CaseIterable, Identifiable, Sendabl
             "OpenCode Zen"
         case .googleAIStudio:
             "Google AI Studio (Gemini)"
+        case .ollama:
+            "Ollama（本地）"
         case .custom:
             "Custom"
         }
@@ -193,6 +205,9 @@ public enum ProviderPreset: String, Codable, CaseIterable, Identifiable, Sendabl
         case .googleAIStudio:
             // Google AI Studio / Gemini API 的 OpenAI 相容端點。
             URL(string: "https://generativelanguage.googleapis.com/v1beta/openai")!
+        case .ollama:
+            // Ollama 的 OpenAI 相容端點；模型清單同樣走 GET /v1/models。
+            URL(string: "http://127.0.0.1:11434/v1")!
         case .custom:
             URL(string: "https://api.openai.com/v1")!
         }
@@ -208,6 +223,8 @@ public enum ProviderPreset: String, Codable, CaseIterable, Identifiable, Sendabl
             "deepseek-v4-flash"
         case .googleAIStudio:
             "gemini-3.5-flash"
+        case .ollama:
+            "qwen3:8b"
         case .custom:
             "gpt-4.1-mini"
         }
@@ -223,6 +240,8 @@ public enum ProviderPreset: String, Codable, CaseIterable, Identifiable, Sendabl
             "deepseek-v4-flash"
         case .googleAIStudio:
             "gemini-3.1-flash-lite"
+        case .ollama:
+            "qwen3:8b"
         case .custom:
             "gpt-4.1-mini"
         }
@@ -234,7 +253,7 @@ public enum ProviderPreset: String, Codable, CaseIterable, Identifiable, Sendabl
     public var usesCuratedModelList: Bool {
         switch self {
         case .googleAIStudio: false
-        case .openAI, .openCodeGo, .openCodeZen, .custom: false
+        case .openAI, .openCodeGo, .openCodeZen, .ollama, .custom: false
         }
     }
 
@@ -248,6 +267,9 @@ public enum ProviderPreset: String, Codable, CaseIterable, Identifiable, Sendabl
             ["deepseek-v4-flash", "deepseek-v4-pro", "minimax-m2.7", "minimax-m2.5", "glm-5.2", "glm-5.1", "kimi-k2.6", "big-pickle"]
         case .googleAIStudio:
             ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemma-4-26b-a4b-it", "gemma-4-31b-it"]
+        case .ollama:
+            // 驗證時會改抓本機實際安裝的模型清單，這裡只是連不上時的參考值。
+            ["qwen3:8b", "qwen3:4b", "gemma3:12b", "llama3.3"]
         case .custom:
             [defaultModel]
         }
@@ -614,11 +636,19 @@ public struct GeneratedArticle: Codable, Identifiable, Equatable, Sendable {
 
     /// 顯示、注音與匯出用的段落。擷取文章還沒有 paragraphs 時，
     /// 以換行把 plainText 切成純日文段落（translation 留空）。
+    /// 舊資料的段落可能殘留 LLM 輸出的 **強調** 標記，這裡一併剝除。
     public var resolvedParagraphs: [ArticleParagraph] {
-        if let paragraphs, !paragraphs.isEmpty { return paragraphs }
+        if let paragraphs, !paragraphs.isEmpty {
+            return paragraphs.map { paragraph in
+                var cleaned = paragraph
+                cleaned.japanese = RubySupport.strippingEmphasis(paragraph.japanese)
+                cleaned.translation = RubySupport.strippingEmphasis(paragraph.translation)
+                return cleaned
+            }
+        }
         return plainText
             .split(separator: "\n", omittingEmptySubsequences: true)
-            .map { ArticleParagraph(japanese: $0.trimmingCharacters(in: .whitespaces), translation: "") }
+            .map { ArticleParagraph(japanese: RubySupport.strippingEmphasis($0.trimmingCharacters(in: .whitespaces)), translation: "") }
             .filter { !$0.japanese.isEmpty }
     }
 }

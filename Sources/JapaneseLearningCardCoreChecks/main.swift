@@ -39,6 +39,10 @@ struct CoreChecks {
         try articleDecodingHandlesReasoningModelOutput()
         try structuredOutputIsSentPerProvider()
         try googleAIStudioPresetTargetsGeminiOpenAIEndpoint()
+        ollamaPresetSupportsLocalKeylessProvider()
+        try rubyRequestStreamsAndSSELinesAssemble()
+        try essayOutputStripsEmphasisMarkers()
+        vocabularyHighlightMatchesWordsAndSegments()
         try await pipelineGeneratesAIArticleAndCards()
         try await pipelineParseAndStoreForValidationRegistersSourceAndCards()
         try await storePersistsGeneratedArticles()
@@ -68,7 +72,44 @@ struct CoreChecks {
         try await syncCoordinatorPropagatesDeletionToOtherMac()
         try mergerConflictRecordContainsLocalRemoteBaseJSON()
         try await conflictStorePersistsAndReloads()
+        try await aiRequestLogStoreMirrorsLatestFlow()
         print("All JapaneseLearningCardCore checks passed.")
+    }
+
+    private static func aiRequestLogStoreMirrorsLatestFlow() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ai-log-check-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = AIRequestLogStore(directory: dir)
+
+        await AITraceContext.$traceId.withValue("trace-A") {
+            await AITraceContext.$flow.withValue("generateAIArticleNow") {
+                await store.appendEvent("flow.start", operation: "generateAIArticleNow")
+                await store.appendEvent("flow.completed", operation: "generateAIArticleNow", startedAt: Date(timeIntervalSinceNow: -1.5))
+            }
+        }
+        await AITraceContext.$traceId.withValue("trace-B") {
+            await AITraceContext.$flow.withValue("generateQuiz") {
+                await store.appendEvent("flow.start", operation: "generateQuiz")
+                await store.appendEvent("flow.completed", operation: "generateQuiz", startedAt: Date())
+            }
+        }
+        // 已結束（或並行中）舊流程的尾段事件不應重置或混入 ai-latest.log。
+        await AITraceContext.$traceId.withValue("trace-A") {
+            await store.appendEvent("llm.response", operation: "generateArticle")
+        }
+
+        let fullLines = try String(contentsOf: store.logFileURL, encoding: .utf8)
+            .split(separator: "\n")
+        expect(fullLines.count == 5, "主 log 應包含全部 5 筆事件")
+
+        let latestLines = try String(contentsOf: store.latestLogFileURL, encoding: .utf8)
+            .split(separator: "\n").map(String.init)
+        expect(latestLines.count == 2, "ai-latest.log 應只保留最新流程的 2 筆事件")
+        expect(latestLines.allSatisfy { $0.contains("trace-B") }, "ai-latest.log 應只包含最新流程的 traceId")
+        expect(latestLines.last?.contains("\"startedAt\"") == true, "flow.completed 應記錄 startedAt 起始時間")
+        expect(latestLines.last?.contains("\"finishedAt\"") == true, "flow.completed 應記錄 finishedAt 結束時間")
+        expect(latestLines.last?.contains("\"durationMilliseconds\"") == true, "flow.completed 應自動計算 duration")
     }
 
     private static func sourceValidatorAcceptsHTTPAndHTTPS() throws {
@@ -810,6 +851,95 @@ struct CoreChecks {
         let json = String(decoding: try JSONEncoder().encode(body), as: UTF8.self)
         expect(body.model == "gemini-3.5-flash", "request should use the Gemini 3.5 Flash model")
         expect(!json.contains("response_format"), "Gemini request should omit response_format by default")
+    }
+
+    private static func rubyRequestStreamsAndSSELinesAssemble() throws {
+        // 注音與短文請求必須開串流，避開 gateway 對非串流長請求的時間預算。
+        let settings = AppSettings(providerConfig: ProviderConfig(preset: .openCodeGo, structuredOutput: .off))
+        let body = OpenAICompatibleLLMClient.rubyForTextsRequestBody(texts: ["日本語"], settings: settings)
+        expect(body.stream == true, "ruby request should enable SSE streaming")
+        let json = String(decoding: try JSONEncoder().encode(body), as: UTF8.self)
+        expect(json.contains("\"stream\":true"), "encoded ruby request should carry stream:true")
+        let essayBody = OpenAICompatibleLLMClient.essayRequestBody(theme: "旅行", vocabularyWords: ["旅"], settings: settings)
+        expect(essayBody.stream == true, "essay request should enable SSE streaming")
+
+        // 其他請求未指定 stream 時不得送出該欄位。
+        let quizBody = OpenAICompatibleLLMClient.quizRequestBody(cards: [], settings: settings)
+        let quizJSON = String(decoding: try JSONEncoder().encode(quizBody), as: UTF8.self)
+        expect(!quizJSON.contains("\"stream\""), "non-streaming requests should omit the stream field")
+
+        // SSE 行解析：組 delta.content、忽略 reasoning 增量 / [DONE] / 非 data 行。
+        let lines = [
+            ": keep-alive comment",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"results\\\":\"}}]}",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking...\"}}]}",
+            "",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"[]}\"}}]}",
+            "data: [DONE]"
+        ]
+        let content = lines.compactMap(OpenAICompatibleLLMClient.streamedContentDelta(fromSSELine:)).joined()
+        expect(content == "{\"results\":[]}", "SSE deltas should assemble into the full content, got: \(content)")
+    }
+
+    private static func essayOutputStripsEmphasisMarkers() throws {
+        // App 不渲染 Markdown：模型輸出的 **強調** 必須在解碼時剝除。
+        let content = """
+        {"isValidPrompt":true,"validationError":"","title":"**放送**の一日","paragraphs":[{"japanese":"この**放送**は面白いです。","translation":"這個**廣播**很有趣。"}]}
+        """
+        let payload = try OpenAICompatibleLLMClient.decodeEssay(from: content)
+        expect(payload.title == "放送の一日", "decodeEssay should strip ** from the title")
+        expect(payload.paragraphs.first?.japanese == "この放送は面白いです。", "decodeEssay should strip ** from japanese text")
+        expect(payload.paragraphs.first?.translation == "這個廣播很有趣。", "decodeEssay should strip ** from translation")
+
+        // 既有 DB 資料殘留 ** 時，顯示／注音／匯出共用的 resolvedParagraphs 也要剝除。
+        let stored = GeneratedArticle(
+            kind: .essay,
+            theme: "測試",
+            jlptLevels: [.n3],
+            title: "放送の一日",
+            plainText: "この**放送**は面白いです。",
+            contentHash: "hash",
+            sourceId: UUID(),
+            paragraphs: [ArticleParagraph(japanese: "この**放送**は面白いです。", translation: "這個**廣播**很有趣。")]
+        )
+        expect(stored.resolvedParagraphs.first?.japanese == "この放送は面白いです。",
+               "resolvedParagraphs should strip ** left in stored data")
+        expect(stored.resolvedParagraphs.first?.translation == "這個廣播很有趣。",
+               "resolvedParagraphs should strip ** from stored translation")
+    }
+
+    private static func vocabularyHighlightMatchesWordsAndSegments() {
+        // 純文字：找出單字出現的字元區間，重複出現要全標。
+        let text = "この放送は面白い。放送を聞く。"
+        let ranges = RubySupport.highlightRanges(in: text, words: ["放送"])
+        expect(ranges == [2..<4, 9..<11], "highlightRanges should mark every occurrence, got: \(ranges)")
+        expect(RubySupport.highlightRanges(in: text, words: []).isEmpty, "no words means no highlight")
+        expect(RubySupport.highlightRanges(in: text, words: ["存在しない"]).isEmpty, "missing word means no highlight")
+
+        // 注音 segment：命中的 segment 標記；單字跨 segment 時全部標記。
+        let segments = [
+            RubySegment(base: "この"),
+            RubySegment(base: "放送", ruby: "ほうそう"),
+            RubySegment(base: "は"),
+            RubySegment(base: "面白", ruby: "おもしろ"),
+            RubySegment(base: "い。")
+        ]
+        let flags = RubySupport.highlightFlags(for: segments, words: ["放送"])
+        expect(flags == [false, true, false, false, false], "only the 放送 segment should highlight, got: \(flags)")
+        // 「面白い」跨了「面白」「い。」兩個 segment，兩個都要亮。
+        let crossFlags = RubySupport.highlightFlags(for: segments, words: ["面白い"])
+        expect(crossFlags == [false, false, false, true, true], "a word spanning segments should highlight both, got: \(crossFlags)")
+    }
+
+    private static func ollamaPresetSupportsLocalKeylessProvider() {
+        let preset = ProviderPreset.ollama
+        expect(preset.defaultBaseURL.absoluteString == "http://127.0.0.1:11434/v1",
+               "Ollama preset should target the local OpenAI-compatible endpoint")
+        expect(!preset.requiresAPIKey, "Ollama preset should not require an API key")
+        expect(preset.defaultStructuredOutput == .jsonObject,
+               "Ollama preset should default response_format on to constrain local models")
+        expect(!preset.usesCuratedModelList, "Ollama should list locally installed models")
+        expect(ProviderPreset.openAI.requiresAPIKey, "cloud presets should still require an API key")
     }
 
     private static func pipelineGeneratesAIArticleAndCards() async throws {

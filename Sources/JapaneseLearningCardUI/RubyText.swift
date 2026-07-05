@@ -10,27 +10,45 @@ struct RubyText: View {
     var rubyColor: Color = .secondary
     var horizontalSpacing: CGFloat = 2
     var verticalSpacing: CGFloat = 4
+    /// 要高亮的單字（例如短文融入的 vocabularyWords）；命中的文字以 highlightColor 顯示。
+    var highlightWords: [String] = []
+    var highlightColor: Color = .orange
 
     var body: some View {
         if RubySupport.isUsable(segments, for: fallback) {
+            let flags = RubySupport.highlightFlags(for: segments, words: highlightWords)
             RubyFlowLayout(horizontalSpacing: horizontalSpacing, verticalSpacing: verticalSpacing) {
-                ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
+                ForEach(Array(segments.enumerated()), id: \.offset) { index, segment in
                     RubySegmentView(
                         segment: segment,
                         baseFont: baseFont,
                         rubyFont: rubyFont,
-                        baseColor: baseColor,
+                        baseColor: (index < flags.count && flags[index]) ? highlightColor : baseColor,
                         rubyColor: rubyColor
                     )
                 }
             }
             .textSelection(.enabled)
         } else {
-            Text(fallback)
+            Text(highlightedFallback)
                 .font(baseFont)
                 .foregroundStyle(baseColor)
                 .textSelection(.enabled)
         }
+    }
+
+    /// 沒有可用注音時的純文字版本：以 AttributedString 對命中單字上色。
+    private var highlightedFallback: AttributedString {
+        var attributed = AttributedString(fallback)
+        guard !highlightWords.isEmpty else { return attributed }
+        for range in RubySupport.highlightRanges(in: fallback, words: highlightWords) {
+            guard
+                let lower = attributed.characters.index(attributed.startIndex, offsetBy: range.lowerBound, limitedBy: attributed.endIndex),
+                let upper = attributed.characters.index(attributed.startIndex, offsetBy: range.upperBound, limitedBy: attributed.endIndex)
+            else { continue }
+            attributed[lower..<upper].foregroundColor = highlightColor
+        }
+        return attributed
     }
 }
 
