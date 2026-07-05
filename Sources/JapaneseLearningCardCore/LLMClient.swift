@@ -448,7 +448,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
             maxAttempts: Self.rubyMaxRequestAttempts
         )
         Self.debugLog("rubyForTexts 串流組裝內容：\n\(content)")
-        let results = try Self.decodeRubyForTexts(from: content, sourceTexts: texts)
+        let results = try await Self.decodeRubyForTexts(from: content, sourceTexts: texts)
         
         // emptyRubyCount > 0 代表模型回覆的 ruby 拼接與原文不符，該段已降級為空 ruby。
         let emptyRubyCount = results.filter(\.isEmpty).count
@@ -1478,7 +1478,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         )
     }
 
-    public static func decodeRubyForTexts(from content: String, sourceTexts: [String]) throws -> [[RubySegment]] {
+    public static func decodeRubyForTexts(from content: String, sourceTexts: [String]) async throws -> [[RubySegment]] {
         let payload: RubyForTextsPayload
         do {
             payload = try decodeJSON(RubyForTextsPayload.self, from: content)
@@ -1494,14 +1494,27 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         }
 
         var finalResults = [[RubySegment]]()
+        var repairedIndexes = [Int]()
         for (index, text) in sourceTexts.enumerated() {
             let segments = resultsMap[index] ?? []
             if RubySupport.isUsable(segments, for: text) {
                 finalResults.append(segments)
+            } else if let repaired = RubySupport.repaired(segments, toMatch: text) {
+                log("段落 [\(index)] Ruby 標記缺漏標點，已自動補上後使用。")
+                repairedIndexes.append(index)
+                finalResults.append(repaired)
             } else {
                 log("段落 [\(index)] Ruby 標記拼接不符原始內容，使用空 Ruby 降級渲染。")
                 finalResults.append([])
             }
+        }
+        if !repairedIndexes.isEmpty {
+            await AIRequestLogStore.shared.appendEvent(
+                "ruby.autoRepaired",
+                operation: "generateRubyForTexts",
+                message: "偵測到模型漏掉標點造成拼接不符，已自動補上後使用（非內容錯誤，不影響品質）。",
+                output: ["repairedParagraphs": repairedIndexes.map(String.init).joined(separator: ",")]
+            )
         }
         return finalResults
     }
