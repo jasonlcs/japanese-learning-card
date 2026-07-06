@@ -56,6 +56,25 @@ final class RubySupportTests: XCTestCase {
         XCTAssertTrue(RubySupport.validated(segments, for: "毎日、日本語を勉強します。").isEmpty)
     }
 
+    func testReconciledRubyAnchorsSegmentsToOriginalTextWithoutDroppingEverything() {
+        let source = "毎日、日本語を勉強します。"
+        let modelSegments = [
+            RubySegment(base: "毎日", ruby: "まいにち"),
+            RubySegment(base: "英語", ruby: "えいご"),
+            RubySegment(base: "を", ruby: ""),
+            RubySegment(base: "勉強", ruby: "べんきょう"),
+            RubySegment(base: "します。", ruby: "")
+        ]
+
+        let repaired = RubySupport.reconciled(modelSegments, toMatch: source)
+
+        XCTAssertTrue(RubySupport.isUsable(repaired, for: source))
+        XCTAssertEqual(repaired.map(\.base).joined(), source)
+        XCTAssertTrue(repaired.contains(RubySegment(base: "毎日", ruby: "まいにち")))
+        XCTAssertTrue(repaired.contains(RubySegment(base: "、日本語", ruby: "")))
+        XCTAssertTrue(repaired.contains(RubySegment(base: "勉強", ruby: "べんきょう")))
+    }
+
     func testAppSettingsDecodeDefaultsCompletedMigrationsToEmptyArray() throws {
         let json = #"{"providerConfig":{"preset":"openAI","baseURL":"https://api.openai.com/v1","model":"gpt-4.1-mini","apiKeyKeychainRef":"default","extraHeaders":{},"structuredOutput":"jsonObject"}}"#
 

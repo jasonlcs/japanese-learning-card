@@ -770,29 +770,25 @@ private struct StyledLearningCard: View {
                 CardInfoPanel(title: "意味", systemImage: "lightbulb", tint: .cardOrange) {
                     Text(card.meaningZh)
                         .font(.body.weight(.semibold))
-                        .lineLimit(2)
-                    if let point = noteSections.point {
-                        Divider().overlay(Color.cardOrange.opacity(0.45))
-                        Text(point)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                    }
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .frame(maxWidth: .infinity)
             }
 
-            HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 7) {
                 CardInfoPanel(title: "接続", systemImage: "gearshape.fill", tint: .cardPink) {
                     Text(connectionText)
                         .font(.body.weight(.semibold))
-                        .lineLimit(2)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 CardInfoPanel(title: "ポイント", systemImage: "exclamationmark.circle.fill", tint: .cardPink) {
                     Text(noteSections.point ?? "注意句型前後的接續與語氣。")
                         .font(.callout)
-                        .lineLimit(2)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
@@ -1118,7 +1114,8 @@ private struct UsageLine: View {
                 .frame(width: 5, height: 5)
             Text(text)
                 .font(.callout.weight(.medium))
-                .lineLimit(1)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

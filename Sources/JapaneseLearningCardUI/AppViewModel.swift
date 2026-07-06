@@ -1903,7 +1903,7 @@ public final class AppViewModel: ObservableObject {
 
             await MainActor.run {
                 self.essayCurrentStep = .generatingRuby
-                self.essayGenerationProgress = "正在標註漢字讀音（失敗可事後補標）..."
+                self.essayGenerationProgress = "正在標註漢字讀音..."
             }
 
             var textsToAnnotate = [payload.title]
@@ -1911,27 +1911,10 @@ public final class AppViewModel: ObservableObject {
                 textsToAnnotate.append(para.japanese)
             }
 
-            let rubyStartedAt = Date()
-            var rubyDegradedReason: String?
-            let rubyResults: [[RubySegment]]
-            do {
-                rubyResults = try await providerClient.generateRubyForTexts(
-                    texts: textsToAnnotate,
-                    settings: snapshot.settings
-                )
-            } catch {
-                OpenAICompatibleLLMClient.log("漢字讀音生成失敗（可能逾時），降級使用無標記模式：\(error.localizedDescription)")
-                await AIRequestLogStore.shared.appendEvent(
-                    "ruby.degraded",
-                    operation: "generateRubyForTexts",
-                    message: "Ruby annotation failed; essay will be saved without ruby.",
-                    input: ["textCount": "\(textsToAnnotate.count)"],
-                    startedAt: rubyStartedAt,
-                    errorSummary: error.localizedDescription
-                )
-                rubyDegradedReason = error.localizedDescription
-                rubyResults = Array(repeating: [], count: textsToAnnotate.count)
-            }
+            let rubyResults = try await providerClient.generateRubyForTexts(
+                texts: textsToAnnotate,
+                settings: snapshot.settings
+            )
 
             try Task.checkCancellation()
 
@@ -1970,17 +1953,12 @@ public final class AppViewModel: ObservableObject {
                 titleRuby: titleRuby
             )
 
-            let rubyDegraded = rubyDegradedReason != nil
             await MainActor.run {
                 self.essayCurrentStep = .done
                 self.lastGeneratedEssay = article
                 self.isGeneratingEssay = false
                 self.essayGenerationProgress = ""
-                if rubyDegraded {
-                    self.statusMessage = "短文「\(payload.title)」已產生，但注音標註失敗（AI 供應商暫時無法使用），可稍後點「重新標註注音」補上。"
-                } else {
-                    self.statusMessage = "短文「\(payload.title)」產生成功！"
-                }
+                self.statusMessage = "短文「\(payload.title)」產生成功！"
             }
 
             try await store.update { $0.generatedArticles.insert(article, at: 0) }
@@ -1994,11 +1972,9 @@ public final class AppViewModel: ObservableObject {
                     "title": payload.title,
                     "paragraphCount": "\(paragraphs.count)",
                     "usableRubyParagraphs": "\(usableRubyParagraphs)",
-                    "titleRubyUsable": "\(!RubySupport.validated(titleRuby, for: payload.title).isEmpty)",
-                    "rubyDegraded": "\(rubyDegraded)"
+                    "titleRubyUsable": "\(!RubySupport.validated(titleRuby, for: payload.title).isEmpty)"
                 ],
-                startedAt: startedAt,
-                errorSummary: rubyDegradedReason
+                startedAt: startedAt
             )
         } catch is CancellationError {
             await AIRequestLogStore.shared.appendEvent(
@@ -2048,7 +2024,7 @@ public final class AppViewModel: ObservableObject {
         return paragraphs.contains { RubySupport.validated($0.ruby, for: $0.japanese).isEmpty }
     }
 
-    /// 補標既有文章的漢字注音（短文產生時失敗降級、或擷取文章／舊資料沒有注音時使用）。
+    /// 補標既有文章的漢字注音（擷取文章／舊資料沒有注音時使用）。
     public func annotateArticleRuby(articleId: UUID) {
         guard !isAnnotatingArticleRuby else { return }
         guard let article = snapshot.generatedArticles.first(where: { $0.id == articleId }) else { return }
@@ -2192,8 +2168,8 @@ public final class AppViewModel: ObservableObject {
             )
             try docxData.write(to: url)
 
-            // 記錄「DB 裡有幾段 ruby、其中幾段通過驗證」——
-            // storedRuby > usableRuby 代表 ruby 拼接與原文不符，匯出時被降級成純文字。
+            // 記錄「DB 裡有幾段 ruby、其中幾段通過驗證」。
+            // storedRuby > usableRuby 代表舊資料仍含不可用 ruby，匯出時會略過不可用標記。
             let storedRubyParagraphs = paragraphs.filter { !$0.ruby.isEmpty }.count
             let usableRubyParagraphs = paragraphs.filter { !RubySupport.validated($0.ruby, for: $0.japanese).isEmpty }.count
             let titleRubyStored = !(article.titleRuby ?? []).isEmpty
@@ -2322,4 +2298,3 @@ public enum EssayGenerationStep: Int, CaseIterable, Sendable {
         }
     }
 }
-
