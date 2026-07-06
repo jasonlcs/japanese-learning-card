@@ -107,7 +107,7 @@ public struct RootView: View {
             }
         }
         #if os(macOS)
-        .frame(minWidth: 520)
+        .frame(minWidth: 520, minHeight: 550)
         .background(Color.platformWindowBackground)
         .scrollContentBackground(.hidden)
         .onHover { inside in
@@ -405,25 +405,49 @@ struct QuizView: View {
 
                         ForEach(Array(quiz.choices.enumerated()), id: \.offset) { index, choice in
                             Button {
-                                viewModel.submitQuizAnswer(choice)
+                                if quiz.status == .pending {
+                                    viewModel.submitQuizAnswer(choice)
+                                }
                             } label: {
-                                HStack(spacing: 10) {
+                                HStack(spacing: 12) {
                                     Text(optionLabel(index))
-                                        .font(.caption.weight(.bold))
-                                        .frame(width: 24, height: 24)
-                                        .foregroundStyle(optionAccent(index))
-                                        .background(optionAccent(index).opacity(0.16))
+                                        .font(.body.weight(.bold))
+                                        .frame(width: 30, height: 30)
+                                        .foregroundStyle(labelColor(choice: choice, quiz: quiz, index: index))
+                                        .background(labelBgColor(choice: choice, quiz: quiz, index: index))
                                         .clipShape(Circle())
+                                    
                                     Text(choice)
+                                        .font(.body.weight(.semibold))
+                                        .foregroundStyle(textColor(choice: choice, quiz: quiz))
                                         .frame(maxWidth: .infinity, alignment: .leading)
-                                    if quiz.selectedAnswer == choice {
-                                        Image(systemName: choice == quiz.correctAnswer ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                        .multilineTextAlignment(.leading)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    
+                                    if quiz.status != .pending {
+                                        if choice == quiz.correctAnswer {
+                                            Image(systemName: "checkmark.circle.fill")
+                                                .font(.system(size: 22, weight: .bold))
+                                                .foregroundStyle(Color.quizCorrect)
+                                        } else if choice == quiz.selectedAnswer {
+                                            Image(systemName: "xmark.circle.fill")
+                                                .font(.system(size: 22, weight: .bold))
+                                                .foregroundStyle(Color.quizIncorrect)
+                                        }
                                     }
                                 }
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 12)
+                                .frame(maxWidth: .infinity)
+                                .contentShape(Rectangle())
                             }
-                            .buttonStyle(.bordered)
-                            .tint(buttonTint(index: index, choice: choice, quiz: quiz))
-                            .disabled(quiz.status != .pending)
+                            .buttonStyle(
+                                QuizChoiceButtonStyle(
+                                    bgColor: choiceBgColor(choice: choice, quiz: quiz, index: index),
+                                    borderColor: choiceBorderColor(choice: choice, quiz: quiz, index: index),
+                                    borderLineWidth: choiceBorderLineWidth(choice: choice, quiz: quiz)
+                                )
+                            )
                         }
 
                         if quiz.status != .pending {
@@ -490,11 +514,73 @@ struct QuizView: View {
         [.blue, .purple, .orange, .teal][safe: index] ?? .accentColor
     }
 
-    private func buttonTint(index: Int, choice: String, quiz: QuizQuestion) -> Color? {
-        guard quiz.status != .pending else { return optionAccent(index) }
-        if choice == quiz.correctAnswer { return .quizCorrect }
-        if choice == quiz.selectedAnswer { return .quizIncorrect }
-        return optionAccent(index)
+    private func labelColor(choice: String, quiz: QuizQuestion, index: Int) -> Color {
+        if quiz.status == .pending {
+            return optionAccent(index)
+        }
+        if choice == quiz.correctAnswer || choice == quiz.selectedAnswer {
+            return .white
+        }
+        return .secondary
+    }
+
+    private func labelBgColor(choice: String, quiz: QuizQuestion, index: Int) -> Color {
+        if quiz.status == .pending {
+            return optionAccent(index).opacity(0.16)
+        }
+        if choice == quiz.correctAnswer {
+            return .quizCorrect
+        }
+        if choice == quiz.selectedAnswer {
+            return .quizIncorrect
+        }
+        return Color.gray.opacity(0.12)
+    }
+
+    private func textColor(choice: String, quiz: QuizQuestion) -> Color {
+        if quiz.status == .pending {
+            return .primary
+        }
+        if choice == quiz.correctAnswer || choice == quiz.selectedAnswer {
+            return .primary
+        }
+        return .secondary
+    }
+
+    private func choiceBgColor(choice: String, quiz: QuizQuestion, index: Int) -> Color {
+        if quiz.status == .pending {
+            return Color.platformTextBackground
+        }
+        if choice == quiz.correctAnswer {
+            return .quizCorrectBg
+        }
+        if choice == quiz.selectedAnswer {
+            return .quizIncorrectBg
+        }
+        return Color.platformTextBackground.opacity(0.5)
+    }
+
+    private func choiceBorderColor(choice: String, quiz: QuizQuestion, index: Int) -> Color {
+        if quiz.status == .pending {
+            return optionAccent(index).opacity(0.4)
+        }
+        if choice == quiz.correctAnswer {
+            return .quizCorrect
+        }
+        if choice == quiz.selectedAnswer {
+            return .quizIncorrect
+        }
+        return Color.gray.opacity(0.15)
+    }
+
+    private func choiceBorderLineWidth(choice: String, quiz: QuizQuestion) -> CGFloat {
+        if quiz.status == .pending {
+            return 1.5
+        }
+        if choice == quiz.correctAnswer || choice == quiz.selectedAnswer {
+            return 2.5
+        }
+        return 1.0
     }
 }
 
@@ -518,6 +604,7 @@ struct CardView: View {
                     learnCard: { viewModel.markCurrentCard(.learned) },
                     nextCard: viewModel.showNextCard
                 )
+                .id(card.id)
             } else {
                 #if os(macOS)
                 ContentUnavailableView(
@@ -630,6 +717,9 @@ private struct StyledLearningCard: View {
     var learnCard: () -> Void
     var nextCard: () -> Void
 
+    @State private var isMeaningShown = false
+    @State private var isExampleTranslationShown = false
+
     private var kind: LearningCardLayoutKind { LearningCardLayoutKind(card: card) }
     private var noteSections: CardNoteSections { CardNoteSections(note: card.grammarNoteZh) }
     private var cardCopyText: String {
@@ -659,6 +749,12 @@ private struct StyledLearningCard: View {
             RoundedRectangle(cornerRadius: 18)
                 .stroke(Color.cardBlue.opacity(0.42), lineWidth: 2)
         )
+        .task {
+            try? await Task.sleep(for: .seconds(5))
+            withAnimation(.easeInOut(duration: 0.8)) {
+                isMeaningShown = true
+            }
+        }
     }
 
     private var cardHeader: some View {
@@ -720,9 +816,29 @@ private struct StyledLearningCard: View {
 
                 VStack(alignment: .leading, spacing: 8) {
                     CardInfoPanel(title: "意味", systemImage: "lightbulb", tint: .cardOrange) {
-                        Text(card.meaningZh)
-                            .font(.body.weight(.semibold))
-                            .lineLimit(2)
+                        ZStack(alignment: .leading) {
+                            Text(card.meaningZh)
+                                .font(.body.weight(.semibold))
+                                .lineLimit(2)
+                                .opacity(isMeaningShown ? 1.0 : 0.0)
+                            
+                            if !isMeaningShown {
+                                Button {
+                                    withAnimation(.easeInOut(duration: 0.8)) {
+                                        isMeaningShown = true
+                                    }
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "hourglass")
+                                        Text("5秒後自動顯示...")
+                                    }
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                                .transition(.opacity)
+                            }
+                        }
                         if let point = noteSections.point {
                             Divider().overlay(Color.cardOrange.opacity(0.45))
                             Text(point)
@@ -768,10 +884,30 @@ private struct StyledLearningCard: View {
                     .frame(maxWidth: .infinity, minHeight: 94)
 
                 CardInfoPanel(title: "意味", systemImage: "lightbulb", tint: .cardOrange) {
-                    Text(card.meaningZh)
-                        .font(.body.weight(.semibold))
-                        .lineLimit(3)
-                        .fixedSize(horizontal: false, vertical: true)
+                    ZStack(alignment: .leading) {
+                        Text(card.meaningZh)
+                            .font(.body.weight(.semibold))
+                            .lineLimit(3)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .opacity(isMeaningShown ? 1.0 : 0.0)
+                        
+                        if !isMeaningShown {
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.8)) {
+                                    isMeaningShown = true
+                                }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "hourglass")
+                                    Text("5秒後自動顯示...")
+                                }
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .transition(.opacity)
+                        }
+                    }
                 }
                 .frame(maxWidth: .infinity)
             }
@@ -961,7 +1097,7 @@ private struct StyledLearningCard: View {
         CardInfoPanel(title: title, systemImage: "pencil", tint: tint) {
             VStack(alignment: .leading, spacing: 8) {
                 if RubySupport.isUsable(card.exampleRuby, for: card.exampleJa) {
-                    HStack(alignment: .top, spacing: 6) {
+                    ZStack(alignment: .topTrailing) {
                         RubyText(
                             segments: card.exampleRuby,
                             fallback: card.exampleJa,
@@ -972,6 +1108,9 @@ private struct StyledLearningCard: View {
                             horizontalSpacing: 1,
                             verticalSpacing: 3
                         )
+                        .padding(.trailing, 28)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
                         CopyButton(text: clipboardText(base: card.exampleJa, reading: card.exampleReading))
                     }
                 } else {
@@ -980,11 +1119,11 @@ private struct StyledLearningCard: View {
                         font: .headline,
                         copyText: clipboardText(base: card.exampleJa, reading: card.exampleReading)
                     )
-                        .lineLimit(2)
+                    .lineLimit(3)
                 }
                 if !card.exampleReading.isEmpty && !RubySupport.isUsable(card.exampleRuby, for: card.exampleJa) {
                     CopyableTextRow(text: card.exampleReading, font: .subheadline, color: .secondary)
-                        .lineLimit(1)
+                        .lineLimit(2)
                 } else if card.exampleReading.isEmpty && !RubySupport.isUsable(card.exampleRuby, for: card.exampleJa) {
                     Button {
                         fillExampleReading()
@@ -993,10 +1132,37 @@ private struct StyledLearningCard: View {
                     }
                     .disabled(isGeneratingExampleReading)
                 }
-                Text(card.exampleZh)
-                    .foregroundStyle(.secondary)
-                    .font(.callout)
-                    .lineLimit(2)
+                ZStack(alignment: .topLeading) {
+                    Text(card.exampleZh)
+                        .foregroundStyle(.secondary)
+                        .font(.callout)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .opacity(isExampleTranslationShown ? 1.0 : 0.0)
+
+                    if !isExampleTranslationShown {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.8)) {
+                                isExampleTranslationShown = true
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "eye.fill")
+                                Text("顯示中文翻譯")
+                            }
+                            .font(.caption)
+                            .foregroundStyle(tint)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(tint.opacity(0.12))
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .transition(.opacity)
+                    }
+                }
             }
         }
     }
@@ -3515,5 +3681,23 @@ struct FlowLayout: Layout {
             x += size.width + spacing
             rowHeight = max(rowHeight, size.height)
         }
+    }
+}
+
+private struct QuizChoiceButtonStyle: ButtonStyle {
+    var bgColor: Color
+    var borderColor: Color
+    var borderLineWidth: CGFloat
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(configuration.isPressed ? bgColor.opacity(0.8) : bgColor)
+            .cornerRadius(10)
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(borderColor, lineWidth: borderLineWidth)
+            )
+            .scaleEffect(configuration.isPressed ? 0.99 : 1.0)
+            .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
     }
 }
