@@ -2,6 +2,81 @@ import XCTest
 @testable import JapaneseLearningCardCore
 
 final class LLMClientRubyTests: XCTestCase {
+    func testRubyAnnotationUnitsSplitJapaneseParagraphsBySentence() {
+        let units = OpenAICompatibleLLMClient.rubyAnnotationUnits(for: [
+            "短文タイトル",
+            "今日は雨です。傘を持ちます！大丈夫？",
+        ])
+
+        XCTAssertEqual(units.map(\.sourceTextIndex), [0, 1, 1, 1])
+        XCTAssertEqual(units.map(\.text), [
+            "短文タイトル",
+            "今日は雨です。",
+            "傘を持ちます！",
+            "大丈夫？",
+        ])
+    }
+
+    func testRubyAnnotationUnitsPreserveClosingQuotesAndWhitespace() {
+        let units = OpenAICompatibleLLMClient.rubyAnnotationUnits(for: [
+            "彼は「行きます。」と言った。 次の文です。",
+        ])
+
+        XCTAssertEqual(units.map(\.text), [
+            "彼は「行きます。」と言った。 ",
+            "次の文です。",
+        ])
+        XCTAssertEqual(units.map(\.text).joined(), "彼は「行きます。」と言った。 次の文です。")
+    }
+
+    func testMergeRubyAnnotationUnitResultsKeepsPlainTextForFailedSentence() {
+        let texts = ["今日は雨です。傘を持ちます。大丈夫です。"]
+        let units = OpenAICompatibleLLMClient.rubyAnnotationUnits(for: texts)
+        let merged = OpenAICompatibleLLMClient.mergeRubyAnnotationUnitResults(
+            texts: texts,
+            units: units,
+            unitResults: [
+                [RubySegment(base: "今日", ruby: "きょう"), RubySegment(base: "は", ruby: ""), RubySegment(base: "雨", ruby: "あめ"), RubySegment(base: "です。", ruby: "")],
+                [],
+                [RubySegment(base: "大丈夫", ruby: "だいじょうぶ"), RubySegment(base: "です。", ruby: "")],
+            ]
+        )
+
+        XCTAssertTrue(RubySupport.isUsable(merged[0], for: texts[0]))
+        XCTAssertEqual(merged[0].map(\.base).joined(), texts[0])
+        XCTAssertTrue(merged[0].contains(RubySegment(base: "今日", ruby: "きょう")))
+        XCTAssertTrue(merged[0].contains(RubySegment(base: "傘を持ちます。", ruby: "")))
+        XCTAssertTrue(merged[0].contains(RubySegment(base: "大丈夫", ruby: "だいじょうぶ")))
+    }
+
+    func testDecodeRubyForTextsRepairsMismatchedModelBaseToOriginalText() async throws {
+        let content = """
+        {
+          "results": [
+            {
+              "index": 0,
+              "ruby": [
+                {"base": "毎日", "ruby": "まいにち"},
+                {"base": "英語", "ruby": "えいご"},
+                {"base": "を", "ruby": ""},
+                {"base": "勉強", "ruby": "べんきょう"},
+                {"base": "します。", "ruby": ""}
+              ]
+            }
+          ]
+        }
+        """
+        let source = "毎日、日本語を勉強します。"
+
+        let results = try await OpenAICompatibleLLMClient.decodeRubyForTexts(from: content, sourceTexts: [source])
+
+        XCTAssertEqual(results.count, 1)
+        XCTAssertTrue(RubySupport.isUsable(results[0], for: source))
+        XCTAssertFalse(results[0].isEmpty)
+        XCTAssertTrue(results[0].contains(RubySegment(base: "毎日", ruby: "まいにち")))
+        XCTAssertTrue(results[0].contains(RubySegment(base: "勉強", ruby: "べんきょう")))
+    }
+
     func testDecodeCardsKeepsValidRubyMetadata() throws {
         let content = """
         {

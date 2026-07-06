@@ -28,7 +28,7 @@ public enum RubySupport {
     /// 嘗試修復模型偶爾漏掉標點/空白造成的 base 拼接誤差：
     /// 只在「原文比拼接多出的字元全部是標點、空白等非文字字元，且缺漏位置
     /// 恰好落在既有 segment 邊界」時才補上一個無 ruby 的 segment；
-    /// 只要牽涉到漢字/假名等實際內容不符，一律回傳 nil，交由呼叫端降級。
+    /// 只要牽涉到漢字/假名等實際內容不符，一律回傳 nil，交由呼叫端做原文錨定重建。
     public static func repaired(_ segments: [RubySegment], toMatch text: String) -> [RubySegment]? {
         guard !segments.isEmpty else { return nil }
         let joined = segments.map(\.base).joined()
@@ -71,6 +71,48 @@ public enum RubySupport {
 
         guard isUsable(result, for: text) else { return nil }
         return result
+    }
+
+    /// 以原文為唯一可信來源重建 ruby segments。
+    /// 模型回覆的 base 只用來定位可保留的 ruby；任何缺漏、改寫或多餘內容都不會進入結果。
+    /// 回傳值對非空原文一律可拼回原文，避免呼叫端因拼接不符而丟掉整段。
+    public static func reconciled(_ segments: [RubySegment], toMatch text: String) -> [RubySegment] {
+        let original = normalizedBase(text)
+        guard !original.isEmpty else { return [] }
+        guard !isUsable(segments, for: original) else { return segments }
+
+        var result: [RubySegment] = []
+        var searchStart = original.startIndex
+
+        for segment in segments {
+            let base = normalizedBase(segment.base)
+            guard !base.isEmpty,
+                  let range = original.range(of: base, range: searchStart..<original.endIndex)
+            else {
+                continue
+            }
+
+            appendPlain(original[searchStart..<range.lowerBound], to: &result)
+            appendSegment(RubySegment(base: String(original[range]), ruby: segment.ruby), to: &result)
+            searchStart = range.upperBound
+        }
+
+        appendPlain(original[searchStart..<original.endIndex], to: &result)
+
+        guard isUsable(result, for: original) else {
+            return [RubySegment(base: original, ruby: "")]
+        }
+        return result
+    }
+
+    private static func appendPlain(_ substring: Substring, to result: inout [RubySegment]) {
+        guard !substring.isEmpty else { return }
+        appendSegment(RubySegment(base: String(substring), ruby: ""), to: &result)
+    }
+
+    private static func appendSegment(_ segment: RubySegment, to result: inout [RubySegment]) {
+        guard !segment.base.isEmpty else { return }
+        result.append(segment)
     }
 
     /// 缺漏的字元必須是標點/空白等不需要注音的字元，漢字、假名、英數字一律不修復。

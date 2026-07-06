@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(CoreFoundation)
+import CoreFoundation
+#endif
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -73,6 +76,16 @@ public struct RubyBackfillResult: Equatable, Sendable {
         self.cardId = cardId
         self.wordRuby = wordRuby
         self.exampleRuby = exampleRuby
+    }
+}
+
+public struct RubyAnnotationUnit: Equatable, Sendable {
+    public var sourceTextIndex: Int
+    public var text: String
+
+    public init(sourceTextIndex: Int, text: String) {
+        self.sourceTextIndex = sourceTextIndex
+        self.text = text
     }
 }
 
@@ -420,7 +433,46 @@ public struct OpenAICompatibleLLMClient: LLMClient {
 
     public func generateRubyForTexts(texts: [String], settings: AppSettings) async throws -> [[RubySegment]] {
         let apiKey = try resolvedAPIKey(settings: settings)
+        let units = Self.rubyAnnotationUnits(for: texts)
+        var mergedResults = Array(repeating: [RubySegment](), count: texts.count)
 
+        guard !units.isEmpty else {
+            return mergedResults
+        }
+
+        var unitResults = [[RubySegment]]()
+        for (unitIndex, unit) in units.enumerated() {
+            try Task.checkCancellation()
+            let batchResults = try await generateRubyForTextBatch(
+                texts: [unit.text],
+                settings: settings,
+                apiKey: apiKey,
+                unitIndex: unitIndex,
+                unitCount: units.count
+            )
+            unitResults.append(batchResults.first ?? [])
+        }
+
+        mergedResults = Self.mergeRubyAnnotationUnitResults(texts: texts, units: units, unitResults: unitResults)
+
+        await AIRequestLogStore.shared.appendEvent(
+            "llm.decode.completed",
+            operation: "generateRubyForTexts",
+            output: [
+                "resultCount": "\(mergedResults.count)",
+                "requestUnitCount": "\(units.count)"
+            ]
+        )
+        return mergedResults
+    }
+
+    private func generateRubyForTextBatch(
+        texts: [String],
+        settings: AppSettings,
+        apiKey: String,
+        unitIndex: Int,
+        unitCount: Int
+    ) async throws -> [[RubySegment]] {
         let body = Self.rubyForTextsRequestBody(texts: texts, settings: settings)
         var request = URLRequest(url: settings.providerConfig.baseURL.appendingPathComponent("chat/completions"))
         request.httpMethod = "POST"
@@ -448,17 +500,18 @@ public struct OpenAICompatibleLLMClient: LLMClient {
             maxAttempts: Self.rubyMaxRequestAttempts
         )
         Self.debugLog("rubyForTexts 串流組裝內容：\n\(content)")
-        let results = try await Self.decodeRubyForTexts(from: content, sourceTexts: texts)
-        
-        // emptyRubyCount > 0 代表模型回覆的 ruby 拼接與原文不符，該段已降級為空 ruby。
-        let emptyRubyCount = results.filter(\.isEmpty).count
+        let results = try await Self.decodeRubyForTexts(
+            from: content,
+            sourceTexts: texts,
+            contextDescription: "句子 \(unitIndex + 1)/\(unitCount)"
+        )
         await AIRequestLogStore.shared.appendEvent(
-            "llm.decode.completed",
+            "ruby.unit.completed",
             operation: "generateRubyForTexts",
-            message: emptyRubyCount > 0 ? "部分段落 ruby 拼接與原文不符，已降級為空 ruby。" : nil,
             output: [
-                "resultCount": "\(results.count)",
-                "emptyRubyCount": "\(emptyRubyCount)"
+                "unitIndex": "\(unitIndex + 1)",
+                "unitCount": "\(unitCount)",
+                "textCount": "\(texts.count)"
             ]
         )
         return results
@@ -1364,14 +1417,17 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         2. 禁止任何編程代碼（如 Python, Swift, Java 等）、數學計算（如代數、微積分等）、或與學習日文及生活工作完全無關的亂問（如「如何製造核彈」）。
         3. 如果發現提示詞違反規定，你必須將 JSON 的 "isValidPrompt" 設為 false，並在 "validationError" 中用繁體中文指出具體原因（例如：「提示詞必須與日文學習、生活或工作場景相關，不可寫程式或算數學。」），此時不需要填寫 title 和 paragraphs 內容。
         4. 如果提示詞合規，則 "isValidPrompt" 設為 true，"validationError" 設為 empty string ""，且必須生成符合要求的 "title" 和 "paragraphs"。
-        5. 全文約 3~4 個段落。在日文段落中請自然融入指定的單字。輸出純文字，禁止使用任何 Markdown 標記（如 **粗體**）。
-        6. 使用「です/ます」體。段落翻譯必須使用繁體中文，禁止簡體中文。
+        5. "title" 必須是日文標題，禁止中文標題；標題請包含自然的日文假名或日文語尾。
+        6. paragraphs[].japanese 必須只寫自然日文，禁止中文句子。
+        7. paragraphs[].translation 與 validationError 必須只使用繁體中文，禁止簡體中文。
+        8. 全文約 3~4 個段落。在日文段落中請自然融入指定的單字。輸出純文字，禁止使用任何 Markdown 標記（如 **粗體**）。
+        9. 使用「です/ます」體。所有中文內容必須使用繁體中文，禁止簡體中文。
         
         只輸出 JSON，不要 Markdown 包裹。JSON schema 格式必須嚴格如下：
         {
           "isValidPrompt": true,
           "validationError": "",
-          "title": "標題文字",
+          "title": "日文標題",
           "paragraphs": [
             {
               "japanese": "日文段落本文...",
@@ -1408,7 +1464,7 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         }
 
         let isValid = payload.isValidPrompt
-        let errorMsg = payload.validationError?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let errorMsg = traditionalChinese(payload.validationError?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
         
         if !isValid {
             return AIEssayPayload(
@@ -1425,12 +1481,20 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         let paragraphs = (payload.paragraphs ?? []).map {
             AIEssayPayload.AIEssayParagraph(
                 japanese: RubySupport.strippingEmphasis($0.japanese.trimmingCharacters(in: .whitespacesAndNewlines)),
-                translation: RubySupport.strippingEmphasis($0.translation.trimmingCharacters(in: .whitespacesAndNewlines))
+                translation: traditionalChinese(RubySupport.strippingEmphasis($0.translation.trimmingCharacters(in: .whitespacesAndNewlines)))
             )
+        }
+
+        guard isJapaneseText(title) else {
+            throw LLMClientError.decodingFailed(detail: "title 必須是日文標題，禁止中文標題。", raw: content)
         }
 
         guard !paragraphs.isEmpty else {
             throw LLMClientError.noContent
+        }
+
+        guard paragraphs.allSatisfy({ isJapaneseText($0.japanese) }) else {
+            throw LLMClientError.decodingFailed(detail: "paragraphs[].japanese 必須是日文。", raw: content)
         }
 
         return AIEssayPayload(
@@ -1439,6 +1503,16 @@ public struct OpenAICompatibleLLMClient: LLMClient {
             title: title,
             paragraphs: paragraphs
         )
+    }
+
+    private static func traditionalChinese(_ text: String) -> String {
+        text.applyingTransform(StringTransform(rawValue: "Hans-Hant"), reverse: false) ?? text
+    }
+
+    private static func isJapaneseText(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            (0x3040...0x309F).contains(Int(scalar.value)) || (0x30A0...0x30FF).contains(Int(scalar.value))
+        }
     }
 
     public static func rubyForTextsRequestBody(texts: [String], settings: AppSettings) -> ChatCompletionRequest {
@@ -1478,7 +1552,97 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         )
     }
 
-    public static func decodeRubyForTexts(from content: String, sourceTexts: [String]) async throws -> [[RubySegment]] {
+    public static func rubyAnnotationUnits(for texts: [String]) -> [RubyAnnotationUnit] {
+        texts.enumerated().flatMap { index, text in
+            sentenceChunksForRubyAnnotation(text).map { chunk in
+                RubyAnnotationUnit(sourceTextIndex: index, text: chunk)
+            }
+        }
+    }
+
+    public static func mergeRubyAnnotationUnitResults(
+        texts: [String],
+        units: [RubyAnnotationUnit],
+        unitResults: [[RubySegment]]
+    ) -> [[RubySegment]] {
+        var mergedResults = Array(repeating: [RubySegment](), count: texts.count)
+
+        for (unitIndex, unit) in units.enumerated() {
+            guard texts.indices.contains(unit.sourceTextIndex) else { continue }
+            let segments = unitIndex < unitResults.count ? unitResults[unitIndex] : []
+            if RubySupport.isUsable(segments, for: unit.text) {
+                mergedResults[unit.sourceTextIndex].append(contentsOf: segments)
+            } else {
+                mergedResults[unit.sourceTextIndex].append(contentsOf: RubySupport.reconciled(segments, toMatch: unit.text))
+            }
+        }
+
+        for index in texts.indices {
+            let text = texts[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            if text.isEmpty {
+                mergedResults[index] = []
+            } else if !RubySupport.isUsable(mergedResults[index], for: texts[index]) {
+                mergedResults[index] = RubySupport.reconciled(mergedResults[index], toMatch: texts[index])
+            }
+        }
+
+        return mergedResults
+    }
+
+    private static func sentenceChunksForRubyAnnotation(_ text: String) -> [String] {
+        guard !text.isEmpty else { return [] }
+
+        var chunks = [String]()
+        var current = ""
+        var shouldSplitAfterClosers = false
+        var quoteDepth = 0
+
+        for character in text {
+            if shouldSplitAfterClosers && !isJapaneseClosingQuoteOrBracket(character) && !character.isWhitespace {
+                appendRubySentenceChunk(current, to: &chunks)
+                current = ""
+                shouldSplitAfterClosers = false
+            }
+
+            current.append(character)
+
+            if isJapaneseOpeningQuoteOrBracket(character) {
+                quoteDepth += 1
+            } else if isJapaneseClosingQuoteOrBracket(character), quoteDepth > 0 {
+                quoteDepth -= 1
+            }
+
+            if isJapaneseSentenceTerminator(character), quoteDepth == 0 {
+                shouldSplitAfterClosers = true
+            }
+        }
+
+        appendRubySentenceChunk(current, to: &chunks)
+        return chunks
+    }
+
+    private static func appendRubySentenceChunk(_ value: String, to chunks: inout [String]) {
+        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        chunks.append(value)
+    }
+
+    private static func isJapaneseSentenceTerminator(_ character: Character) -> Bool {
+        character == "。" || character == "！" || character == "？" || character == "!" || character == "?"
+    }
+
+    private static func isJapaneseOpeningQuoteOrBracket(_ character: Character) -> Bool {
+        ["「", "『", "（", "(", "［", "[", "【", "《", "〈"].contains(character)
+    }
+
+    private static func isJapaneseClosingQuoteOrBracket(_ character: Character) -> Bool {
+        ["」", "』", "）", ")", "］", "]", "】", "》", "〉"].contains(character)
+    }
+
+    public static func decodeRubyForTexts(
+        from content: String,
+        sourceTexts: [String],
+        contextDescription: String? = nil
+    ) async throws -> [[RubySegment]] {
         let payload: RubyForTextsPayload
         do {
             payload = try decodeJSON(RubyForTextsPayload.self, from: content)
@@ -1497,15 +1661,17 @@ public struct OpenAICompatibleLLMClient: LLMClient {
         var repairedIndexes = [Int]()
         for (index, text) in sourceTexts.enumerated() {
             let segments = resultsMap[index] ?? []
+            let logTarget = contextDescription ?? "段落 [\(index)]"
             if RubySupport.isUsable(segments, for: text) {
                 finalResults.append(segments)
             } else if let repaired = RubySupport.repaired(segments, toMatch: text) {
-                log("段落 [\(index)] Ruby 標記缺漏標點，已自動補上後使用。")
+                log("\(logTarget) Ruby 標記缺漏標點，已自動補上後使用。")
                 repairedIndexes.append(index)
                 finalResults.append(repaired)
             } else {
-                log("段落 [\(index)] Ruby 標記拼接不符原始內容，使用空 Ruby 降級渲染。")
-                finalResults.append([])
+                log("\(logTarget) Ruby 標記拼接不符原始內容，已依原文重建可用片段。")
+                repairedIndexes.append(index)
+                finalResults.append(RubySupport.reconciled(segments, toMatch: text))
             }
         }
         if !repairedIndexes.isEmpty {
