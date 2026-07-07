@@ -116,7 +116,15 @@ final class MenuBarController: NSObject {
         popover.behavior = .transient
         popover.delegate = self
         popover.appearance = NSAppearance(named: .aqua)
-        popover.contentViewController = NSHostingController(rootView: RootView(viewModel: viewModel))
+        // sizingOptions = .preferredContentSize:內容理想高度改變時（換卡、
+        // 展開中文翻譯、補注音…）hosting controller 會回報新尺寸，NSPopover
+        // 自動跟著調整。否則 popover 只在打開瞬間量一次高度，之後內容變高
+        // 就會上下被裁切，最底部的倒數進度條會最先消失。
+        let hostingController = NSHostingController(
+            rootView: PopoverContentView(viewModel: viewModel, width: Self.popoverWidth)
+        )
+        hostingController.sizingOptions = .preferredContentSize
+        popover.contentViewController = hostingController
         popover.contentSize = preferredPopoverSize()
 
         viewModel.requestShowPopover = { [weak self] in
@@ -168,6 +176,19 @@ final class MenuBarController: NSObject {
             return false
         }
         return window.frame.contains(NSEvent.mouseLocation)
+    }
+}
+
+/// Popover 內容外框：固定寬度，高度上限取螢幕可視高度的 80%，
+/// 讓 preferredContentSize 自動 sizing 不會把 popover 撐出螢幕。
+private struct PopoverContentView: View {
+    @ObservedObject var viewModel: AppViewModel
+    let width: CGFloat
+
+    var body: some View {
+        RootView(viewModel: viewModel)
+            .frame(width: width)
+            .frame(maxHeight: floor((NSScreen.main?.visibleFrame.height ?? 700) * 0.8))
     }
 }
 

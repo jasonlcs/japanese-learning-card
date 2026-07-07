@@ -75,36 +75,35 @@ public struct RootView: View {
 
             Divider()
 
-            // 內容區用 ZStack 疊放:卡片頁永遠參與 layout 當高度基準,其他頁籤
-            // 蓋在上面並吃滿同樣的高度。這樣切換頁籤時 popover 不會因為各頁
-            // fitting size 不同而重新計算(高度亂跳),所有頁籤都跟卡片頁等高。
-            ZStack(alignment: .topLeading) {
-                CardView(viewModel: viewModel)
-                    .opacity(viewModel.selectedTab == 0 ? 1 : 0)
-                    .allowsHitTesting(viewModel.selectedTab == 0)
-                    .accessibilityHidden(viewModel.selectedTab != 0)
-
-                if viewModel.selectedTab != 0 {
-                    Group {
-                        switch viewModel.selectedTab {
-                        #if os(macOS)
-                        case 1:
-                            CardMakerView(viewModel: viewModel)
-                        #endif
-                        case 2:
-                            QuizView(viewModel: viewModel)
-                        case 4:
-                            SettingsView(viewModel: viewModel)
-                        case 5:
-                            HistoryView(viewModel: viewModel)
-                        default:
-                            EmptyView()
+            // 內容區以卡片頁當唯一的高度基準，其他頁籤用 overlay 蓋在上面
+            // 吃滿同樣的高度。overlay 不參與 layout，所以 popover 的理想高度
+            // 永遠跟著卡片內容走，切換頁籤或內容變長都不會高度亂跳。
+            CardView(viewModel: viewModel)
+                .opacity(viewModel.selectedTab == 0 ? 1 : 0)
+                .allowsHitTesting(viewModel.selectedTab == 0)
+                .accessibilityHidden(viewModel.selectedTab != 0)
+                .overlay(alignment: .topLeading) {
+                    if viewModel.selectedTab != 0 {
+                        Group {
+                            switch viewModel.selectedTab {
+                            #if os(macOS)
+                            case 1:
+                                CardMakerView(viewModel: viewModel)
+                            #endif
+                            case 2:
+                                QuizView(viewModel: viewModel)
+                            case 4:
+                                SettingsView(viewModel: viewModel)
+                            case 5:
+                                HistoryView(viewModel: viewModel)
+                            default:
+                                EmptyView()
+                            }
                         }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Color.platformWindowBackground)
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color.platformWindowBackground)
                 }
-            }
         }
         #if os(macOS)
         .frame(minWidth: 520, minHeight: 550)
