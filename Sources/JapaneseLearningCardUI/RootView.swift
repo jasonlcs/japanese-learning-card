@@ -959,20 +959,23 @@ private struct StyledLearningCard: View {
         // actually differs from the reading we already displayed.
         let showRomanized = showReading && !romanized.isEmpty && romanized != trimmedReading
         let usesRuby = RubySupport.isUsable(card.wordRuby, for: trimmedWord)
+        let wordLength = trimmedWord.count
+        let baseSize = Self.wordFontSize(forLength: wordLength, isGrammar: kind == .grammar)
+        let rubySize = Self.rubyFontSize(forLength: wordLength)
         return VStack(spacing: 6) {
             if usesRuby {
                 RubyText(
                     segments: card.wordRuby,
                     fallback: trimmedWord,
-                    baseFont: .system(size: kind == .grammar ? 25 : 31, weight: .black, design: .rounded),
-                    rubyFont: .system(size: 11, weight: .bold, design: .rounded),
+                    baseFont: .system(size: baseSize, weight: .black, design: .rounded),
+                    rubyFont: .system(size: rubySize, weight: .bold, design: .rounded),
                     baseColor: kind == .grammar ? Color.cardBlue : .primary,
                     rubyColor: Color.cardBlue,
                     horizontalSpacing: 0,
                     verticalSpacing: 1
                 )
                 .multilineTextAlignment(.center)
-                .padding(.horizontal, 18)
+                .padding(.horizontal, 12)
             } else if showReading {
                 Text(card.reading)
                     .font(.callout.weight(.bold))
@@ -983,7 +986,7 @@ private struct StyledLearningCard: View {
             }
             if !usesRuby {
                 Text(card.word)
-                    .font(.system(size: kind == .grammar ? 30 : 38, weight: .black, design: .rounded))
+                    .font(.system(size: baseSize + 7, weight: .black, design: .rounded))
                     .foregroundStyle(kind == .grammar ? Color.cardBlue : .primary)
                     .textSelection(.enabled)
                     .multilineTextAlignment(.center)
@@ -999,18 +1002,30 @@ private struct StyledLearningCard: View {
                     .minimumScaleFactor(0.5)
             }
         }
-        .padding(.horizontal, 18)
+        .padding(.horizontal, 12)
         .frame(maxWidth: .infinity)
-        .overlay(alignment: .leading) {
-            DecorativeStroke()
-                .foregroundStyle(Color.cardBlue)
-                .padding(.leading, 6)
+    }
+
+    /// 依字數縮放單字字級，字數愈多字級愈小，盡量讓卡片維持單行不折行。
+    private static func wordFontSize(forLength length: Int, isGrammar: Bool) -> CGFloat {
+        let base: CGFloat = isGrammar ? 30 : 38
+        switch length {
+        case 0...2: return base
+        case 3...4: return base - 5
+        case 5...6: return base - 11
+        case 7...8: return base - 16
+        default: return base - 20
         }
-        .overlay(alignment: .trailing) {
-            DecorativeStroke()
-                .scaleEffect(x: -1, y: 1)
-                .foregroundStyle(Color.cardBlue)
-                .padding(.trailing, 6)
+    }
+
+    /// 假名 ruby 字級同樣依字數縮放，但維持比基礎字級更大的比例。
+    private static func rubyFontSize(forLength length: Int) -> CGFloat {
+        switch length {
+        case 0...2: return 17
+        case 3...4: return 15
+        case 5...6: return 13
+        case 7...8: return 12
+        default: return 11
         }
     }
 
@@ -1282,16 +1297,6 @@ private struct UsageLine: View {
                 .font(.callout.weight(.medium))
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-}
-
-private struct DecorativeStroke: View {
-    var body: some View {
-        VStack(spacing: 5) {
-            Capsule().frame(width: 13, height: 2.5).rotationEffect(.degrees(28))
-            Capsule().frame(width: 16, height: 2.5)
-            Capsule().frame(width: 13, height: 2.5).rotationEffect(.degrees(-28))
         }
     }
 }
