@@ -117,7 +117,9 @@ public final class AppViewModel: ObservableObject {
         endDate: nil,
         pausedRemainingSeconds: nil
     )
-    @Published private(set) var isQuickReviewActive = false
+    @Published private(set) var isQuickReviewActive = false {
+        didSet { updateVisibleCardTimerState() }
+    }
     @Published var storageSettings: StorageSettings
     @Published private(set) var storageHealth: DataStoreHealth?
     @Published private(set) var isMigratingStorage = false
@@ -184,6 +186,9 @@ public final class AppViewModel: ObservableObject {
     private var aiArticleTimer: Timer?
     private var autoCloseTask: Task<Void, Never>?
     private var autoCloseGeneration = 0
+    /// 互動暫停時保留的最小剩餘秒數：避免在倒數快歸零時暫停，
+    /// 進度條凍結在寬度 ≈ 0（看起來像消失），且恢復後瞬間關閉。
+    private static let minimumPausedRemainingSeconds: TimeInterval = 3
     private var autoCloseRemainingSeconds: TimeInterval? {
         didSet { updateVisibleCardTimerState() }
     }
@@ -1500,7 +1505,7 @@ public final class AppViewModel: ObservableObject {
             quickReviewSessionRemainingSeconds = max(0.1, quickReviewSessionEndDate.timeIntervalSince(now))
         }
         if let quickReviewCardDeadline {
-            quickReviewCardRemainingSeconds = max(0.1, quickReviewCardDeadline.timeIntervalSince(now))
+            quickReviewCardRemainingSeconds = max(Self.minimumPausedRemainingSeconds, quickReviewCardDeadline.timeIntervalSince(now))
         }
         quickReviewTask?.cancel()
         quickReviewGeneration += 1
@@ -1545,6 +1550,11 @@ public final class AppViewModel: ObservableObject {
         quickReviewCardDeadline = nil
         quickReviewCardRemainingSeconds = nil
         statusMessage = message
+        // 快速複習結束後若 popover 仍開著，恢復一般的自動關閉倒數，
+        // 否則進度條會停用（變暗且不動）、popover 也永遠不會自動關閉。
+        if isPopoverVisible {
+            resetAutoCloseForNewCard()
+        }
     }
 
     private func scheduleAutoClose(after duration: TimeInterval) {
@@ -1604,7 +1614,7 @@ public final class AppViewModel: ObservableObject {
         isUserInteracting = true
         pauseQuickReviewTimers()
         if let deadline = autoCloseDeadline {
-            autoCloseRemainingSeconds = max(0.1, deadline.timeIntervalSinceNow)
+            autoCloseRemainingSeconds = max(Self.minimumPausedRemainingSeconds, deadline.timeIntervalSinceNow)
         } else if autoCloseRemainingSeconds == nil {
             autoCloseRemainingSeconds = schedulerPolicy.visibleDuration(settings: snapshot.settings)
         }
