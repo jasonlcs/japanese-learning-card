@@ -595,15 +595,21 @@ struct CardView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             if let card = viewModel.currentCard {
-                StyledLearningCard(
-                    card: card,
-                    isGeneratingExampleReading: viewModel.isGeneratingExampleReading,
-                    fillExampleReading: viewModel.fillCurrentExampleReading,
-                    skipCard: { viewModel.markCurrentCard(.skipped) },
-                    learnCard: { viewModel.markCurrentCard(.learned) },
-                    nextCard: viewModel.showNextCard
-                )
-                .id(card.id)
+                // 卡片放進 ScrollView：popover 高度不足（螢幕上限、量測誤差）時
+                // 內容改為捲動，絕不被裁切；進度條與頁籤列因此永遠可見。
+                ScrollView(.vertical) {
+                    StyledLearningCard(
+                        card: card,
+                        isGeneratingExampleReading: viewModel.isGeneratingExampleReading,
+                        fillExampleReading: viewModel.fillCurrentExampleReading,
+                        skipCard: { viewModel.markCurrentCard(.skipped) },
+                        learnCard: { viewModel.markCurrentCard(.learned) },
+                        nextCard: viewModel.showNextCard
+                    )
+                    .id(card.id)
+                }
+                .scrollBounceBehavior(.basedOnSize)
+                .scrollIndicators(.hidden)
             } else {
                 #if os(macOS)
                 ContentUnavailableView(

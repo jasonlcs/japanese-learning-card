@@ -116,16 +116,15 @@ final class MenuBarController: NSObject {
         popover.behavior = .transient
         popover.delegate = self
         popover.appearance = NSAppearance(named: .aqua)
-        // sizingOptions = .preferredContentSize:內容理想高度改變時（換卡、
-        // 展開中文翻譯、補注音…）hosting controller 會回報新尺寸，NSPopover
-        // 自動跟著調整。否則 popover 只在打開瞬間量一次高度，之後內容變高
-        // 就會上下被裁切，最底部的倒數進度條會最先消失。
+        // popover 尺寸只有一個來源：sizingOptions = .preferredContentSize。
+        // 內容理想高度改變時（換卡、展開中文翻譯、補注音…）hosting controller
+        // 回報新尺寸，NSPopover 自動跟著調整。不要再手動量 fittingSize 設
+        // contentSize——兩個來源互相干擾會讓 popover 每開一次就縮一點。
         let hostingController = NSHostingController(
             rootView: PopoverContentView(viewModel: viewModel, width: Self.popoverWidth)
         )
         hostingController.sizingOptions = .preferredContentSize
         popover.contentViewController = hostingController
-        popover.contentSize = preferredPopoverSize()
 
         viewModel.requestShowPopover = { [weak self] in
             self?.showPopover()
@@ -145,30 +144,9 @@ final class MenuBarController: NSObject {
 
     private func showPopover() {
         guard let button = statusItem.button else { return }
-        popover.contentSize = preferredPopoverSize(for: button.window?.screen)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         NSApp.activate(ignoringOtherApps: true)
         viewModel.popoverDidShow(isMouseInside: isMouseInsidePopover())
-    }
-
-    private func preferredPopoverSize(for screen: NSScreen? = nil) -> NSSize {
-        let visibleHeight = (screen ?? NSScreen.main)?.visibleFrame.height ?? 700
-        let maximumHeight = floor(visibleHeight * 0.8)
-        let measuredHeight = measuredContentHeight(maximumHeight: maximumHeight) ?? maximumHeight
-        return NSSize(width: Self.popoverWidth, height: min(ceil(measuredHeight), maximumHeight))
-    }
-
-    private func measuredContentHeight(maximumHeight: CGFloat) -> CGFloat? {
-        guard let contentView = popover.contentViewController?.view else { return nil }
-        let previousFrame = contentView.frame
-        contentView.frame = NSRect(
-            origin: previousFrame.origin,
-            size: NSSize(width: Self.popoverWidth, height: maximumHeight)
-        )
-        contentView.layoutSubtreeIfNeeded()
-        let fittingHeight = contentView.fittingSize.height
-        contentView.frame = previousFrame
-        return fittingHeight > 0 ? fittingHeight : nil
     }
 
     private func isMouseInsidePopover() -> Bool {
