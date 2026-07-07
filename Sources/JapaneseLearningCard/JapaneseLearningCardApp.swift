@@ -100,6 +100,13 @@ final class MenuBarController: NSObject {
     let viewModel: AppViewModel
     private let statusItem: NSStatusItem
     private let popover: NSPopover
+    /// 最近一次在本 App 內的點擊／鍵盤／捲動時間。onHover 在捲動、視窗
+    /// 高度變動、開選單時常誤報「滑鼠已離開」，倒數會在使用者操作到一半
+    /// 恢復；這個訊號直接記錄「真的有人在操作」，比 hover 可靠。
+    private var lastUserInputAt: Date = .distantPast
+    private var inputMonitor: Any?
+    /// 最近有輸入的這段時間內視為操作中，不自動收回 popover。
+    private static let recentInputWindow: TimeInterval = 15
 
     init(viewModel: AppViewModel) {
         self.viewModel = viewModel
@@ -132,6 +139,31 @@ final class MenuBarController: NSObject {
         viewModel.requestClosePopover = { [weak self] in
             self?.popover.performClose(nil)
         }
+        viewModel.isPopoverBusy = { [weak self] in
+            self?.isPopoverBusy() ?? false
+        }
+
+        // 本 App 唯一的 UI 就是這個 popover（加上它的 sheet／面板），
+        // local monitor 只收得到自家視窗的事件，等於「使用者正在操作」。
+        inputMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown, .keyDown, .scrollWheel]
+        ) { [weak self] event in
+            self?.lastUserInputAt = Date()
+            return event
+        }
+    }
+
+    /// 「忙碌」= 不可以自動收回 popover：掛著 sheet（文章預覽等）、有 modal
+    /// 面板（匯出／選資料夾）、正在打字、滑鼠就在 popover 上、或最近幾秒內
+    /// 有任何點擊／鍵盤輸入。在這些時機收掉 popover 除了打斷操作，sheet／
+    /// modal 的呈現狀態還會殘留在已消失的視窗上，下次打開整個 UI 點不了。
+    private func isPopoverBusy() -> Bool {
+        if Date().timeIntervalSince(lastUserInputAt) < Self.recentInputWindow { return true }
+        if NSApp.modalWindow != nil { return true }
+        guard let window = popover.contentViewController?.view.window else { return false }
+        if window.attachedSheet != nil { return true }
+        if window.isKeyWindow, window.firstResponder is NSTextView { return true }
+        return window.frame.contains(NSEvent.mouseLocation)
     }
 
     @objc private func togglePopover() {
@@ -144,6 +176,12 @@ final class MenuBarController: NSObject {
 
     private func showPopover() {
         guard let button = statusItem.button else { return }
+        // 上次若在 sheet 開著時被關掉，sheet 會殘留並攔走所有滑鼠事件，
+        // 讓重開後的 popover 完全點不動。開之前先把殘留的 sheet 收掉。
+        if let window = popover.contentViewController?.view.window,
+           let sheet = window.attachedSheet {
+            window.endSheet(sheet)
+        }
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         NSApp.activate(ignoringOtherApps: true)
         viewModel.popoverDidShow(isMouseInside: isMouseInsidePopover())
@@ -171,6 +209,17 @@ private struct PopoverContentView: View {
 }
 
 extension MenuBarController: NSPopoverDelegate {
+    /// sheet 或 modal 面板（匯出／選資料夾）開著時一律不准關——transient
+    /// 的點外面（點到 sheet／面板本身也算「外面」）、倒數到期的 performClose
+    /// 都會先走到這。在它們底下把 popover 收掉會讓呈現狀態卡死，重開後
+    /// 整個 popover 點不了任何東西。
+    nonisolated func popoverShouldClose(_ popover: NSPopover) -> Bool {
+        MainActor.assumeIsolated {
+            popover.contentViewController?.view.window?.attachedSheet == nil
+                && NSApp.modalWindow == nil
+        }
+    }
+
     nonisolated func popoverDidClose(_ notification: Notification) {
         Task { @MainActor in
             viewModel.popoverDidClose()

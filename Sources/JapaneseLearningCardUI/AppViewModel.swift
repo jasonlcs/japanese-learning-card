@@ -223,6 +223,10 @@ public final class AppViewModel: ObservableObject {
     private var lastSnapshotDataVersion: Int64?
     public var requestShowPopover: (() -> Void)?
     public var requestClosePopover: (() -> Void)?
+    /// 自動關閉倒數到期時先問這個：popover 上還掛著 sheet 或使用者正在
+    /// 輸入時回 true，改為重排倒數而不是把 popover 從使用者手上收掉。
+    /// （onHover 偵測不到 sheet／鍵盤輸入，只靠它會在操作到一半關掉。）
+    public var isPopoverBusy: (() -> Bool)?
     /// 使用者按「立即檢查更新」時呼叫，由 AppDelegate 接到 Sparkle。
     public var requestCheckForUpdates: (() -> Void)?
     /// 「自動檢查更新」開關變動時呼叫，橋接到 Sparkle 的排程檢查。
@@ -1561,7 +1565,11 @@ public final class AppViewModel: ObservableObject {
         guard isPopoverVisible else { return }
         guard !isQuickReviewActive else { return }
         guard duration > 0 else {
-            requestClosePopover?()
+            if isPopoverBusy?() == true {
+                scheduleAutoClose(after: schedulerPolicy.visibleDuration(settings: snapshot.settings))
+            } else {
+                requestClosePopover?()
+            }
             return
         }
 
@@ -1577,6 +1585,10 @@ public final class AppViewModel: ObservableObject {
                       generation == self.autoCloseGeneration,
                       self.isPopoverVisible,
                       !self.isUserInteracting else { return }
+                if self.isPopoverBusy?() == true {
+                    self.scheduleAutoClose(after: duration)
+                    return
+                }
                 self.autoCloseRemainingSeconds = nil
                 self.autoCloseDeadline = nil
                 self.requestClosePopover?()
