@@ -76,7 +76,11 @@ public final class AppViewModel: ObservableObject {
     @Published var isGeneratingExampleReading = false
     @Published var isRefreshing = false
     @Published var apiKeyInput = ""
+    @Published var openAITtsKeyInput = ""
+    @Published var isOpenAITtsKeySaved = false
     @Published var availableModels: [String] = ProviderPreset.openAI.fallbackModels
+    @Published var availableTtsModels: [String] = []
+    @Published var isFetchingTtsModels = false
     @Published var isValidatingProvider = false
     @Published private(set) var activeProviderKeyStatus: ProviderKeyStatus = .unknown
     @Published var newSourceURL = ""
@@ -1165,6 +1169,12 @@ public final class AppViewModel: ObservableObject {
     }
 
     func refreshActiveProviderKeyStatus() {
+        do {
+            isOpenAITtsKeySaved = try secretStore.hasAPIKey(reference: "openai_tts_api_key")
+        } catch {
+            isOpenAITtsKeySaved = false
+        }
+
         guard let profile = snapshot.settings.activeProviderProfile else {
             activeProviderKeyStatus = .missing
             return
@@ -1174,6 +1184,101 @@ public final class AppViewModel: ObservableObject {
         } catch {
             activeProviderKeyStatus = .error(error.localizedDescription)
         }
+    }
+
+    func saveOpenAITtsKey(_ key: String) {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        do {
+            try secretStore.saveAPIKey(trimmed, reference: "openai_tts_api_key")
+            isOpenAITtsKeySaved = true
+            openAITtsKeyInput = ""
+            statusMessage = "已儲存 OpenAI TTS API Key"
+        } catch {
+            statusMessage = "儲存 OpenAI TTS API Key 失敗：\(error.localizedDescription)"
+        }
+    }
+
+    func clearOpenAITtsKey() {
+        do {
+            try secretStore.deleteAPIKey(reference: "openai_tts_api_key")
+            isOpenAITtsKeySaved = false
+            openAITtsKeyInput = ""
+            availableTtsModels = []
+            statusMessage = "已清除 OpenAI TTS API Key"
+        } catch {
+            statusMessage = "清除 OpenAI TTS API Key 失敗：\(error.localizedDescription)"
+        }
+    }
+
+    func fetchAvailableTtsModels() {
+        let baseURL = snapshot.settings.openAITtsBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        isFetchingTtsModels = true
+        statusMessage = "正在獲取 TTS 可用模型..."
+        
+        guard let apiKey = try? secretStore.apiKey(reference: "openai_tts_api_key"), !apiKey.isEmpty else {
+            statusMessage = "請先儲存 API Key 才能獲取模型"
+            isFetchingTtsModels = false
+            return
+        }
+
+        var baseString = baseURL
+        if baseString.hasSuffix("/") {
+            baseString.removeLast()
+        }
+        guard let url = URL(string: "\(baseString)/models") else {
+            statusMessage = "API Base URL 格式錯誤"
+            isFetchingTtsModels = false
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            Task { @MainActor in
+                guard let self = self else { return }
+                self.isFetchingTtsModels = false
+                
+                if let error = error {
+                    self.statusMessage = "獲取模型失敗：\(error.localizedDescription)"
+                    return
+                }
+                guard let data = data else {
+                    self.statusMessage = "獲取模型失敗：伺服器未回傳資料"
+                    return
+                }
+
+                struct OpenRouterModelsResponse: Decodable {
+                    struct ModelInfo: Decodable {
+                        let id: String
+                    }
+                    let data: [ModelInfo]
+                }
+
+                do {
+                    let decoder = JSONDecoder()
+                    let result = try decoder.decode(OpenRouterModelsResponse.self, from: data)
+                    
+                    let ttsModels = result.data.map { $0.id }.filter { id in
+                        let lower = id.lowercased()
+                        return lower.contains("tts") || lower.contains("speech")
+                    }
+                    
+                    if ttsModels.isEmpty {
+                        self.availableTtsModels = result.data.map { $0.id }.sorted()
+                        self.statusMessage = "已獲取 \(self.availableTtsModels.count) 個模型"
+                    } else {
+                        self.availableTtsModels = ttsModels.sorted()
+                        self.statusMessage = "已成功獲取 \(self.availableTtsModels.count) 個 TTS 模型"
+                    }
+                } catch {
+                    self.statusMessage = "解析模型列表失敗：\(error.localizedDescription)"
+                }
+            }
+        }.resume()
     }
 
     private func updateActiveProviderProfile(resetVerification: Bool, _ mutate: (inout ProviderProfile) -> Void) {

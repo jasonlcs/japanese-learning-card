@@ -183,6 +183,9 @@ final class MenuBarController: NSObject {
             window.endSheet(sheet)
         }
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        if let window = popover.contentViewController?.view.window {
+            window.makeKey()
+        }
         NSApp.activate(ignoringOtherApps: true)
         viewModel.popoverDidShow(isMouseInside: isMouseInsidePopover())
     }

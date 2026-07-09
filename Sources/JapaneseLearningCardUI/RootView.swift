@@ -121,6 +121,7 @@ public struct RootView: View {
         .background(Color.platformWindowBackground)
         .scrollContentBackground(.hidden)
         #endif
+        .environmentObject(viewModel)
     }
 }
 
@@ -1514,11 +1515,14 @@ struct SpeakButton: View {
     var isProminent = false
     @State private var isSpeaking = false
     @State private var speakToken = 0
+    @EnvironmentObject var viewModel: AppViewModel
     
     var body: some View {
         Button {
             let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            SpeechSynthesizerManager.shared.speak(cleanText)
+            SpeechSynthesizerManager.shared.speak(cleanText, settings: viewModel.snapshot.settings) { status in
+                viewModel.statusMessage = status
+            }
             
             speakToken += 1
             let token = speakToken
@@ -1568,12 +1572,35 @@ struct SpeakButton: View {
 private final class SpeechSynthesizerManager {
     static let shared = SpeechSynthesizerManager()
     private let synthesizer = AVSpeechSynthesizer()
+    private var audioPlayer: AVAudioPlayer?
+    private var downloadTask: URLSessionDataTask?
+    private let secretStore = KeychainStore()
     
-    func speak(_ text: String, language: String = "ja-JP") {
+    func speak(_ text: String, settings: AppSettings, language: String = "ja-JP", onStatus: @escaping @MainActor (String) -> Void = { _ in }) {
         if synthesizer.isSpeaking {
             synthesizer.stopSpeaking(at: .immediate)
         }
-        
+        downloadTask?.cancel()
+        downloadTask = nil
+        audioPlayer?.stop()
+        audioPlayer = nil
+
+        if settings.openAITtsEnabled {
+            if let apiKey = try? secretStore.apiKey(reference: "openai_tts_api_key"), !apiKey.isEmpty {
+                onStatus("正在透過 \(settings.openAITtsProviderPreset.displayName) TTS 發音 (\(settings.openAITtsVoice))...")
+                speakOpenAI(text, settings: settings, apiKey: apiKey, onStatus: onStatus)
+                return
+            } else {
+                onStatus("尚未儲存 API Key，已 Fallback 至系統原生語音發音")
+            }
+        } else {
+            onStatus("正在使用系統原生語音發音...")
+        }
+
+        speakNative(text, language: language)
+    }
+
+    private func speakNative(_ text: String, language: String) {
         #if os(iOS)
         do {
             try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
@@ -1588,6 +1615,87 @@ private final class SpeechSynthesizerManager {
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate
         
         synthesizer.speak(utterance)
+    }
+
+    private func speakOpenAI(_ text: String, settings: AppSettings, apiKey: String, onStatus: @escaping @MainActor (String) -> Void) {
+        var baseString = settings.openAITtsBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if baseString.hasSuffix("/") {
+            baseString.removeLast()
+        }
+        guard let url = URL(string: "\(baseString)/audio/speech") else {
+            onStatus("API Base URL 格式錯誤，已 Fallback 至系統原生語音")
+            speakNative(text, language: "ja-JP")
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let payload: [String: Any] = [
+            "model": settings.openAITtsModel,
+            "input": text,
+            "voice": settings.openAITtsVoice
+        ]
+
+        guard let httpBody = try? JSONSerialization.data(withJSONObject: payload, options: []) else {
+            onStatus("序列化請求失敗，已 Fallback 至系統原生語音")
+            speakNative(text, language: "ja-JP")
+            return
+        }
+        request.httpBody = httpBody
+
+        let session = URLSession.shared
+        let task = session.dataTask(with: request) { [weak self] data, response, error in
+            Task { @MainActor in
+                guard let self = self else { return }
+                if let error = error {
+                    print("OpenAI TTS network error: \(error.localizedDescription)")
+                    onStatus("網路請求失敗，已 Fallback 至系統原生語音")
+                    self.speakNative(text, language: "ja-JP")
+                    return
+                }
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    onStatus("連線回應異常，已 Fallback 至系統原生語音")
+                    self.speakNative(text, language: "ja-JP")
+                    return
+                }
+                guard (200...299).contains(httpResponse.statusCode), let data = data else {
+                    print("OpenAI TTS HTTP status: \(httpResponse.statusCode)")
+                    var details = ""
+                    if let data = data, let errorString = String(data: data, encoding: .utf8) {
+                        print("OpenAI TTS error response: \(errorString)")
+                        details = " (\(errorString.prefix(60)))"
+                    }
+                    onStatus("API 回傳失敗 (\(httpResponse.statusCode))，已 Fallback 至系統原生語音\(details)")
+                    self.speakNative(text, language: "ja-JP")
+                    return
+                }
+
+                #if os(iOS)
+                do {
+                    try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
+                    try AVAudioSession.sharedInstance().setActive(true)
+                } catch {
+                    print("Failed to set audio session category: \(error)")
+                }
+                #endif
+
+                do {
+                    let player = try AVAudioPlayer(data: data)
+                    self.audioPlayer = player
+                    onStatus("正在播放 \(settings.openAITtsProviderPreset.displayName) TTS 語音 (\(settings.openAITtsVoice))")
+                    player.play()
+                } catch {
+                    print("Failed to play OpenAI TTS audio data: \(error.localizedDescription)")
+                    onStatus("播放音訊失敗，已 Fallback 至系統原生語音")
+                    self.speakNative(text, language: "ja-JP")
+                }
+            }
+        }
+        self.downloadTask = task
+        task.resume()
     }
 }
 
@@ -1616,7 +1724,7 @@ struct SettingsView: View {
             #if os(macOS)
             allCases
             #else
-            [.display, .data, .system]
+            [.display, .ai, .data, .system]
             #endif
         }
 
@@ -1831,6 +1939,7 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var aiSection: some View {
+                #if os(macOS)
                 settingsBox("AI Provider Profiles") {
                     Text("點一下列表即可切換預設 profile；AI 造卡、出題、驗證都會使用打勾的那一組。")
                         .font(.caption)
@@ -1969,6 +2078,149 @@ struct SettingsView: View {
                         }
                         .disabled(viewModel.isValidatingProvider)
                         .help("驗證成功才會把新的 API key 存入 Keychain；欄位留空時會用既有 key 驗證。")
+                    }
+                }
+                #endif
+
+                settingsBox("OpenAI 相容 TTS 語音合成 (BYOK)") {
+                    Toggle("啟用 TTS 語音合成", isOn: binding(\.openAITtsEnabled))
+                        .help("開啟後，日文發音將會透過所設定的 TTS API 產生；若關閉、無 API Key 或網路異常，會自動 fallback 使用系統內建的日文語音。")
+
+                    if viewModel.snapshot.settings.openAITtsEnabled && !viewModel.isOpenAITtsKeySaved {
+                        HStack(spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                            Text("注意：尚未儲存 API Key，將自動 Fallback 使用系統原生語音發音。")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
+                    }
+
+                    if viewModel.snapshot.settings.openAITtsEnabled {
+                        labeledRow("服務商") {
+                            Picker("", selection: ttsProviderPresetBinding()) {
+                                ForEach(TTSProviderPreset.allCases) { preset in
+                                    Text(preset.displayName).tag(preset)
+                                }
+                            }
+                            .labelsHidden()
+                        }
+
+                        labeledRow("API Base URL") {
+                            TextField("", text: binding(\.openAITtsBaseURL))
+                                .textFieldStyle(.roundedBorder)
+                                .disabled(viewModel.snapshot.settings.openAITtsProviderPreset != .custom)
+                        }
+                        .help("自定義模式下可手動修改。")
+
+                        labeledRow("模型 (Model)") {
+                            if viewModel.snapshot.settings.openAITtsProviderPreset == .openAI {
+                                Picker("", selection: binding(\.openAITtsModel)) {
+                                    Text("tts-1").tag("tts-1")
+                                    Text("tts-1-hd").tag("tts-1-hd")
+                                }
+                                .labelsHidden()
+                            } else {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack(spacing: 8) {
+                                        TextField("輸入模型標識，例如 openai/gpt-4o-mini-tts-2025-12-15", text: binding(\.openAITtsModel))
+                                            .textFieldStyle(.roundedBorder)
+                                        
+                                        Button {
+                                            viewModel.fetchAvailableTtsModels()
+                                        } label: {
+                                            if viewModel.isFetchingTtsModels {
+                                                ProgressView()
+                                                    .controlSize(.small)
+                                            } else {
+                                                Text("獲取清單")
+                                            }
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .disabled(viewModel.isFetchingTtsModels || !viewModel.isOpenAITtsKeySaved)
+                                    }
+
+                                    if !viewModel.availableTtsModels.isEmpty {
+                                        Picker("選取已獲取的模型", selection: binding(\.openAITtsModel)) {
+                                            ForEach(viewModel.availableTtsModels, id: \.self) { model in
+                                                Text(model).tag(model)
+                                            }
+                                        }
+                                        .pickerStyle(.menu)
+                                        .labelsHidden()
+                                    }
+                                }
+                            }
+                        }
+
+                        labeledRow("語音 (Voice)") {
+                            Picker("", selection: binding(\.openAITtsVoice)) {
+                                Text("alloy").tag("alloy")
+                                Text("echo").tag("echo")
+                                Text("fable").tag("fable")
+                                Text("onyx").tag("onyx")
+                                Text("nova").tag("nova")
+                                Text("shimmer").tag("shimmer")
+                            }
+                            .labelsHidden()
+                        }
+                        .help("語音角色通常適用於 OpenAI 系列模型。")
+
+                        labeledRow("API Key") {
+                            #if os(macOS)
+                            HStack(spacing: 8) {
+                                SecureField(
+                                    viewModel.isOpenAITtsKeySaved
+                                        ? "已儲存 API Key (輸入新 key 可覆蓋)"
+                                        : "請貼上 API key",
+                                    text: $viewModel.openAITtsKeyInput
+                                )
+                                .textFieldStyle(.roundedBorder)
+
+                                Button {
+                                    viewModel.saveOpenAITtsKey(viewModel.openAITtsKeyInput)
+                                } label: {
+                                    Text("儲存 Key")
+                                }
+                                .disabled(viewModel.openAITtsKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                                if viewModel.isOpenAITtsKeySaved {
+                                    Button(role: .destructive) {
+                                        viewModel.clearOpenAITtsKey()
+                                    } label: {
+                                        Text("清除 Key")
+                                    }
+                                }
+                            }
+                            #else
+                            VStack(alignment: .leading, spacing: 6) {
+                                SecureField(
+                                    viewModel.isOpenAITtsKeySaved
+                                        ? "已儲存 API Key (輸入新 key 可覆蓋)"
+                                        : "請貼上 API key",
+                                    text: $viewModel.openAITtsKeyInput
+                                )
+                                .textFieldStyle(.roundedBorder)
+
+                                HStack(spacing: 8) {
+                                    Button {
+                                        viewModel.saveOpenAITtsKey(viewModel.openAITtsKeyInput)
+                                    } label: {
+                                        Text("儲存 Key")
+                                    }
+                                    .disabled(viewModel.openAITtsKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                                    if viewModel.isOpenAITtsKeySaved {
+                                        Button(role: .destructive) {
+                                            viewModel.clearOpenAITtsKey()
+                                        } label: {
+                                            Text("清除 Key")
+                                        }
+                                    }
+                                }
+                            }
+                            #endif
+                        }
                     }
                 }
     }
@@ -2410,7 +2662,7 @@ struct SettingsView: View {
         }
     }
 
-    private func binding(_ keyPath: WritableKeyPath<AppSettings, Int>) -> Binding<Int> {
+    private func binding<Value>(_ keyPath: WritableKeyPath<AppSettings, Value>) -> Binding<Value> {
         Binding {
             viewModel.snapshot.settings[keyPath: keyPath]
         } set: { value in
@@ -2702,6 +2954,20 @@ struct SettingsView: View {
         } set: { preset in
             viewModel.applyProviderPreset(preset)
             syncAIDraftsFromSettings()
+        }
+    }
+
+    private func ttsProviderPresetBinding() -> Binding<TTSProviderPreset> {
+        Binding {
+            viewModel.snapshot.settings.openAITtsProviderPreset
+        } set: { preset in
+            var settings = viewModel.snapshot.settings
+            settings.openAITtsProviderPreset = preset
+            if preset != .custom {
+                settings.openAITtsBaseURL = preset.defaultBaseURL
+                settings.openAITtsModel = preset.defaultModel
+            }
+            viewModel.updateSettings(settings)
         }
     }
 
