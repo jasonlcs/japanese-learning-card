@@ -6,6 +6,7 @@ import UIKit
 #endif
 import JapaneseLearningCardCore
 import SwiftUI
+import AVFoundation
 
 // MARK: - Platform-adaptive Color helpers
 
@@ -724,6 +725,7 @@ private struct StyledLearningCard: View {
 
     @State private var isMeaningShown = false
     @State private var isExampleTranslationShown = false
+    @State private var cardLoadTime = Date()
 
     private var kind: LearningCardLayoutKind { LearningCardLayoutKind(card: card) }
     private var noteSections: CardNoteSections { CardNoteSections(note: card.grammarNoteZh) }
@@ -755,6 +757,7 @@ private struct StyledLearningCard: View {
                 .stroke(Color.cardBlue.opacity(0.42), lineWidth: 2)
         )
         .task {
+            cardLoadTime = Date()
             try? await Task.sleep(for: .seconds(5))
             withAnimation(.easeInOut(duration: 0.8)) {
                 isMeaningShown = true
@@ -805,6 +808,9 @@ private struct StyledLearningCard: View {
 
             Spacer()
 
+            SpeakButton(text: card.word, isProminent: true)
+                .padding(.leading, 8)
+
             CopyButton(text: cardCopyText, isProminent: true)
                 .padding(.leading, 8)
         }
@@ -826,22 +832,27 @@ private struct StyledLearningCard: View {
                                 .font(.body.weight(.semibold))
                                 .lineLimit(2)
                                 .opacity(isMeaningShown ? 1.0 : 0.0)
+                                .scaleEffect(isMeaningShown ? 1.0 : 0.96)
+                                .offset(y: isMeaningShown ? 0 : 2)
                             
                             if !isMeaningShown {
-                                Button {
-                                    withAnimation(.easeInOut(duration: 0.8)) {
-                                        isMeaningShown = true
+                                TimelineView(.animation(minimumInterval: 0.03)) { context in
+                                    let elapsed = context.date.timeIntervalSince(cardLoadTime)
+                                    let remaining = max(0.0, 5.0 - elapsed)
+                                    
+                                    Button {
+                                        withAnimation(.easeInOut(duration: 0.8)) {
+                                            isMeaningShown = true
+                                        }
+                                    } label: {
+                                        SegmentedCountdownView(remaining: remaining)
+                                            .padding(.vertical, 6)
+                                            .padding(.trailing, 12)
+                                            .contentShape(Rectangle())
                                     }
-                                } label: {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "hourglass")
-                                        Text("5秒後自動顯示...")
-                                    }
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .buttonStyle(.plain)
+                                    .transition(.opacity)
                                 }
-                                .buttonStyle(.plain)
-                                .transition(.opacity)
                             }
                         }
                         if let point = noteSections.point {
@@ -895,22 +906,27 @@ private struct StyledLearningCard: View {
                             .lineLimit(3)
                             .fixedSize(horizontal: false, vertical: true)
                             .opacity(isMeaningShown ? 1.0 : 0.0)
+                            .scaleEffect(isMeaningShown ? 1.0 : 0.96)
+                            .offset(y: isMeaningShown ? 0 : 2)
                         
                         if !isMeaningShown {
-                            Button {
-                                withAnimation(.easeInOut(duration: 0.8)) {
-                                    isMeaningShown = true
+                            TimelineView(.animation(minimumInterval: 0.03)) { context in
+                                let elapsed = context.date.timeIntervalSince(cardLoadTime)
+                                let remaining = max(0.0, 5.0 - elapsed)
+                                
+                                Button {
+                                    withAnimation(.easeInOut(duration: 0.8)) {
+                                        isMeaningShown = true
+                                    }
+                                } label: {
+                                    SegmentedCountdownView(remaining: remaining)
+                                        .padding(.vertical, 6)
+                                        .padding(.trailing, 12)
+                                        .contentShape(Rectangle())
                                 }
-                            } label: {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "hourglass")
-                                    Text("5秒後自動顯示...")
-                                }
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .buttonStyle(.plain)
+                                .transition(.opacity)
                             }
-                            .buttonStyle(.plain)
-                            .transition(.opacity)
                         }
                     }
                 }
@@ -1128,16 +1144,20 @@ private struct StyledLearningCard: View {
                             horizontalSpacing: 1,
                             verticalSpacing: 3
                         )
-                        .padding(.trailing, 28)
+                        .padding(.trailing, 48)
                         .frame(maxWidth: .infinity, alignment: .leading)
 
-                        CopyButton(text: clipboardText(base: card.exampleJa, reading: card.exampleReading))
+                        HStack(spacing: 6) {
+                            SpeakButton(text: card.exampleJa)
+                            CopyButton(text: clipboardText(base: card.exampleJa, reading: card.exampleReading))
+                        }
                     }
                 } else {
                     CopyableTextRow(
                         text: card.exampleJa,
                         font: .headline,
-                        copyText: clipboardText(base: card.exampleJa, reading: card.exampleReading)
+                        copyText: clipboardText(base: card.exampleJa, reading: card.exampleReading),
+                        showSpeakButton: true
                     )
                     .lineLimit(3)
                 }
@@ -1336,6 +1356,26 @@ private struct CardTimerLightBar: View {
     }
 }
 
+private struct SegmentedCountdownView: View {
+    var remaining: Double
+    var color: Color = .cardOrange
+    
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(0..<5) { index in
+                let threshold = Double(index)
+                let isActive = remaining > threshold
+                
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(color)
+                    .opacity(isActive ? 1.0 : 0.18)
+                    .frame(width: 14, height: 14)
+                    .animation(.easeInOut(duration: 0.2), value: isActive)
+            }
+        }
+    }
+}
+
 struct CardBadge: View {
     var text: String
 
@@ -1387,6 +1427,7 @@ struct CopyableTextRow: View {
     var font: Font
     var color: Color = .primary
     var copyText: String? = nil
+    var showSpeakButton = false
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -1395,6 +1436,9 @@ struct CopyableTextRow: View {
                 .foregroundStyle(color)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
+            if showSpeakButton {
+                SpeakButton(text: copyText ?? text)
+            }
             CopyButton(text: copyText ?? text)
         }
     }
@@ -1462,6 +1506,88 @@ struct CopyButton: View {
                 didCopy = false
             }
         }
+    }
+}
+
+struct SpeakButton: View {
+    var text: String
+    var isProminent = false
+    @State private var isSpeaking = false
+    @State private var speakToken = 0
+    
+    var body: some View {
+        Button {
+            let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            SpeechSynthesizerManager.shared.speak(cleanText)
+            
+            speakToken += 1
+            let token = speakToken
+            withAnimation(.spring(response: 0.24, dampingFraction: 0.72)) {
+                isSpeaking = true
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                guard speakToken == token else { return }
+                withAnimation(.easeOut(duration: 0.18)) {
+                    isSpeaking = false
+                }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "speaker.wave.2")
+                    .font(.system(size: isProminent ? 13 : 12, weight: .bold))
+                    .symbolEffect(.bounce, value: isSpeaking)
+                
+                if isProminent {
+                    Text("發音")
+                        .font(.caption.weight(.bold))
+                        .lineLimit(1)
+                }
+            }
+            .foregroundStyle(Color.cardBlue)
+            .frame(width: isProminent ? 68 : 18, height: isProminent ? 30 : 18)
+            .background {
+                if isProminent {
+                    RoundedRectangle(cornerRadius: 7)
+                        .fill(Color.cardBlue.opacity(0.09))
+                }
+            }
+            .overlay {
+                if isProminent {
+                    RoundedRectangle(cornerRadius: 7)
+                        .stroke(Color.cardBlue.opacity(0.28), lineWidth: 1)
+                }
+            }
+        }
+        .buttonStyle(.borderless)
+        .contentShape(RoundedRectangle(cornerRadius: isProminent ? 7 : 4))
+        .help("發音")
+    }
+}
+
+@MainActor
+private final class SpeechSynthesizerManager {
+    static let shared = SpeechSynthesizerManager()
+    private let synthesizer = AVSpeechSynthesizer()
+    
+    func speak(_ text: String, language: String = "ja-JP") {
+        if synthesizer.isSpeaking {
+            synthesizer.stopSpeaking(at: .immediate)
+        }
+        
+        #if os(iOS)
+        do {
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
+            try AVAudioSession.sharedInstance().setActive(true)
+        } catch {
+            print("Failed to set audio session category: \(error)")
+        }
+        #endif
+        
+        let utterance = AVSpeechUtterance(string: text)
+        utterance.voice = AVSpeechSynthesisVoice(language: language)
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+        
+        synthesizer.speak(utterance)
     }
 }
 
