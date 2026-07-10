@@ -7,6 +7,7 @@ import UIKit
 import JapaneseLearningCardCore
 import SwiftUI
 import AVFoundation
+import CryptoKit
 
 // MARK: - Platform-adaptive Color helpers
 
@@ -121,6 +122,7 @@ public struct RootView: View {
         .background(Color.platformWindowBackground)
         .scrollContentBackground(.hidden)
         #endif
+        .environmentObject(viewModel)
     }
 }
 
@@ -808,7 +810,10 @@ private struct StyledLearningCard: View {
 
             Spacer()
 
-            SpeakButton(text: card.word, isProminent: true)
+            SpeechModeToggleButton()
+                .padding(.leading, 8)
+
+            SpeakButton(text: card.word, speechText: card.reading, isProminent: true)
                 .padding(.leading, 8)
 
             CopyButton(text: cardCopyText, isProminent: true)
@@ -1511,34 +1516,52 @@ struct CopyButton: View {
 
 struct SpeakButton: View {
     var text: String
+    var speechText: String?
     var isProminent = false
     @State private var isSpeaking = false
+    @State private var isWaitingForRemoteAudio = false
     @State private var speakToken = 0
+    @EnvironmentObject var viewModel: AppViewModel
     
     var body: some View {
         Button {
             let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            SpeechSynthesizerManager.shared.speak(cleanText)
-            
+            let cleanSpeechText = speechText?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let settings = viewModel.snapshot.settings
+            let usesRemoteTTS = settings.openAITtsEnabled
+
             speakToken += 1
             let token = speakToken
             withAnimation(.spring(response: 0.24, dampingFraction: 0.72)) {
                 isSpeaking = true
+                isWaitingForRemoteAudio = usesRemoteTTS
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                guard speakToken == token else { return }
-                withAnimation(.easeOut(duration: 0.18)) {
-                    isSpeaking = false
+
+            SpeechSynthesizerManager.shared.speak(cleanText, remoteText: cleanSpeechText, settings: settings) { status in
+                viewModel.statusMessage = status
+                if usesRemoteTTS && Self.shouldKeepWaiting(for: status) {
+                    return
                 }
+                finishSpeakingFeedback(token: token, delay: usesRemoteTTS ? 1.4 : 1.2)
+            }
+
+            if !usesRemoteTTS {
+                finishSpeakingFeedback(token: token, delay: 1.2)
             }
         } label: {
             HStack(spacing: 5) {
-                Image(systemName: "speaker.wave.2")
-                    .font(.system(size: isProminent ? 13 : 12, weight: .bold))
-                    .symbolEffect(.bounce, value: isSpeaking)
+                if isWaitingForRemoteAudio {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(width: isProminent ? 13 : 12, height: isProminent ? 13 : 12)
+                } else {
+                    Image(systemName: "speaker.wave.2")
+                        .font(.system(size: isProminent ? 13 : 12, weight: .bold))
+                        .symbolEffect(.bounce, value: isSpeaking)
+                }
                 
                 if isProminent {
-                    Text("發音")
+                    Text(isWaitingForRemoteAudio ? "準備中" : "發音")
                         .font(.caption.weight(.bold))
                         .lineLimit(1)
                 }
@@ -1560,7 +1583,73 @@ struct SpeakButton: View {
         }
         .buttonStyle(.borderless)
         .contentShape(RoundedRectangle(cornerRadius: isProminent ? 7 : 4))
-        .help("發音")
+        .disabled(isWaitingForRemoteAudio)
+        .help(isWaitingForRemoteAudio ? "正在等待 AI 語音" : "發音")
+    }
+
+    private static func shouldKeepWaiting(for status: String) -> Bool {
+        status.hasPrefix("正在透過") || status.hasPrefix("正在測試")
+    }
+
+    private func finishSpeakingFeedback(token: Int, delay: TimeInterval) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            guard speakToken == token else { return }
+            withAnimation(.easeOut(duration: 0.18)) {
+                isSpeaking = false
+                isWaitingForRemoteAudio = false
+            }
+        }
+    }
+}
+
+struct SpeechModeToggleButton: View {
+    @EnvironmentObject var viewModel: AppViewModel
+
+    private var useAI: Bool {
+        viewModel.snapshot.settings.openAITtsEnabled
+    }
+
+    var body: some View {
+        Button {
+            withAnimation(.spring(response: 0.24, dampingFraction: 0.76)) {
+                viewModel.setTTSMode(useAI: !useAI)
+            }
+        } label: {
+            ZStack(alignment: useAI ? .trailing : .leading) {
+                Capsule()
+                    .fill((useAI ? Color.cardPink : Color.cardGreen).opacity(0.14))
+                    .overlay {
+                        Capsule()
+                            .stroke((useAI ? Color.cardPink : Color.cardGreen).opacity(0.34), lineWidth: 1)
+                    }
+
+                HStack(spacing: 0) {
+                    Text("內建")
+                        .frame(maxWidth: .infinity)
+                    Text("AI")
+                        .frame(maxWidth: .infinity)
+                }
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 5)
+
+                Capsule()
+                    .fill(useAI ? Color.cardPink : Color.cardGreen)
+                    .frame(width: 31, height: 24)
+                    .overlay {
+                        Image(systemName: useAI ? "sparkles" : "speaker.wave.1")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+                    .padding(3)
+            }
+            .frame(width: 76, height: 30)
+        }
+        .buttonStyle(.borderless)
+        .contentShape(Capsule())
+        .accessibilityLabel("發音模式")
+        .accessibilityValue(useAI ? "AI 發音" : "內建發音")
+        .help(useAI ? "目前使用 AI 發音，點擊切換為內建發音" : "目前使用內建發音，點擊切換為 AI 發音")
     }
 }
 
@@ -1568,12 +1657,77 @@ struct SpeakButton: View {
 private final class SpeechSynthesizerManager {
     static let shared = SpeechSynthesizerManager()
     private let synthesizer = AVSpeechSynthesizer()
+    private var audioPlayer: AVAudioPlayer?
+    private var downloadTask: URLSessionDataTask?
+    private let secretStore = KeychainStore()
+    private let cacheDirectory: URL = {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        return base
+            .appendingPathComponent("JapaneseLearningCard", isDirectory: true)
+            .appendingPathComponent("TTSCache", isDirectory: true)
+    }()
     
-    func speak(_ text: String, language: String = "ja-JP") {
+    func speak(
+        _ text: String,
+        remoteText: String? = nil,
+        settings: AppSettings,
+        language: String = "ja-JP",
+        onStatus: @escaping @MainActor (String) -> Void = { _ in }
+    ) {
         if synthesizer.isSpeaking {
             synthesizer.stopSpeaking(at: .immediate)
         }
-        
+        downloadTask?.cancel()
+        downloadTask = nil
+        audioPlayer?.stop()
+        audioPlayer = nil
+
+        if settings.openAITtsEnabled {
+            if let apiKey = try? secretStore.apiKey(reference: "openai_tts_api_key"), !apiKey.isEmpty {
+                onStatus("正在透過 \(settings.openAITtsProviderPreset.displayName) TTS 發音 (\(settings.openAITtsVoice))...")
+                let ttsText = remoteText?.isEmpty == false ? remoteText! : text
+                speakRemoteTTS(ttsText, settings: settings, apiKey: apiKey, fallbackToNativeOnFailure: true, onStatus: onStatus)
+                return
+            } else {
+                onStatus("尚未儲存 API Key，已 Fallback 至系統原生語音發音")
+            }
+        } else {
+            onStatus("正在使用系統原生語音發音...")
+        }
+
+        speakNative(text, language: language)
+    }
+
+    func testConfiguredTTS(settings: AppSettings, onStatus: @escaping @MainActor (String) -> Void) {
+        if synthesizer.isSpeaking {
+            synthesizer.stopSpeaking(at: .immediate)
+        }
+        downloadTask?.cancel()
+        downloadTask = nil
+        audioPlayer?.stop()
+        audioPlayer = nil
+
+        guard let apiKey = try? secretStore.apiKey(reference: "openai_tts_api_key"), !apiKey.isEmpty else {
+            onStatus("請先儲存 TTS API Key，才能測試模型發音。")
+            return
+        }
+        guard !settings.openAITtsModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            onStatus("請先選擇或輸入 TTS 模型。")
+            return
+        }
+
+        onStatus("正在測試 \(settings.openAITtsProviderPreset.displayName) TTS 模型：\(settings.openAITtsModel)")
+        speakRemoteTTS(
+            "これは日本語の発音テストです。",
+            settings: settings,
+            apiKey: apiKey,
+            fallbackToNativeOnFailure: false,
+            onStatus: onStatus
+        )
+    }
+
+    private func speakNative(_ text: String, language: String) {
         #if os(iOS)
         do {
             try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
@@ -1588,6 +1742,552 @@ private final class SpeechSynthesizerManager {
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate
         
         synthesizer.speak(utterance)
+    }
+
+    private func speakRemoteTTS(
+        _ text: String,
+        settings: AppSettings,
+        apiKey: String,
+        fallbackToNativeOnFailure: Bool,
+        onStatus: @escaping @MainActor (String) -> Void
+    ) {
+        if settings.openAITtsProviderPreset == .elevenLabs {
+            speakElevenLabs(text, settings: settings, apiKey: apiKey, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+            return
+        }
+        if settings.openAITtsProviderPreset == .gemini {
+            speakGemini(text, settings: settings, apiKey: apiKey, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+            return
+        }
+
+        var baseString = settings.openAITtsProviderPreset == .openAI
+            ? TTSProviderPreset.openAI.defaultBaseURL
+            : settings.openAITtsBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if baseString.hasSuffix("/") {
+            baseString.removeLast()
+        }
+        guard let url = URL(string: "\(baseString)/audio/speech") else {
+            handleTTSFailure("API Base URL 格式錯誤", text: text, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+            return
+        }
+        let speechInput = remoteSpeechInput(text)
+        let cacheURL = ttsCacheURL(settings: settings, text: text, speechInput: speechInput, fileExtension: "mp3")
+        if playCachedAudioIfAvailable(cacheURL, providerName: settings.openAITtsProviderPreset.displayName, voice: settings.openAITtsVoice, onStatus: onStatus) {
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let payload: [String: Any] = [
+            "model": settings.openAITtsModel,
+            "input": speechInput,
+            "voice": settings.openAITtsVoice
+        ]
+
+        guard let httpBody = try? JSONSerialization.data(withJSONObject: payload, options: []) else {
+            handleTTSFailure("序列化請求失敗", text: text, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+            return
+        }
+        request.httpBody = httpBody
+
+        let requestURL = request.url?.absoluteString ?? ""
+        let hasAuthorizationHeader = request.value(forHTTPHeaderField: "Authorization")?.isEmpty == false
+        print("TTS request URL: \(requestURL)")
+        print("TTS Authorization header present: \(hasAuthorizationHeader)")
+
+        let session = URLSession.shared
+        let task = session.dataTask(with: request) { [weak self] data, response, error in
+            Task { @MainActor in
+                guard let self = self else { return }
+                if let error = error {
+                    print("TTS network error: \(error.localizedDescription)")
+                    self.handleTTSFailure("網路請求失敗：\(error.localizedDescription)", text: text, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+                    return
+                }
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    self.handleTTSFailure("連線回應異常", text: text, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+                    return
+                }
+                guard (200...299).contains(httpResponse.statusCode), let data = data else {
+                    print("TTS HTTP status: \(httpResponse.statusCode)")
+                    var details = ""
+                    if let data = data, let errorString = String(data: data, encoding: .utf8) {
+                        print("TTS error response: \(errorString)")
+                        details = " (\(errorString.prefix(60)))"
+                    }
+                    if httpResponse.statusCode == 401 {
+                        details += "；URL=\(requestURL)；Authorization header=\(hasAuthorizationHeader ? "present" : "missing")"
+                    }
+                    self.handleTTSFailure("API 回傳失敗 (\(httpResponse.statusCode))\(details)", text: text, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+                    return
+                }
+
+                #if os(iOS)
+                do {
+                    try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
+                    try AVAudioSession.sharedInstance().setActive(true)
+                } catch {
+                    print("Failed to set audio session category: \(error)")
+                }
+                #endif
+
+                do {
+                    try self.storeAudioData(data, at: cacheURL)
+                    try self.playAudioData(data, providerName: settings.openAITtsProviderPreset.displayName, voice: settings.openAITtsVoice, onStatus: onStatus)
+                } catch {
+                    print("Failed to play TTS audio data: \(error.localizedDescription)")
+                    self.handleTTSFailure("播放音訊失敗：\(error.localizedDescription)", text: text, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+                }
+            }
+        }
+        self.downloadTask = task
+        task.resume()
+    }
+
+    private func speakElevenLabs(
+        _ text: String,
+        settings: AppSettings,
+        apiKey: String,
+        fallbackToNativeOnFailure: Bool,
+        onStatus: @escaping @MainActor (String) -> Void
+    ) {
+        var baseString = settings.openAITtsBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if baseString.hasSuffix("/") {
+            baseString.removeLast()
+        }
+        let voiceID = settings.openAITtsVoice.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !voiceID.isEmpty,
+              let encodedVoiceID = voiceID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: "\(baseString)/text-to-speech/\(encodedVoiceID)") else {
+            handleTTSFailure("ElevenLabs voice_id 或 Base URL 格式錯誤", text: text, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+            return
+        }
+        let speechInput = remoteSpeechInput(text)
+        let cacheURL = ttsCacheURL(settings: settings, text: text, speechInput: speechInput, fileExtension: "mp3")
+        if playCachedAudioIfAvailable(cacheURL, providerName: settings.openAITtsProviderPreset.displayName, voice: settings.openAITtsVoice, onStatus: onStatus) {
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("audio/mpeg", forHTTPHeaderField: "Accept")
+
+        let payload: [String: Any] = [
+            "text": speechInput,
+            "model_id": settings.openAITtsModel
+        ]
+
+        guard let httpBody = try? JSONSerialization.data(withJSONObject: payload, options: []) else {
+            handleTTSFailure("ElevenLabs 請求序列化失敗", text: text, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+            return
+        }
+        request.httpBody = httpBody
+
+        let task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            Task { @MainActor in
+                guard let self = self else { return }
+                if let error {
+                    print("TTS network error: \(error.localizedDescription)")
+                    self.handleTTSFailure("網路請求失敗：\(error.localizedDescription)", text: text, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+                    return
+                }
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    self.handleTTSFailure("連線回應異常", text: text, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+                    return
+                }
+                guard (200...299).contains(httpResponse.statusCode), let data else {
+                    print("TTS HTTP status: \(httpResponse.statusCode)")
+                    var details = ""
+                    if let data, let errorString = String(data: data, encoding: .utf8) {
+                        print("TTS error response: \(errorString)")
+                        details = " (\(errorString.prefix(60)))"
+                    }
+                    self.handleTTSFailure("API 回傳失敗 (\(httpResponse.statusCode))\(details)", text: text, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+                    return
+                }
+
+                #if os(iOS)
+                do {
+                    try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
+                    try AVAudioSession.sharedInstance().setActive(true)
+                } catch {
+                    print("Failed to set audio session category: \(error)")
+                }
+                #endif
+
+                do {
+                    try self.storeAudioData(data, at: cacheURL)
+                    try self.playAudioData(data, providerName: settings.openAITtsProviderPreset.displayName, voice: settings.openAITtsVoice, onStatus: onStatus)
+                } catch {
+                    print("Failed to play TTS audio data: \(error.localizedDescription)")
+                    self.handleTTSFailure("播放音訊失敗：\(error.localizedDescription)", text: text, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+                }
+            }
+        }
+        self.downloadTask = task
+        task.resume()
+    }
+
+    private func speakGemini(
+        _ text: String,
+        settings: AppSettings,
+        apiKey: String,
+        fallbackToNativeOnFailure: Bool,
+        onStatus: @escaping @MainActor (String) -> Void
+    ) {
+        let voice = settings.openAITtsVoice.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !voice.isEmpty else {
+            handleTTSFailure("請先選擇 Gemini voice", text: text, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+            return
+        }
+
+        let speechInput = remoteSpeechInput(text)
+        let cacheURL = ttsCacheURL(settings: settings, text: text, speechInput: speechInput, fileExtension: "wav")
+        if playCachedAudioIfAvailable(cacheURL, providerName: settings.openAITtsProviderPreset.displayName, voice: voice, onStatus: onStatus) {
+            return
+        }
+
+        var baseString = TTSProviderPreset.gemini.defaultBaseURL
+        if baseString.hasSuffix("/") {
+            baseString.removeLast()
+        }
+        guard let modelName = settings.openAITtsModel.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: "\(baseString)/models/\(modelName):generateContent") else {
+            handleTTSFailure("Gemini API Base URL 格式錯誤", text: text, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+            return
+        }
+
+        let payload: [String: Any] = [
+            "contents": [
+                [
+                    "parts": [
+                        ["text": speechInput]
+                    ]
+                ]
+            ],
+            "generationConfig": [
+                "responseModalities": ["AUDIO"],
+                "speechConfig": [
+                    "voiceConfig": [
+                        "prebuiltVoiceConfig": [
+                            "voiceName": voice
+                        ]
+                    ]
+                ]
+            ]
+        ]
+
+        guard let httpBody = try? JSONSerialization.data(withJSONObject: payload, options: []) else {
+            handleTTSFailure("Gemini 請求序列化失敗", text: text, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = httpBody
+
+        sendGeminiTTSRequest(
+            request: request,
+            retryCount: 0,
+            maxRetries: 2,
+            cacheURL: cacheURL,
+            text: text,
+            voice: voice,
+            fallbackToNativeOnFailure: fallbackToNativeOnFailure,
+            onStatus: onStatus
+        )
+    }
+
+    private func sendGeminiTTSRequest(
+        request: URLRequest,
+        retryCount: Int,
+        maxRetries: Int,
+        cacheURL: URL,
+        text: String,
+        voice: String,
+        fallbackToNativeOnFailure: Bool,
+        onStatus: @escaping @MainActor (String) -> Void
+    ) {
+        let task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            Task { @MainActor in
+                guard let self else { return }
+                if let error {
+                    print("TTS network error: \(error.localizedDescription)")
+                    self.handleTTSFailure("網路請求失敗：\(error.localizedDescription)", text: text, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+                    return
+                }
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    self.handleTTSFailure("連線回應異常", text: text, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+                    return
+                }
+                guard (200...299).contains(httpResponse.statusCode), let data else {
+                    print("TTS HTTP status: \(httpResponse.statusCode)")
+                    var details = ""
+                    if let data, let errorString = String(data: data, encoding: .utf8) {
+                        print("TTS error response: \(errorString)")
+                        details = " (\(errorString.prefix(60)))"
+                    }
+                    self.handleTTSFailure("Gemini API 回傳失敗 (\(httpResponse.statusCode))\(details)", text: text, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+                    return
+                }
+
+                #if os(iOS)
+                do {
+                    try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
+                    try AVAudioSession.sharedInstance().setActive(true)
+                } catch {
+                    print("Failed to set audio session category: \(error)")
+                }
+                #endif
+
+                do {
+                    if let responseString = String(data: data, encoding: .utf8)?.prefix(500) {
+                        print("Gemini TTS response: \(responseString)")
+                    }
+                    let audioData = try self.geminiPlayableAudioData(from: data)
+                    try self.storeAudioData(audioData, at: cacheURL)
+                    try self.playAudioData(audioData, providerName: TTSProviderPreset.gemini.displayName, voice: voice, onStatus: onStatus)
+                } catch {
+                    let errorMsg = error.localizedDescription
+                    if errorMsg.contains("finish_reason") && retryCount < maxRetries {
+                        print("Gemini TTS retry \(retryCount + 1)/\(maxRetries) due to: \(errorMsg)")
+                        onStatus("Gemini TTS 重試中 (\(retryCount + 1)/\(maxRetries))...")
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                            guard let self else { return }
+                            self.sendGeminiTTSRequest(
+                                request: request,
+                                retryCount: retryCount + 1,
+                                maxRetries: maxRetries,
+                                cacheURL: cacheURL,
+                                text: text,
+                                voice: voice,
+                                fallbackToNativeOnFailure: fallbackToNativeOnFailure,
+                                onStatus: onStatus
+                            )
+                        }
+                        return
+                    }
+                    if let responseString = String(data: data, encoding: .utf8)?.prefix(500) {
+                        print("Gemini TTS response body (parse failed): \(responseString)")
+                    }
+                    print("Failed to play Gemini TTS audio data: \(errorMsg)")
+                    self.handleTTSFailure("Gemini 音訊解析或播放失敗：\(errorMsg)", text: text, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+                }
+            }
+        }
+        self.downloadTask = task
+        task.resume()
+    }
+
+    private struct GeminiTTSResponse: Decodable {
+        var candidates: [Candidate]?
+
+        struct Candidate: Decodable {
+            var content: Content?
+            var finishReason: String?
+
+            struct Content: Decodable {
+                var parts: [Part]?
+
+                struct Part: Decodable {
+                    var inlineData: InlineData?
+                    var text: String?
+
+                    struct InlineData: Decodable {
+                        var data: String
+                        var mimeType: String?
+
+                        enum CodingKeys: String, CodingKey {
+                            case data
+                            case mimeType = "mime_type"
+                            case mimeTypeCamel = "mimeType"
+                        }
+
+                        init(from decoder: Decoder) throws {
+                            let container = try decoder.container(keyedBy: CodingKeys.self)
+                            data = try container.decode(String.self, forKey: .data)
+                            mimeType = try container.decodeIfPresent(String.self, forKey: .mimeType)
+                                ?? container.decodeIfPresent(String.self, forKey: .mimeTypeCamel)
+                        }
+                    }
+
+                    enum CodingKeys: String, CodingKey {
+                        case inlineData = "inline_data"
+                        case inlineDataCamel = "inlineData"
+                        case text
+                    }
+
+                    init(from decoder: Decoder) throws {
+                        let container = try decoder.container(keyedBy: CodingKeys.self)
+                        inlineData = try container.decodeIfPresent(InlineData.self, forKey: .inlineData)
+                            ?? container.decodeIfPresent(InlineData.self, forKey: .inlineDataCamel)
+                        text = try container.decodeIfPresent(String.self, forKey: .text)
+                    }
+                }
+            }
+
+            enum CodingKeys: String, CodingKey {
+                case content
+                case finishReason = "finish_reason"
+                case finishReasonCamel = "finishReason"
+            }
+
+            init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                content = try container.decodeIfPresent(Content.self, forKey: .content)
+                finishReason = try container.decodeIfPresent(String.self, forKey: .finishReason)
+                    ?? container.decodeIfPresent(String.self, forKey: .finishReasonCamel)
+            }
+        }
+    }
+
+    private func geminiPlayableAudioData(from responseData: Data) throws -> Data {
+        let response = try JSONDecoder().decode(GeminiTTSResponse.self, from: responseData)
+        let firstCandidate = response.candidates?.first
+        if let finishReason = firstCandidate?.finishReason, firstCandidate?.content == nil {
+            throw NSError(domain: "JapaneseLearningCard.GeminiTTS", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Gemini 未產生音訊 (finish_reason: \(finishReason))，請重試"
+            ])
+        }
+        guard let inlineData = firstCandidate?.content?.parts?.first?.inlineData,
+              let audioData = Data(base64Encoded: inlineData.data) else {
+            throw NSError(domain: "JapaneseLearningCard.GeminiTTS", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Gemini 回應沒有可解析的 inline_data"
+            ])
+        }
+
+        if audioData.starts(with: Data("RIFF".utf8)) {
+            return audioData
+        }
+        return wavData(fromPCM: audioData, sampleRate: 24_000, channels: 1, bitsPerSample: 16)
+    }
+
+    private func wavData(fromPCM pcmData: Data, sampleRate: UInt32, channels: UInt16, bitsPerSample: UInt16) -> Data {
+        var data = Data()
+
+        func appendString(_ value: String) {
+            data.append(contentsOf: value.utf8)
+        }
+
+        func appendUInt16LE(_ value: UInt16) {
+            var littleEndian = value.littleEndian
+            data.append(Data(bytes: &littleEndian, count: MemoryLayout<UInt16>.size))
+        }
+
+        func appendUInt32LE(_ value: UInt32) {
+            var littleEndian = value.littleEndian
+            data.append(Data(bytes: &littleEndian, count: MemoryLayout<UInt32>.size))
+        }
+
+        let byteRate = sampleRate * UInt32(channels) * UInt32(bitsPerSample) / 8
+        let blockAlign = channels * bitsPerSample / 8
+        let dataSize = UInt32(pcmData.count)
+
+        appendString("RIFF")
+        appendUInt32LE(36 + dataSize)
+        appendString("WAVE")
+        appendString("fmt ")
+        appendUInt32LE(16)
+        appendUInt16LE(1)
+        appendUInt16LE(channels)
+        appendUInt32LE(sampleRate)
+        appendUInt32LE(byteRate)
+        appendUInt16LE(blockAlign)
+        appendUInt16LE(bitsPerSample)
+        appendString("data")
+        appendUInt32LE(dataSize)
+        data.append(pcmData)
+        return data
+    }
+
+    private func remoteSpeechInput(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return text }
+        if let shortPattern = pronounceableShortPattern(trimmed) {
+            return "読音は、\(shortPattern)。"
+        }
+        return "　\(trimmed)。"
+    }
+
+    private func pronounceableShortPattern(_ text: String) -> String? {
+        let normalized = text.trimmingCharacters(in: CharacterSet(charactersIn: "〜～~").union(.whitespacesAndNewlines))
+        guard !normalized.isEmpty, normalized.count <= 6 else { return nil }
+        guard normalized.range(of: #"[一-龯ぁ-んァ-ヶ]"#, options: .regularExpression) != nil else { return nil }
+        let sentenceMarkers = CharacterSet(charactersIn: "。、！？!?，,；;：「」『』（）()[]\n")
+        guard normalized.rangeOfCharacter(from: sentenceMarkers) == nil else { return nil }
+        return normalized
+    }
+
+    private func ttsCacheURL(settings: AppSettings, text: String, speechInput: String, fileExtension: String) -> URL {
+        let key = [
+            settings.openAITtsProviderPreset.rawValue,
+            settings.openAITtsBaseURL,
+            settings.openAITtsModel,
+            settings.openAITtsVoice,
+            text.trimmingCharacters(in: .whitespacesAndNewlines),
+            speechInput
+        ].joined(separator: "\u{1F}")
+        let digest = SHA256.hash(data: Data(key.utf8))
+        let hash = digest.map { String(format: "%02x", $0) }.joined()
+        return cacheDirectory.appendingPathComponent("\(hash).\(fileExtension)")
+    }
+
+    private func playCachedAudioIfAvailable(
+        _ url: URL,
+        providerName: String,
+        voice: String,
+        onStatus: @escaping @MainActor (String) -> Void
+    ) -> Bool {
+        guard FileManager.default.fileExists(atPath: url.path) else { return false }
+        do {
+            let data = try Data(contentsOf: url)
+            try playAudioData(data, providerName: providerName, voice: voice, onStatus: onStatus, source: "快取")
+            return true
+        } catch {
+            try? FileManager.default.removeItem(at: url)
+            print("Failed to play cached TTS audio: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    private func storeAudioData(_ data: Data, at url: URL) throws {
+        try FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        try data.write(to: url, options: .atomic)
+    }
+
+    private func playAudioData(
+        _ data: Data,
+        providerName: String,
+        voice: String,
+        onStatus: @escaping @MainActor (String) -> Void,
+        source: String = "AI"
+    ) throws {
+        let player = try AVAudioPlayer(data: data)
+        player.prepareToPlay()
+        self.audioPlayer = player
+        onStatus("正在播放 \(providerName) TTS 語音 (\(voice)，\(source))")
+        player.play()
+    }
+
+    private func handleTTSFailure(
+        _ message: String,
+        text: String,
+        fallbackToNativeOnFailure: Bool,
+        onStatus: @escaping @MainActor (String) -> Void
+    ) {
+        if fallbackToNativeOnFailure {
+            onStatus("\(message)，已 Fallback 至系統原生語音")
+            speakNative(text, language: "ja-JP")
+        } else {
+            onStatus("TTS 測試失敗：\(message)")
+        }
     }
 }
 
@@ -1616,7 +2316,7 @@ struct SettingsView: View {
             #if os(macOS)
             allCases
             #else
-            [.display, .data, .system]
+            [.display, .ai, .data, .system]
             #endif
         }
 
@@ -1831,6 +2531,7 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var aiSection: some View {
+                #if os(macOS)
                 settingsBox("AI Provider Profiles") {
                     Text("點一下列表即可切換預設 profile；AI 造卡、出題、驗證都會使用打勾的那一組。")
                         .font(.caption)
@@ -1969,6 +2670,208 @@ struct SettingsView: View {
                         }
                         .disabled(viewModel.isValidatingProvider)
                         .help("驗證成功才會把新的 API key 存入 Keychain；欄位留空時會用既有 key 驗證。")
+                    }
+                }
+                #endif
+
+                settingsBox("TTS 語音合成 (BYOK)") {
+                    Toggle("啟用 TTS 語音合成", isOn: binding(\.openAITtsEnabled))
+                        .help("開啟後，日文發音將會透過所設定的 TTS API 產生；若關閉、無 API Key 或網路異常，會自動 fallback 使用系統內建的日文語音。")
+
+                    if viewModel.snapshot.settings.openAITtsEnabled && !viewModel.isOpenAITtsKeySaved {
+                        HStack(spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                            Text("注意：尚未儲存 API Key，將自動 Fallback 使用系統原生語音發音。")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
+                    }
+
+                    if viewModel.snapshot.settings.openAITtsEnabled {
+                        labeledRow("服務商") {
+                            Picker("", selection: ttsProviderPresetBinding()) {
+                                ForEach(TTSProviderPreset.allCases) { preset in
+                                    Text(preset.displayName).tag(preset)
+                                }
+                            }
+                            .labelsHidden()
+                        }
+
+                        labeledRow("API Base URL") {
+                            TextField("", text: binding(\.openAITtsBaseURL))
+                                .textFieldStyle(.roundedBorder)
+                                .disabled(viewModel.snapshot.settings.openAITtsProviderPreset != .custom)
+                        }
+                        .help("自定義模式下可手動修改。")
+
+                        labeledRow("模型 (Model)") {
+                            if viewModel.snapshot.settings.openAITtsProviderPreset == .openAI {
+                                Picker("", selection: binding(\.openAITtsModel)) {
+                                    Text("gpt-4o-mini-tts").tag("gpt-4o-mini-tts")
+                                    Text("tts-1").tag("tts-1")
+                                    Text("tts-1-hd").tag("tts-1-hd")
+                                }
+                                .labelsHidden()
+                            } else if viewModel.snapshot.settings.openAITtsProviderPreset == .gemini {
+                                Picker("", selection: binding(\.openAITtsModel)) {
+                                    ForEach(GeminiTTSOptions.models, id: \.self) { model in
+                                        Text(model).tag(model)
+                                    }
+                                }
+                                .labelsHidden()
+                            } else {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack(spacing: 8) {
+                                        TextField(
+                                            viewModel.snapshot.settings.openAITtsProviderPreset == .elevenLabs
+                                                ? "輸入 ElevenLabs model_id，例如 eleven_multilingual_v2"
+                                                : "輸入模型標識，例如 tts-1",
+                                            text: binding(\.openAITtsModel)
+                                        )
+                                            .textFieldStyle(.roundedBorder)
+                                        
+                                        Button {
+                                            viewModel.fetchAvailableTtsModels()
+                                        } label: {
+                                            if viewModel.isFetchingTtsModels {
+                                                ProgressView()
+                                                    .controlSize(.small)
+                                            } else {
+                                                Text("獲取清單")
+                                            }
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .disabled(viewModel.isFetchingTtsModels || !viewModel.isOpenAITtsKeySaved)
+                                    }
+
+                                    if !viewModel.availableTtsModels.isEmpty {
+                                        Picker("選取已獲取的模型", selection: binding(\.openAITtsModel)) {
+                                            ForEach(viewModel.availableTtsModels, id: \.self) { model in
+                                                Text(model).tag(model)
+                                            }
+                                        }
+                                        .pickerStyle(.menu)
+                                        .labelsHidden()
+                                    }
+                                }
+                            }
+                        }
+
+                        if !viewModel.ttsStatusMessage.isEmpty {
+                            localStatusRow(viewModel.ttsStatusMessage)
+                        }
+
+                        labeledRow("語音 (Voice)") {
+                            if viewModel.snapshot.settings.openAITtsProviderPreset == .elevenLabs {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    TextField("輸入 ElevenLabs voice_id", text: binding(\.openAITtsVoice))
+                                        .textFieldStyle(.roundedBorder)
+
+                                    if !viewModel.availableTtsVoices.isEmpty {
+                                        Picker("選取已獲取的 voice", selection: binding(\.openAITtsVoice)) {
+                                            ForEach(viewModel.availableTtsVoices) { voice in
+                                                Text(voice.displayName).tag(voice.id)
+                                            }
+                                        }
+                                        .pickerStyle(.menu)
+                                        .labelsHidden()
+                                    }
+                                }
+                            } else if viewModel.snapshot.settings.openAITtsProviderPreset == .gemini {
+                                Picker("", selection: binding(\.openAITtsVoice)) {
+                                    ForEach(GeminiTTSOptions.voices, id: \.self) { voice in
+                                        Text(voice).tag(voice)
+                                    }
+                                }
+                                .labelsHidden()
+                            } else {
+                                Picker("", selection: binding(\.openAITtsVoice)) {
+                                    Text("alloy").tag("alloy")
+                                    Text("echo").tag("echo")
+                                    Text("fable").tag("fable")
+                                    Text("onyx").tag("onyx")
+                                    Text("nova").tag("nova")
+                                    Text("shimmer").tag("shimmer")
+                                }
+                                .labelsHidden()
+                            }
+                        }
+                        .help("OpenAI/Gemini 使用 voice 名稱；ElevenLabs 使用 voice_id。")
+
+                        labeledRow("測試") {
+                            Button {
+                                SpeechSynthesizerManager.shared.testConfiguredTTS(settings: viewModel.snapshot.settings) { message in
+                                    viewModel.statusMessage = message
+                                    viewModel.ttsStatusMessage = message
+                                }
+                            } label: {
+                                Label("測試發音", systemImage: "speaker.wave.2")
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(
+                                !viewModel.isOpenAITtsKeySaved ||
+                                viewModel.snapshot.settings.openAITtsModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                                viewModel.snapshot.settings.openAITtsVoice.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            )
+                            .help("使用目前選擇的 TTS 模型與語音實際呼叫 API 並播放測試音訊。")
+                        }
+
+                        labeledRow("API Key") {
+                            #if os(macOS)
+                            HStack(spacing: 8) {
+                                SecureField(
+                                    viewModel.isOpenAITtsKeySaved
+                                        ? "已儲存 API Key (輸入新 key 可覆蓋)"
+                                        : "請貼上 API key",
+                                    text: $viewModel.openAITtsKeyInput
+                                )
+                                .textFieldStyle(.roundedBorder)
+
+                                Button {
+                                    viewModel.saveOpenAITtsKey(viewModel.openAITtsKeyInput)
+                                } label: {
+                                    Text("儲存 Key")
+                                }
+                                .disabled(viewModel.openAITtsKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                                if viewModel.isOpenAITtsKeySaved {
+                                    Button(role: .destructive) {
+                                        viewModel.clearOpenAITtsKey()
+                                    } label: {
+                                        Text("清除 Key")
+                                    }
+                                }
+                            }
+                            #else
+                            VStack(alignment: .leading, spacing: 6) {
+                                SecureField(
+                                    viewModel.isOpenAITtsKeySaved
+                                        ? "已儲存 API Key (輸入新 key 可覆蓋)"
+                                        : "請貼上 API key",
+                                    text: $viewModel.openAITtsKeyInput
+                                )
+                                .textFieldStyle(.roundedBorder)
+
+                                HStack(spacing: 8) {
+                                    Button {
+                                        viewModel.saveOpenAITtsKey(viewModel.openAITtsKeyInput)
+                                    } label: {
+                                        Text("儲存 Key")
+                                    }
+                                    .disabled(viewModel.openAITtsKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                                    if viewModel.isOpenAITtsKeySaved {
+                                        Button(role: .destructive) {
+                                            viewModel.clearOpenAITtsKey()
+                                        } label: {
+                                            Text("清除 Key")
+                                        }
+                                    }
+                                }
+                            }
+                            #endif
+                        }
                     }
                 }
     }
@@ -2410,7 +3313,23 @@ struct SettingsView: View {
         }
     }
 
-    private func binding(_ keyPath: WritableKeyPath<AppSettings, Int>) -> Binding<Int> {
+    private func localStatusRow(_ message: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: viewModel.isFetchingTtsModels ? "hourglass" : "info.circle")
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func binding<Value>(_ keyPath: WritableKeyPath<AppSettings, Value>) -> Binding<Value> {
         Binding {
             viewModel.snapshot.settings[keyPath: keyPath]
         } set: { value in
@@ -2702,6 +3621,24 @@ struct SettingsView: View {
         } set: { preset in
             viewModel.applyProviderPreset(preset)
             syncAIDraftsFromSettings()
+        }
+    }
+
+    private func ttsProviderPresetBinding() -> Binding<TTSProviderPreset> {
+        Binding {
+            viewModel.snapshot.settings.openAITtsProviderPreset
+        } set: { preset in
+            var settings = viewModel.snapshot.settings
+            settings.openAITtsProviderPreset = preset
+            if preset != .custom {
+                settings.openAITtsBaseURL = preset.defaultBaseURL
+                settings.openAITtsModel = preset.defaultModel
+                settings.openAITtsVoice = preset.defaultVoice
+            }
+            viewModel.availableTtsModels = []
+            viewModel.availableTtsVoices = []
+            viewModel.ttsStatusMessage = ""
+            viewModel.updateSettings(settings)
         }
     }
 

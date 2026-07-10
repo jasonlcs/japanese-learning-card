@@ -148,6 +148,51 @@ public enum StructuredOutputMode: String, Codable, CaseIterable, Identifiable, S
     }
 }
 
+public enum TTSProviderPreset: String, Codable, CaseIterable, Identifiable, Sendable {
+    case openAI
+    case elevenLabs
+    case gemini
+    case custom
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .openAI: "OpenAI"
+        case .elevenLabs: "ElevenLabs"
+        case .gemini: "Gemini"
+        case .custom: "自定義 (Custom)"
+        }
+    }
+
+    public var defaultBaseURL: String {
+        switch self {
+        case .openAI: "https://api.openai.com/v1"
+        case .elevenLabs: "https://api.elevenlabs.io/v1"
+        case .gemini: "https://generativelanguage.googleapis.com/v1beta"
+        case .custom: "https://api.openai.com/v1"
+        }
+    }
+
+    public var defaultModel: String {
+        switch self {
+        case .openAI: "tts-1"
+        case .elevenLabs: "eleven_multilingual_v2"
+        case .gemini: "gemini-2.5-flash-preview-tts"
+        case .custom: "tts-1"
+        }
+    }
+
+    public var defaultVoice: String {
+        switch self {
+        case .openAI: "alloy"
+        case .elevenLabs: ""
+        case .gemini: "Kore"
+        case .custom: "alloy"
+        }
+    }
+}
+
 public enum ProviderPreset: String, Codable, CaseIterable, Identifiable, Sendable {
     case openAI
     case openCodeGo
@@ -678,6 +723,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var providerProfiles: [ProviderProfile]
     public var activeProviderProfileId: UUID?
     public var completedMigrations: [String]
+    public var openAITtsEnabled: Bool
+    public var openAITtsVoice: String
+    public var openAITtsModel: String
+    public var openAITtsBaseURL: String
+    public var openAITtsProviderPreset: TTSProviderPreset
     public var updatedAt: Date
 
     public init(
@@ -698,6 +748,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
         providerProfiles: [ProviderProfile] = [],
         activeProviderProfileId: UUID? = nil,
         completedMigrations: [String] = [],
+        openAITtsEnabled: Bool = false,
+        openAITtsVoice: String = "alloy",
+        openAITtsModel: String = "tts-1",
+        openAITtsBaseURL: String = "https://api.openai.com/v1",
+        openAITtsProviderPreset: TTSProviderPreset = .openAI,
         updatedAt: Date = Date()
     ) {
         self.displayIntervalMinutes = displayIntervalMinutes
@@ -717,6 +772,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.providerProfiles = providerProfiles
         self.activeProviderProfileId = activeProviderProfileId
         self.completedMigrations = completedMigrations
+        self.openAITtsEnabled = openAITtsEnabled
+        self.openAITtsVoice = openAITtsVoice
+        self.openAITtsModel = openAITtsModel
+        self.openAITtsBaseURL = openAITtsBaseURL
+        self.openAITtsProviderPreset = openAITtsProviderPreset
         self.updatedAt = updatedAt
         normalizeProviderProfiles()
     }
@@ -780,6 +840,16 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.providerProfiles = try container.decodeIfPresent([ProviderProfile].self, forKey: .providerProfiles) ?? []
         self.activeProviderProfileId = try container.decodeIfPresent(UUID.self, forKey: .activeProviderProfileId)
         self.completedMigrations = try container.decodeIfPresent([String].self, forKey: .completedMigrations) ?? []
+        self.openAITtsEnabled = try container.decodeIfPresent(Bool.self, forKey: .openAITtsEnabled) ?? false
+        self.openAITtsVoice = try container.decodeIfPresent(String.self, forKey: .openAITtsVoice) ?? "alloy"
+        self.openAITtsModel = try container.decodeIfPresent(String.self, forKey: .openAITtsModel) ?? "tts-1"
+        self.openAITtsBaseURL = try container.decodeIfPresent(String.self, forKey: .openAITtsBaseURL) ?? "https://api.openai.com/v1"
+        if let presetStr = try? container.decode(String.self, forKey: .openAITtsProviderPreset),
+           let preset = TTSProviderPreset(rawValue: presetStr) {
+            self.openAITtsProviderPreset = preset
+        } else {
+            self.openAITtsProviderPreset = .openAI
+        }
         self.updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
         normalizeProviderProfiles()
     }
@@ -803,4 +873,3 @@ public enum VocabularySourceType: String, Codable, CaseIterable, Sendable {
     case recent = "最近加入的單字"
     case unfamiliar = "不熟的單字"
 }
-

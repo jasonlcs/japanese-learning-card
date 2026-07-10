@@ -570,8 +570,8 @@ public struct OpenAICompatibleLLMClient: LLMClient {
 
         let data = try await performLoggedRequest(request, operation: "listModels", model: settings.providerConfig.model)
 
-        let decoded = try JSONDecoder().decode(ModelsResponse.self, from: data)
-        let models = (decoded.data ?? []).map(\.id).sorted()
+        let decoded = try JSONDecoder().decode(ProviderModelsResponse.self, from: data)
+        let models = decoded.sortedModelIDs
         await AIRequestLogStore.shared.appendEvent(
             "llm.decode.completed",
             operation: "listModels",
@@ -1742,15 +1742,6 @@ private struct ChatCompletionResponse: Codable {
 
     var choices: [Choice]
     var usage: Usage?
-}
-
-private struct ModelsResponse: Codable {
-    struct Model: Codable {
-        var id: String
-    }
-
-    // Ollama 沒有安裝任何模型時會回 {"data": null}，設為 optional 才能解碼。
-    var data: [Model]?
 }
 
 private struct CardPayload: Codable {
