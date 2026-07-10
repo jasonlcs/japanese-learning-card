@@ -1684,7 +1684,7 @@ private final class SpeechSynthesizerManager {
         audioPlayer = nil
 
         if settings.openAITtsEnabled {
-            if let apiKey = try? secretStore.apiKey(reference: "openai_tts_api_key"), !apiKey.isEmpty {
+            if let apiKey = try? secretStore.apiKey(reference: settings.ttsKeychainReference), !apiKey.isEmpty {
                 onStatus("正在透過 \(settings.openAITtsProviderPreset.displayName) TTS 發音 (\(settings.openAITtsVoice))...")
                 let ttsText = remoteText?.isEmpty == false ? remoteText! : text
                 speakRemoteTTS(ttsText, settings: settings, apiKey: apiKey, fallbackToNativeOnFailure: true, onStatus: onStatus)
@@ -1708,7 +1708,7 @@ private final class SpeechSynthesizerManager {
         audioPlayer?.stop()
         audioPlayer = nil
 
-        guard let apiKey = try? secretStore.apiKey(reference: "openai_tts_api_key"), !apiKey.isEmpty else {
+        guard let apiKey = try? secretStore.apiKey(reference: settings.ttsKeychainReference), !apiKey.isEmpty else {
             onStatus("請先儲存 TTS API Key，才能測試模型發音。")
             return
         }
@@ -2298,6 +2298,7 @@ struct SettingsView: View {
     @FocusState private var focusedSettingsField: SettingsField?
     @State private var profileNameDraft = ""
     @State private var baseURLDraft = ""
+    @State private var ttsProfileNameDraft = ""
     /// 既有來源網址的編輯緩衝區（key 為 Source.id），送出前不寫回資料。
     @State private var editingSourceURLs: [UUID: String] = [:]
     /// 設定分類：用上方分段直接切換，不再藏在「系統設定」子頁裡。
@@ -2333,6 +2334,7 @@ struct SettingsView: View {
         case profileName
         case baseURL
         case apiKey
+        case ttsProfileName
         case existingSource(UUID)
     }
 
@@ -2379,12 +2381,18 @@ struct SettingsView: View {
         .onChange(of: viewModel.snapshot.settings.activeProviderProfileId) { _, _ in
             syncAIDraftsFromSettings()
         }
+        .onChange(of: viewModel.snapshot.settings.activeTTSProviderProfileId) { _, _ in
+            syncAIDraftsFromSettings()
+        }
         .onChange(of: focusedSettingsField) { oldValue, newValue in
             if oldValue == .profileName, newValue != .profileName {
                 commitProfileNameDraft()
             }
             if oldValue == .baseURL, newValue != .baseURL {
                 commitBaseURLDraft()
+            }
+            if oldValue == .ttsProfileName, newValue != .ttsProfileName {
+                commitTTSProfileNameDraft()
             }
             if case .existingSource(let id) = oldValue, newValue != oldValue,
                let source = viewModel.snapshot.sources.first(where: { $0.id == id }) {
@@ -2689,6 +2697,52 @@ struct SettingsView: View {
                     }
 
                     if viewModel.snapshot.settings.openAITtsEnabled {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("每個 profile 各自持有一把 API key,切換 profile 不會互相覆蓋。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            VStack(spacing: 0) {
+                                ForEach(viewModel.snapshot.settings.ttsProviderProfiles) { profile in
+                                    ttsProviderProfileRow(profile)
+                                    if profile.id != viewModel.snapshot.settings.ttsProviderProfiles.last?.id {
+                                        Divider()
+                                    }
+                                }
+                            }
+                            .background(Color.platformTextBackground)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(Color.platformSeparator, lineWidth: 1)
+                            )
+
+                            HStack(spacing: 8) {
+                                Button {
+                                    commitTTSProfileNameDraft()
+                                    viewModel.createTTSProviderProfile()
+                                } label: {
+                                    Label("新增", systemImage: "plus")
+                                }
+                                Button(role: .destructive) {
+                                    commitTTSProfileNameDraft()
+                                    viewModel.deleteActiveTTSProviderProfile()
+                                } label: {
+                                    Label("刪除", systemImage: "trash")
+                                }
+                                .disabled(viewModel.snapshot.settings.ttsProviderProfiles.count <= 1)
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                        .padding(.bottom, 4)
+
+                        labeledRow("Profile 名稱") {
+                            TextField("", text: $ttsProfileNameDraft)
+                                .textFieldStyle(.roundedBorder)
+                                .focused($focusedSettingsField, equals: .ttsProfileName)
+                                .onSubmit { commitTTSProfileNameDraft() }
+                        }
+
                         labeledRow("服務商") {
                             Picker("", selection: ttsProviderPresetBinding()) {
                                 ForEach(TTSProviderPreset.allCases) { preset in
@@ -2699,7 +2753,7 @@ struct SettingsView: View {
                         }
 
                         labeledRow("API Base URL") {
-                            TextField("", text: binding(\.openAITtsBaseURL))
+                            TextField("", text: ttsBaseURLBinding())
                                 .textFieldStyle(.roundedBorder)
                                 .disabled(viewModel.snapshot.settings.openAITtsProviderPreset != .custom)
                         }
@@ -2707,14 +2761,14 @@ struct SettingsView: View {
 
                         labeledRow("模型 (Model)") {
                             if viewModel.snapshot.settings.openAITtsProviderPreset == .openAI {
-                                Picker("", selection: binding(\.openAITtsModel)) {
+                                Picker("", selection: ttsModelBinding()) {
                                     Text("gpt-4o-mini-tts").tag("gpt-4o-mini-tts")
                                     Text("tts-1").tag("tts-1")
                                     Text("tts-1-hd").tag("tts-1-hd")
                                 }
                                 .labelsHidden()
                             } else if viewModel.snapshot.settings.openAITtsProviderPreset == .gemini {
-                                Picker("", selection: binding(\.openAITtsModel)) {
+                                Picker("", selection: ttsModelBinding()) {
                                     ForEach(GeminiTTSOptions.models, id: \.self) { model in
                                         Text(model).tag(model)
                                     }
@@ -2727,7 +2781,7 @@ struct SettingsView: View {
                                             viewModel.snapshot.settings.openAITtsProviderPreset == .elevenLabs
                                                 ? "輸入 ElevenLabs model_id，例如 eleven_multilingual_v2"
                                                 : "輸入模型標識，例如 tts-1",
-                                            text: binding(\.openAITtsModel)
+                                            text: ttsModelBinding()
                                         )
                                             .textFieldStyle(.roundedBorder)
                                         
@@ -2746,7 +2800,7 @@ struct SettingsView: View {
                                     }
 
                                     if !viewModel.availableTtsModels.isEmpty {
-                                        Picker("選取已獲取的模型", selection: binding(\.openAITtsModel)) {
+                                        Picker("選取已獲取的模型", selection: ttsModelBinding()) {
                                             ForEach(viewModel.availableTtsModels, id: \.self) { model in
                                                 Text(model).tag(model)
                                             }
@@ -2765,11 +2819,11 @@ struct SettingsView: View {
                         labeledRow("語音 (Voice)") {
                             if viewModel.snapshot.settings.openAITtsProviderPreset == .elevenLabs {
                                 VStack(alignment: .leading, spacing: 6) {
-                                    TextField("輸入 ElevenLabs voice_id", text: binding(\.openAITtsVoice))
+                                    TextField("輸入 ElevenLabs voice_id", text: ttsVoiceBinding())
                                         .textFieldStyle(.roundedBorder)
 
                                     if !viewModel.availableTtsVoices.isEmpty {
-                                        Picker("選取已獲取的 voice", selection: binding(\.openAITtsVoice)) {
+                                        Picker("選取已獲取的 voice", selection: ttsVoiceBinding()) {
                                             ForEach(viewModel.availableTtsVoices) { voice in
                                                 Text(voice.displayName).tag(voice.id)
                                             }
@@ -2779,14 +2833,14 @@ struct SettingsView: View {
                                     }
                                 }
                             } else if viewModel.snapshot.settings.openAITtsProviderPreset == .gemini {
-                                Picker("", selection: binding(\.openAITtsVoice)) {
+                                Picker("", selection: ttsVoiceBinding()) {
                                     ForEach(GeminiTTSOptions.voices, id: \.self) { voice in
                                         Text(voice).tag(voice)
                                     }
                                 }
                                 .labelsHidden()
                             } else {
-                                Picker("", selection: binding(\.openAITtsVoice)) {
+                                Picker("", selection: ttsVoiceBinding()) {
                                     Text("alloy").tag("alloy")
                                     Text("echo").tag("echo")
                                     Text("fable").tag("fable")
@@ -2922,6 +2976,38 @@ struct SettingsView: View {
         .background(isActive ? Color.accentColor.opacity(0.08) : Color.clear)
         .accessibilityLabel("\(profile.name)\(isActive ? "，目前為預設" : "")")
         .accessibilityHint("點一下設為預設 profile")
+    }
+
+    private func ttsProviderProfileRow(_ profile: TTSProviderProfile) -> some View {
+        let isActive = profile.id == viewModel.snapshot.settings.activeTTSProviderProfileId
+        return Button {
+            guard !isActive else { return }
+            commitTTSProfileNameDraft()
+            viewModel.selectTTSProviderProfile(profile.id)
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: isActive ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 16))
+                    .foregroundStyle(isActive ? Color.accentColor : .secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(profile.name)
+                        .font(.body.weight(isActive ? .semibold : .regular))
+                        .lineLimit(1)
+                    Text("\(profile.config.preset.displayName) · \(profile.config.model)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(isActive ? Color.accentColor.opacity(0.08) : Color.clear)
+        .accessibilityLabel("\(profile.name)\(isActive ? "，目前使用中" : "")")
+        .accessibilityHint("點一下切換為目前使用的 TTS profile")
     }
 
     @ViewBuilder
@@ -3140,15 +3226,30 @@ struct SettingsView: View {
     private func commitPendingProviderProfileDrafts() {
         commitProfileNameDraft()
         commitBaseURLDraft()
+        commitTTSProfileNameDraft()
         focusedSettingsField = nil
     }
 
     private func syncAIDraftsFromSettings() {
-        guard focusedSettingsField != .profileName else { return }
-        guard focusedSettingsField != .baseURL else { return }
-        guard let profile = viewModel.activeProviderProfile else { return }
-        profileNameDraft = profile.name
-        baseURLDraft = profile.config.baseURL.absoluteString
+        if focusedSettingsField != .profileName, focusedSettingsField != .baseURL,
+           let profile = viewModel.activeProviderProfile {
+            profileNameDraft = profile.name
+            baseURLDraft = profile.config.baseURL.absoluteString
+        }
+        if focusedSettingsField != .ttsProfileName,
+           let ttsProfile = viewModel.activeTTSProviderProfile {
+            ttsProfileNameDraft = ttsProfile.name
+        }
+    }
+
+    private func commitTTSProfileNameDraft() {
+        let trimmed = ttsProfileNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            ttsProfileNameDraft = viewModel.activeTTSProviderProfile?.name ?? ""
+            return
+        }
+        guard trimmed != viewModel.activeTTSProviderProfile?.name else { return }
+        viewModel.updateActiveTTSProviderProfileName(trimmed)
     }
 
     private func commitProfileNameDraft() {
@@ -3628,17 +3729,35 @@ struct SettingsView: View {
         Binding {
             viewModel.snapshot.settings.openAITtsProviderPreset
         } set: { preset in
-            var settings = viewModel.snapshot.settings
-            settings.openAITtsProviderPreset = preset
-            if preset != .custom {
-                settings.openAITtsBaseURL = preset.defaultBaseURL
-                settings.openAITtsModel = preset.defaultModel
-                settings.openAITtsVoice = preset.defaultVoice
-            }
-            viewModel.availableTtsModels = []
-            viewModel.availableTtsVoices = []
-            viewModel.ttsStatusMessage = ""
-            viewModel.updateSettings(settings)
+            viewModel.applyTTSProviderPreset(preset)
+        }
+    }
+
+    /// 目前 active TTS profile 的 baseURL/model/voice 綁定。跟主 provider 一樣,
+    /// 寫入時一定要透過 `updateActiveTTSProviderProfileConfig` 改進 profile 陣列,
+    /// 不能直接改 `openAITts*` 純量欄位 —— 那些欄位只是 active profile 的鏡射,
+    /// 下次 normalize 就會被 profile 裡的舊值蓋回去,等於改了也白改。
+    private func ttsBaseURLBinding() -> Binding<String> {
+        Binding {
+            viewModel.snapshot.settings.openAITtsBaseURL
+        } set: { value in
+            viewModel.updateActiveTTSProviderProfileConfig { $0.baseURL = value }
+        }
+    }
+
+    private func ttsModelBinding() -> Binding<String> {
+        Binding {
+            viewModel.snapshot.settings.openAITtsModel
+        } set: { value in
+            viewModel.updateActiveTTSProviderProfileConfig { $0.model = value }
+        }
+    }
+
+    private func ttsVoiceBinding() -> Binding<String> {
+        Binding {
+            viewModel.snapshot.settings.openAITtsVoice
+        } set: { value in
+            viewModel.updateActiveTTSProviderProfileConfig { $0.voice = value }
         }
     }
 

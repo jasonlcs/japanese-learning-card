@@ -193,6 +193,67 @@ public enum TTSProviderPreset: String, Codable, CaseIterable, Identifiable, Send
     }
 }
 
+public struct TTSProviderConfig: Codable, Equatable, Sendable {
+    public var preset: TTSProviderPreset
+    public var baseURL: String
+    public var model: String
+    public var voice: String
+    public var apiKeyKeychainRef: String
+
+    public init(
+        preset: TTSProviderPreset = .openAI,
+        baseURL: String = TTSProviderPreset.openAI.defaultBaseURL,
+        model: String = TTSProviderPreset.openAI.defaultModel,
+        voice: String = TTSProviderPreset.openAI.defaultVoice,
+        apiKeyKeychainRef: String = "default"
+    ) {
+        self.preset = preset
+        self.baseURL = baseURL
+        self.model = model
+        self.voice = voice
+        self.apiKeyKeychainRef = apiKeyKeychainRef
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.preset = try container.decodeIfPresent(TTSProviderPreset.self, forKey: .preset) ?? .openAI
+        self.baseURL = try container.decodeIfPresent(String.self, forKey: .baseURL) ?? preset.defaultBaseURL
+        self.model = try container.decodeIfPresent(String.self, forKey: .model) ?? preset.defaultModel
+        self.voice = try container.decodeIfPresent(String.self, forKey: .voice) ?? preset.defaultVoice
+        self.apiKeyKeychainRef = try container.decodeIfPresent(String.self, forKey: .apiKeyKeychainRef) ?? "default"
+    }
+}
+
+public struct TTSProviderProfile: Codable, Identifiable, Equatable, Sendable {
+    public var id: UUID
+    public var name: String
+    public var config: TTSProviderConfig
+    public var updatedAt: Date
+
+    public init(
+        id: UUID = UUID(),
+        name: String,
+        config: TTSProviderConfig,
+        updatedAt: Date = Date()
+    ) {
+        self.id = id
+        self.name = name
+        self.config = config
+        self.updatedAt = updatedAt
+    }
+
+    /// Keychain 帳號(reference)一律由 profile id 自動產生,與主 provider profile
+    /// 同一套規則(見 `ProviderProfile.sanitizedKeychainReference`),加 "tts_"
+    /// 前綴以區分兩套 key。舊資料(單一共用 slot)的搬移見 `TTSKeychainMigration`。
+    public var keychainReference: String {
+        Self.keychainReference(for: id)
+    }
+
+    public static func keychainReference(for id: UUID) -> String {
+        "tts_" + ProviderProfile.sanitizedKeychainReference(id.uuidString)
+    }
+}
+
 public enum ProviderPreset: String, Codable, CaseIterable, Identifiable, Sendable {
     case openAI
     case openCodeGo
@@ -728,6 +789,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var openAITtsModel: String
     public var openAITtsBaseURL: String
     public var openAITtsProviderPreset: TTSProviderPreset
+    public var ttsProviderProfiles: [TTSProviderProfile]
+    public var activeTTSProviderProfileId: UUID?
     public var updatedAt: Date
 
     public init(
@@ -753,6 +816,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         openAITtsModel: String = "tts-1",
         openAITtsBaseURL: String = "https://api.openai.com/v1",
         openAITtsProviderPreset: TTSProviderPreset = .openAI,
+        ttsProviderProfiles: [TTSProviderProfile] = [],
+        activeTTSProviderProfileId: UUID? = nil,
         updatedAt: Date = Date()
     ) {
         self.displayIntervalMinutes = displayIntervalMinutes
@@ -777,8 +842,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
         self.openAITtsModel = openAITtsModel
         self.openAITtsBaseURL = openAITtsBaseURL
         self.openAITtsProviderPreset = openAITtsProviderPreset
+        self.ttsProviderProfiles = ttsProviderProfiles
+        self.activeTTSProviderProfileId = activeTTSProviderProfileId
         self.updatedAt = updatedAt
         normalizeProviderProfiles()
+        normalizeTTSProviderProfiles()
     }
 
     public static func clampHour(_ value: Int) -> Int { min(23, max(0, value)) }
@@ -819,6 +887,58 @@ public struct AppSettings: Codable, Equatable, Sendable {
         return providerProfiles.first { $0.id == activeProviderProfileId } ?? providerProfiles.first
     }
 
+    public static func defaultTTSProviderProfile(config: TTSProviderConfig) -> TTSProviderProfile {
+        TTSProviderProfile(id: defaultTTSProviderProfileID, name: config.preset.displayName, config: config, updatedAt: .distantPast)
+    }
+
+    private static let defaultTTSProviderProfileID = UUID(uuidString: "00000000-0000-4000-8000-000000000002")!
+
+    /// 舊制(profile 出現前)TTS API key 唯一使用過的 keychain 帳號。種一個預設
+    /// profile 時把它指到這個 ref,讓 `TTSKeychainMigration` 能認得並搬到新制
+    /// 的 per-profile ref,使用者原本存的 key 不會消失。
+    public static let legacyTTSKeychainReference = "openai_tts_api_key"
+
+    /// 種子/切換邏輯與 `normalizeProviderProfiles()` 對稱:沒有 profile 時,用現有
+    /// `openAITts*` 純量欄位種一個預設 profile;active profile 存在時,把它的
+    /// config 同步回那些純量欄位,讓其餘讀取 `settings.openAITts*` 的既有程式碼
+    /// (發音、測試等)不用跟著改。
+    public mutating func normalizeTTSProviderProfiles() {
+        if ttsProviderProfiles.isEmpty {
+            let config = TTSProviderConfig(
+                preset: openAITtsProviderPreset,
+                baseURL: openAITtsBaseURL,
+                model: openAITtsModel,
+                voice: openAITtsVoice,
+                apiKeyKeychainRef: Self.legacyTTSKeychainReference
+            )
+            let profile = Self.defaultTTSProviderProfile(config: config)
+            ttsProviderProfiles = [profile]
+            activeTTSProviderProfileId = profile.id
+        }
+
+        if activeTTSProviderProfileId == nil || !ttsProviderProfiles.contains(where: { $0.id == activeTTSProviderProfileId }) {
+            activeTTSProviderProfileId = ttsProviderProfiles.first?.id
+        }
+
+        if let active = activeTTSProviderProfile {
+            openAITtsProviderPreset = active.config.preset
+            openAITtsBaseURL = active.config.baseURL
+            openAITtsModel = active.config.model
+            openAITtsVoice = active.config.voice
+        }
+    }
+
+    public var activeTTSProviderProfile: TTSProviderProfile? {
+        guard let activeTTSProviderProfileId else { return ttsProviderProfiles.first }
+        return ttsProviderProfiles.first { $0.id == activeTTSProviderProfileId } ?? ttsProviderProfiles.first
+    }
+
+    /// 目前 TTS profile 實際該用的 keychain reference。`normalizeTTSProviderProfiles()`
+    /// 一律會種出至少一個 profile,所以 fallback 只在尚未 normalize 的中繼狀態才會用到。
+    public var ttsKeychainReference: String {
+        activeTTSProviderProfile?.config.apiKeyKeychainRef ?? Self.legacyTTSKeychainReference
+    }
+
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.displayIntervalMinutes = try container.decodeIfPresent(Int.self, forKey: .displayIntervalMinutes) ?? 30
@@ -850,8 +970,11 @@ public struct AppSettings: Codable, Equatable, Sendable {
         } else {
             self.openAITtsProviderPreset = .openAI
         }
+        self.ttsProviderProfiles = try container.decodeIfPresent([TTSProviderProfile].self, forKey: .ttsProviderProfiles) ?? []
+        self.activeTTSProviderProfileId = try container.decodeIfPresent(UUID.self, forKey: .activeTTSProviderProfileId)
         self.updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
         normalizeProviderProfiles()
+        normalizeTTSProviderProfiles()
     }
 }
 

@@ -525,6 +525,7 @@ public final class AppViewModel: ObservableObject {
             availableModels = Array(Set(snapshot.settings.providerConfig.preset.fallbackModels + [snapshot.settings.providerConfig.model, snapshot.settings.providerConfig.fastModel])).sorted()
         }
         migrateProviderKeychainReferencesIfNeeded()
+        migrateTTSKeychainReferencesIfNeeded()
         refreshActiveProviderKeyStatus()
         // 任何 reload (來自本地寫入或 pull 後 merge) 都排一個 debounce push,
         // 避免快照改了卻忘記上雲。
@@ -1204,7 +1205,7 @@ public final class AppViewModel: ObservableObject {
 
     func refreshActiveProviderKeyStatus() {
         do {
-            isOpenAITtsKeySaved = try secretStore.hasAPIKey(reference: "openai_tts_api_key")
+            isOpenAITtsKeySaved = try secretStore.hasAPIKey(reference: snapshot.settings.ttsKeychainReference)
         } catch {
             isOpenAITtsKeySaved = false
         }
@@ -1224,7 +1225,7 @@ public final class AppViewModel: ObservableObject {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         do {
-            try secretStore.saveAPIKey(trimmed, reference: "openai_tts_api_key")
+            try secretStore.saveAPIKey(trimmed, reference: snapshot.settings.ttsKeychainReference)
             isOpenAITtsKeySaved = true
             openAITtsKeyInput = ""
             statusMessage = "已儲存 TTS API Key"
@@ -1237,7 +1238,7 @@ public final class AppViewModel: ObservableObject {
 
     func clearOpenAITtsKey() {
         do {
-            try secretStore.deleteAPIKey(reference: "openai_tts_api_key")
+            try secretStore.deleteAPIKey(reference: snapshot.settings.ttsKeychainReference)
             isOpenAITtsKeySaved = false
             openAITtsKeyInput = ""
             availableTtsModels = []
@@ -1250,6 +1251,110 @@ public final class AppViewModel: ObservableObject {
         }
     }
 
+    var activeTTSProviderProfile: TTSProviderProfile? {
+        snapshot.settings.activeTTSProviderProfile
+    }
+
+    func selectTTSProviderProfile(_ id: UUID) {
+        var settings = snapshot.settings
+        guard settings.ttsProviderProfiles.contains(where: { $0.id == id }) else { return }
+        settings.activeTTSProviderProfileId = id
+        settings.normalizeTTSProviderProfiles()
+        applyTTSProviderSettings(settings)
+        availableTtsModels = []
+        availableTtsVoices = []
+        openAITtsKeyInput = ""
+    }
+
+    func createTTSProviderProfile(preset: TTSProviderPreset = .openAI) {
+        var settings = snapshot.settings
+        settings.normalizeTTSProviderProfiles()
+        let id = UUID()
+        let config = TTSProviderConfig(
+            preset: preset,
+            baseURL: preset.defaultBaseURL,
+            model: preset.defaultModel,
+            voice: preset.defaultVoice,
+            apiKeyKeychainRef: TTSProviderProfile.keychainReference(for: id)
+        )
+        let profile = TTSProviderProfile(id: id, name: "新 \(preset.displayName)", config: config)
+        settings.ttsProviderProfiles.append(profile)
+        settings.activeTTSProviderProfileId = profile.id
+        settings.normalizeTTSProviderProfiles()
+        applyTTSProviderSettings(settings)
+        availableTtsModels = []
+        availableTtsVoices = []
+        openAITtsKeyInput = ""
+    }
+
+    func deleteActiveTTSProviderProfile() {
+        var settings = snapshot.settings
+        settings.normalizeTTSProviderProfiles()
+        guard let activeId = settings.activeTTSProviderProfileId,
+              settings.ttsProviderProfiles.count > 1 else { return }
+        settings.ttsProviderProfiles.removeAll { $0.id == activeId }
+        settings.activeTTSProviderProfileId = settings.ttsProviderProfiles.first?.id
+        settings.normalizeTTSProviderProfiles()
+        applyTTSProviderSettings(settings)
+        availableTtsModels = []
+        availableTtsVoices = []
+        openAITtsKeyInput = ""
+    }
+
+    func updateActiveTTSProviderProfileName(_ name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var settings = snapshot.settings
+        settings.normalizeTTSProviderProfiles()
+        guard let activeId = settings.activeTTSProviderProfileId,
+              let index = settings.ttsProviderProfiles.firstIndex(where: { $0.id == activeId }) else { return }
+        settings.ttsProviderProfiles[index].name = trimmed
+        settings.ttsProviderProfiles[index].updatedAt = Date()
+        applyTTSProviderSettings(settings)
+    }
+
+    func updateActiveTTSProviderProfileConfig(_ mutate: (inout TTSProviderConfig) -> Void) {
+        var settings = snapshot.settings
+        settings.normalizeTTSProviderProfiles()
+        guard let activeId = settings.activeTTSProviderProfileId,
+              let index = settings.ttsProviderProfiles.firstIndex(where: { $0.id == activeId }) else { return }
+        mutate(&settings.ttsProviderProfiles[index].config)
+        settings.ttsProviderProfiles[index].updatedAt = Date()
+        applyTTSProviderSettings(settings)
+    }
+
+    /// 切換 TTS provider preset:重設 baseURL/model/voice 為該 preset 預設值
+    /// (custom 除外),並清掉已抓取的模型/voice 清單,與主 provider 的
+    /// `applyProviderPreset` 同套路。
+    func applyTTSProviderPreset(_ preset: TTSProviderPreset) {
+        updateActiveTTSProviderProfileConfig { config in
+            config.preset = preset
+            if preset != .custom {
+                config.baseURL = preset.defaultBaseURL
+                config.model = preset.defaultModel
+                config.voice = preset.defaultVoice
+            }
+        }
+        availableTtsModels = []
+        availableTtsVoices = []
+        ttsStatusMessage = ""
+    }
+
+    /// TTS 一次性搬移:把舊制單一共用 slot 的 key 搬進新制每個 profile 各自
+    /// 獨立的 keychain reference,見 `TTSKeychainMigration`。
+    private func migrateTTSKeychainReferencesIfNeeded() {
+        guard let migrated = TTSKeychainMigration.migrate(settings: snapshot.settings, secretStore: secretStore) else { return }
+        applyTTSProviderSettings(migrated)
+    }
+
+    private func applyTTSProviderSettings(_ settings: AppSettings) {
+        var normalized = settings
+        normalized.normalizeTTSProviderProfiles()
+        snapshot.settings = normalized
+        updateSettings(normalized)
+        refreshActiveProviderKeyStatus()
+    }
+
     func fetchAvailableTtsModels() {
         let baseURL = snapshot.settings.openAITtsProviderPreset == .openAI
             ? TTSProviderPreset.openAI.defaultBaseURL
@@ -1260,7 +1365,7 @@ public final class AppViewModel: ObservableObject {
         statusMessage = loadingMessage
         ttsStatusMessage = loadingMessage
         
-        guard let apiKey = try? secretStore.apiKey(reference: "openai_tts_api_key"), !apiKey.isEmpty else {
+        guard let apiKey = try? secretStore.apiKey(reference: snapshot.settings.ttsKeychainReference), !apiKey.isEmpty else {
             let message = "請先儲存 API Key 才能獲取模型"
             statusMessage = message
             ttsStatusMessage = message
@@ -1276,20 +1381,24 @@ public final class AppViewModel: ObservableObject {
         if snapshot.settings.openAITtsProviderPreset == .gemini {
             availableTtsModels = GeminiTTSOptions.models
             availableTtsVoices = GeminiTTSOptions.voices.map { TTSVoiceOption(id: $0, name: $0) }
-            var settings = snapshot.settings
             var changes: [String] = []
-            if !GeminiTTSOptions.models.contains(settings.openAITtsModel),
+            if !GeminiTTSOptions.models.contains(snapshot.settings.openAITtsModel),
                let firstModel = GeminiTTSOptions.models.first {
-                settings.openAITtsModel = firstModel
                 changes.append("模型 \(firstModel)")
             }
-            if !GeminiTTSOptions.voices.contains(settings.openAITtsVoice),
+            if !GeminiTTSOptions.voices.contains(snapshot.settings.openAITtsVoice),
                let firstVoice = GeminiTTSOptions.voices.first {
-                settings.openAITtsVoice = firstVoice
                 changes.append("voice \(firstVoice)")
             }
             if !changes.isEmpty {
-                updateSettings(settings)
+                updateActiveTTSProviderProfileConfig { config in
+                    if !GeminiTTSOptions.models.contains(config.model), let firstModel = GeminiTTSOptions.models.first {
+                        config.model = firstModel
+                    }
+                    if !GeminiTTSOptions.voices.contains(config.voice), let firstVoice = GeminiTTSOptions.voices.first {
+                        config.voice = firstVoice
+                    }
+                }
             }
             let message = "已載入 Gemini TTS：\(GeminiTTSOptions.models.count) 個模型、\(GeminiTTSOptions.voices.count) 個 voices" +
                 (changes.isEmpty ? "" : "，並切換到 \(changes.joined(separator: "、"))")
@@ -1349,9 +1458,7 @@ public final class AppViewModel: ObservableObject {
                         self.availableTtsModels = ttsModels
                         if !ttsModels.contains(self.snapshot.settings.openAITtsModel),
                            let firstModel = ttsModels.first {
-                            var settings = self.snapshot.settings
-                            settings.openAITtsModel = firstModel
-                            self.updateSettings(settings)
+                            self.updateActiveTTSProviderProfileConfig { $0.model = firstModel }
                             let message = "已成功獲取 \(ttsModels.count) 個 TTS 模型，並切換到 \(firstModel)"
                             self.statusMessage = message
                             self.ttsStatusMessage = message
@@ -1452,22 +1559,26 @@ public final class AppViewModel: ObservableObject {
                         self.availableTtsModels = ttsModels
                         self.availableTtsVoices = voiceOptions
 
-                        var settings = self.snapshot.settings
                         var changes: [String] = []
                         if !ttsModels.isEmpty,
-                           !ttsModels.contains(settings.openAITtsModel),
+                           !ttsModels.contains(self.snapshot.settings.openAITtsModel),
                            let firstModel = ttsModels.first {
-                            settings.openAITtsModel = firstModel
                             changes.append("模型 \(firstModel)")
                         }
                         if !voiceOptions.isEmpty,
-                           !voiceOptions.contains(where: { $0.id == settings.openAITtsVoice }),
+                           !voiceOptions.contains(where: { $0.id == self.snapshot.settings.openAITtsVoice }),
                            let firstVoice = voiceOptions.first {
-                            settings.openAITtsVoice = firstVoice.id
                             changes.append("voice \(firstVoice.name)")
                         }
                         if !changes.isEmpty {
-                            self.updateSettings(settings)
+                            self.updateActiveTTSProviderProfileConfig { config in
+                                if !ttsModels.isEmpty, !ttsModels.contains(config.model), let firstModel = ttsModels.first {
+                                    config.model = firstModel
+                                }
+                                if !voiceOptions.isEmpty, !voiceOptions.contains(where: { $0.id == config.voice }), let firstVoice = voiceOptions.first {
+                                    config.voice = firstVoice.id
+                                }
+                            }
                         }
 
                         let message = "已獲取 ElevenLabs：\(ttsModels.count) 個模型、\(voiceOptions.count) 個 voices" +
