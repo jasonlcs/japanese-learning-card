@@ -40,6 +40,7 @@ struct CoreChecks {
         try structuredOutputIsSentPerProvider()
         try googleAIStudioPresetTargetsGeminiOpenAIEndpoint()
         ollamaPresetSupportsLocalKeylessProvider()
+        try ttsKeychainMigrationMovesLegacyKeyAndKeepsProfilesIndependent()
         try rubyRequestStreamsAndSSELinesAssemble()
         try essayOutputStripsEmphasisMarkers()
         vocabularyHighlightMatchesWordsAndSegments()
@@ -990,6 +991,69 @@ struct CoreChecks {
         expect(ProviderPreset.openAI.requiresAPIKey, "cloud presets should still require an API key")
     }
 
+    /// 重現使用者回報的 bug:切換 TTS provider 導致舊 key 被新 key 蓋掉。
+    /// 舊制下所有 TTS provider 共用單一 keychain slot,先存 OpenAI、再存
+    /// Gemini 會讓 OpenAI 的 key 消失,切回 OpenAI 就會拿 Gemini 的 key 去打
+    /// OpenAI API 而回 401。這個 check 驗證新制(每個 profile 各自的 keychain
+    /// reference + 舊 slot 一次性搬移)修好了這個問題。
+    private static func ttsKeychainMigrationMovesLegacyKeyAndKeepsProfilesIndependent() throws {
+        let secretStore = MockSecretStore()
+        try secretStore.saveAPIKey("sk-openai-legacy", reference: AppSettings.legacyTTSKeychainReference)
+
+        var settings = AppSettings()
+        settings.normalizeTTSProviderProfiles()
+        expect(settings.ttsProviderProfiles.count == 1, "should seed exactly one default TTS profile")
+        expect(settings.ttsKeychainReference == AppSettings.legacyTTSKeychainReference,
+               "freshly seeded profile should still point at the legacy slot before migration runs")
+
+        guard let migrated = TTSKeychainMigration.migrate(settings: settings, secretStore: secretStore) else {
+            fatalError("Check failed: migration should run when a TTS profile still points at the legacy slot")
+        }
+        settings = migrated
+
+        guard let openAIProfileId = settings.activeTTSProviderProfileId else {
+            fatalError("Check failed: migrated settings should still have an active TTS profile")
+        }
+        let openAIReference = settings.ttsKeychainReference
+        expect(openAIReference != AppSettings.legacyTTSKeychainReference,
+               "profile should now own a per-id keychain reference instead of the shared legacy slot")
+        let migratedOpenAIKey = try secretStore.apiKey(reference: openAIReference)
+        expect(migratedOpenAIKey == "sk-openai-legacy",
+               "OpenAI key must survive the migration under its new per-profile reference")
+        let legacySlotStillHasKey = try secretStore.hasAPIKey(reference: AppSettings.legacyTTSKeychainReference)
+        expect(!legacySlotStillHasKey,
+               "legacy shared slot should be cleared once its key is safely copied over")
+
+        // 新增一個 Gemini profile 並存自己的 key —— 這就是回報中「先設 OpenAI、
+        // 再設 Gemini」的那一步。
+        let geminiId = UUID()
+        let geminiConfig = TTSProviderConfig(
+            preset: .gemini,
+            baseURL: TTSProviderPreset.gemini.defaultBaseURL,
+            model: TTSProviderPreset.gemini.defaultModel,
+            voice: TTSProviderPreset.gemini.defaultVoice,
+            apiKeyKeychainRef: TTSProviderProfile.keychainReference(for: geminiId)
+        )
+        let geminiProfile = TTSProviderProfile(id: geminiId, name: "Gemini", config: geminiConfig)
+        settings.ttsProviderProfiles.append(geminiProfile)
+        settings.activeTTSProviderProfileId = geminiProfile.id
+        settings.normalizeTTSProviderProfiles()
+        try secretStore.saveAPIKey("gm-gemini-key", reference: settings.ttsKeychainReference)
+
+        // 切回 OpenAI profile:原本的 key 必須還在,不能被 Gemini 的 key 蓋掉
+        // (這正是使用者回報的 401「Incorrect API key」的根因)。
+        settings.activeTTSProviderProfileId = openAIProfileId
+        settings.normalizeTTSProviderProfiles()
+        expect(settings.openAITtsProviderPreset == .openAI,
+               "switching back to the OpenAI profile should restore its preset into the scalar mirror")
+        let openAIKeyAfterSwitchBack = try secretStore.apiKey(reference: settings.ttsKeychainReference)
+        expect(openAIKeyAfterSwitchBack == "sk-openai-legacy",
+               "OpenAI key must survive switching to Gemini and back")
+        let geminiKeyStillIntact = try secretStore.apiKey(reference: geminiProfile.keychainReference)
+        expect(geminiKeyStillIntact == "gm-gemini-key",
+               "Gemini key should remain intact under its own independent reference")
+    }
+
     private static func pipelineGeneratesAIArticleAndCards() async throws {
         let fileURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
@@ -1864,6 +1928,23 @@ struct CoreChecks {
 /// 用 class 裝可變 flag, 避免在 @Sendable closure 裡 mutate captured var。
 private final class FlagBox: @unchecked Sendable {
     var value: Bool = false
+}
+
+/// in-memory `SecretStore`, 測試 keychain 搬移邏輯用, 不碰真實系統 keychain。
+private final class MockSecretStore: SecretStore, @unchecked Sendable {
+    private let lock = OSAllocatedUnfairLock<[String: String]>(initialState: [:])
+
+    func saveAPIKey(_ apiKey: String, reference: String) throws {
+        lock.withLock { $0[reference] = apiKey }
+    }
+
+    func apiKey(reference: String) throws -> String? {
+        lock.withLock { $0[reference] }
+    }
+
+    func deleteAPIKey(reference: String) throws {
+        lock.withLock { $0[reference] = nil }
+    }
 }
 
 /// 可程控的 in-memory backing, 測試用。可指定 fetch / save 行為, 模擬
