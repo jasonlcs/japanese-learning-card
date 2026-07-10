@@ -75,6 +75,22 @@ struct TTSVoiceOption: Identifiable, Equatable {
     }
 }
 
+enum GeminiTTSOptions {
+    static let models = [
+        "gemini-3.1-flash-tts-preview",
+        "gemini-2.5-flash-preview-tts",
+        "gemini-2.5-pro-preview-tts"
+    ]
+
+    static let voices = [
+        "Kore", "Puck", "Zephyr", "Charon", "Fenrir", "Leda", "Orus", "Aoede",
+        "Callirrhoe", "Autonoe", "Enceladus", "Iapetus", "Umbriel", "Algieba",
+        "Despina", "Erinome", "Algenib", "Rasalgethi", "Laomedeia", "Achernar",
+        "Alnilam", "Schedar", "Gacrux", "Pulcherrima", "Achird", "Zubenelgenubi",
+        "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat"
+    ]
+}
+
 @MainActor
 public final class AppViewModel: ObservableObject {
     @Published var snapshot = AppSnapshot()
@@ -1256,6 +1272,33 @@ public final class AppViewModel: ObservableObject {
         if baseString.hasSuffix("/") {
             baseString.removeLast()
         }
+
+        if snapshot.settings.openAITtsProviderPreset == .gemini {
+            availableTtsModels = GeminiTTSOptions.models
+            availableTtsVoices = GeminiTTSOptions.voices.map { TTSVoiceOption(id: $0, name: $0) }
+            var settings = snapshot.settings
+            var changes: [String] = []
+            if !GeminiTTSOptions.models.contains(settings.openAITtsModel),
+               let firstModel = GeminiTTSOptions.models.first {
+                settings.openAITtsModel = firstModel
+                changes.append("模型 \(firstModel)")
+            }
+            if !GeminiTTSOptions.voices.contains(settings.openAITtsVoice),
+               let firstVoice = GeminiTTSOptions.voices.first {
+                settings.openAITtsVoice = firstVoice
+                changes.append("voice \(firstVoice)")
+            }
+            if !changes.isEmpty {
+                updateSettings(settings)
+            }
+            let message = "已載入 Gemini TTS：\(GeminiTTSOptions.models.count) 個模型、\(GeminiTTSOptions.voices.count) 個 voices" +
+                (changes.isEmpty ? "" : "，並切換到 \(changes.joined(separator: "、"))")
+            statusMessage = message
+            ttsStatusMessage = message
+            isFetchingTtsModels = false
+            return
+        }
+
         guard let url = URL(string: "\(baseString)/models") else {
             let message = "API Base URL 格式錯誤"
             statusMessage = message

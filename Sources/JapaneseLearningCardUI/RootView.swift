@@ -1755,6 +1755,10 @@ private final class SpeechSynthesizerManager {
             speakElevenLabs(text, settings: settings, apiKey: apiKey, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
             return
         }
+        if settings.openAITtsProviderPreset == .gemini {
+            speakGemini(text, settings: settings, apiKey: apiKey, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+            return
+        }
 
         var baseString = settings.openAITtsProviderPreset == .openAI
             ? TTSProviderPreset.openAI.defaultBaseURL
@@ -1927,6 +1931,280 @@ private final class SpeechSynthesizerManager {
         }
         self.downloadTask = task
         task.resume()
+    }
+
+    private func speakGemini(
+        _ text: String,
+        settings: AppSettings,
+        apiKey: String,
+        fallbackToNativeOnFailure: Bool,
+        onStatus: @escaping @MainActor (String) -> Void
+    ) {
+        let voice = settings.openAITtsVoice.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !voice.isEmpty else {
+            handleTTSFailure("請先選擇 Gemini voice", text: text, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+            return
+        }
+
+        let speechInput = remoteSpeechInput(text)
+        let cacheURL = ttsCacheURL(settings: settings, text: text, speechInput: speechInput, fileExtension: "wav")
+        if playCachedAudioIfAvailable(cacheURL, providerName: settings.openAITtsProviderPreset.displayName, voice: voice, onStatus: onStatus) {
+            return
+        }
+
+        var baseString = TTSProviderPreset.gemini.defaultBaseURL
+        if baseString.hasSuffix("/") {
+            baseString.removeLast()
+        }
+        guard let modelName = settings.openAITtsModel.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: "\(baseString)/models/\(modelName):generateContent") else {
+            handleTTSFailure("Gemini API Base URL 格式錯誤", text: text, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+            return
+        }
+
+        let payload: [String: Any] = [
+            "contents": [
+                [
+                    "parts": [
+                        ["text": speechInput]
+                    ]
+                ]
+            ],
+            "generationConfig": [
+                "responseModalities": ["AUDIO"],
+                "speechConfig": [
+                    "voiceConfig": [
+                        "prebuiltVoiceConfig": [
+                            "voiceName": voice
+                        ]
+                    ]
+                ]
+            ]
+        ]
+
+        guard let httpBody = try? JSONSerialization.data(withJSONObject: payload, options: []) else {
+            handleTTSFailure("Gemini 請求序列化失敗", text: text, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = httpBody
+
+        sendGeminiTTSRequest(
+            request: request,
+            retryCount: 0,
+            maxRetries: 2,
+            cacheURL: cacheURL,
+            text: text,
+            voice: voice,
+            fallbackToNativeOnFailure: fallbackToNativeOnFailure,
+            onStatus: onStatus
+        )
+    }
+
+    private func sendGeminiTTSRequest(
+        request: URLRequest,
+        retryCount: Int,
+        maxRetries: Int,
+        cacheURL: URL,
+        text: String,
+        voice: String,
+        fallbackToNativeOnFailure: Bool,
+        onStatus: @escaping @MainActor (String) -> Void
+    ) {
+        let task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            Task { @MainActor in
+                guard let self else { return }
+                if let error {
+                    print("TTS network error: \(error.localizedDescription)")
+                    self.handleTTSFailure("網路請求失敗：\(error.localizedDescription)", text: text, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+                    return
+                }
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    self.handleTTSFailure("連線回應異常", text: text, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+                    return
+                }
+                guard (200...299).contains(httpResponse.statusCode), let data else {
+                    print("TTS HTTP status: \(httpResponse.statusCode)")
+                    var details = ""
+                    if let data, let errorString = String(data: data, encoding: .utf8) {
+                        print("TTS error response: \(errorString)")
+                        details = " (\(errorString.prefix(60)))"
+                    }
+                    self.handleTTSFailure("Gemini API 回傳失敗 (\(httpResponse.statusCode))\(details)", text: text, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+                    return
+                }
+
+                #if os(iOS)
+                do {
+                    try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
+                    try AVAudioSession.sharedInstance().setActive(true)
+                } catch {
+                    print("Failed to set audio session category: \(error)")
+                }
+                #endif
+
+                do {
+                    if let responseString = String(data: data, encoding: .utf8)?.prefix(500) {
+                        print("Gemini TTS response: \(responseString)")
+                    }
+                    let audioData = try self.geminiPlayableAudioData(from: data)
+                    try self.storeAudioData(audioData, at: cacheURL)
+                    try self.playAudioData(audioData, providerName: TTSProviderPreset.gemini.displayName, voice: voice, onStatus: onStatus)
+                } catch {
+                    let errorMsg = error.localizedDescription
+                    if errorMsg.contains("finish_reason") && retryCount < maxRetries {
+                        print("Gemini TTS retry \(retryCount + 1)/\(maxRetries) due to: \(errorMsg)")
+                        onStatus("Gemini TTS 重試中 (\(retryCount + 1)/\(maxRetries))...")
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                            guard let self else { return }
+                            self.sendGeminiTTSRequest(
+                                request: request,
+                                retryCount: retryCount + 1,
+                                maxRetries: maxRetries,
+                                cacheURL: cacheURL,
+                                text: text,
+                                voice: voice,
+                                fallbackToNativeOnFailure: fallbackToNativeOnFailure,
+                                onStatus: onStatus
+                            )
+                        }
+                        return
+                    }
+                    if let responseString = String(data: data, encoding: .utf8)?.prefix(500) {
+                        print("Gemini TTS response body (parse failed): \(responseString)")
+                    }
+                    print("Failed to play Gemini TTS audio data: \(errorMsg)")
+                    self.handleTTSFailure("Gemini 音訊解析或播放失敗：\(errorMsg)", text: text, fallbackToNativeOnFailure: fallbackToNativeOnFailure, onStatus: onStatus)
+                }
+            }
+        }
+        self.downloadTask = task
+        task.resume()
+    }
+
+    private struct GeminiTTSResponse: Decodable {
+        var candidates: [Candidate]?
+
+        struct Candidate: Decodable {
+            var content: Content?
+            var finishReason: String?
+
+            struct Content: Decodable {
+                var parts: [Part]?
+
+                struct Part: Decodable {
+                    var inlineData: InlineData?
+                    var text: String?
+
+                    struct InlineData: Decodable {
+                        var data: String
+                        var mimeType: String?
+
+                        enum CodingKeys: String, CodingKey {
+                            case data
+                            case mimeType = "mime_type"
+                            case mimeTypeCamel = "mimeType"
+                        }
+
+                        init(from decoder: Decoder) throws {
+                            let container = try decoder.container(keyedBy: CodingKeys.self)
+                            data = try container.decode(String.self, forKey: .data)
+                            mimeType = try container.decodeIfPresent(String.self, forKey: .mimeType)
+                                ?? container.decodeIfPresent(String.self, forKey: .mimeTypeCamel)
+                        }
+                    }
+
+                    enum CodingKeys: String, CodingKey {
+                        case inlineData = "inline_data"
+                        case inlineDataCamel = "inlineData"
+                        case text
+                    }
+
+                    init(from decoder: Decoder) throws {
+                        let container = try decoder.container(keyedBy: CodingKeys.self)
+                        inlineData = try container.decodeIfPresent(InlineData.self, forKey: .inlineData)
+                            ?? container.decodeIfPresent(InlineData.self, forKey: .inlineDataCamel)
+                        text = try container.decodeIfPresent(String.self, forKey: .text)
+                    }
+                }
+            }
+
+            enum CodingKeys: String, CodingKey {
+                case content
+                case finishReason = "finish_reason"
+                case finishReasonCamel = "finishReason"
+            }
+
+            init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                content = try container.decodeIfPresent(Content.self, forKey: .content)
+                finishReason = try container.decodeIfPresent(String.self, forKey: .finishReason)
+                    ?? container.decodeIfPresent(String.self, forKey: .finishReasonCamel)
+            }
+        }
+    }
+
+    private func geminiPlayableAudioData(from responseData: Data) throws -> Data {
+        let response = try JSONDecoder().decode(GeminiTTSResponse.self, from: responseData)
+        let firstCandidate = response.candidates?.first
+        if let finishReason = firstCandidate?.finishReason, firstCandidate?.content == nil {
+            throw NSError(domain: "JapaneseLearningCard.GeminiTTS", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Gemini 未產生音訊 (finish_reason: \(finishReason))，請重試"
+            ])
+        }
+        guard let inlineData = firstCandidate?.content?.parts?.first?.inlineData,
+              let audioData = Data(base64Encoded: inlineData.data) else {
+            throw NSError(domain: "JapaneseLearningCard.GeminiTTS", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Gemini 回應沒有可解析的 inline_data"
+            ])
+        }
+
+        if audioData.starts(with: Data("RIFF".utf8)) {
+            return audioData
+        }
+        return wavData(fromPCM: audioData, sampleRate: 24_000, channels: 1, bitsPerSample: 16)
+    }
+
+    private func wavData(fromPCM pcmData: Data, sampleRate: UInt32, channels: UInt16, bitsPerSample: UInt16) -> Data {
+        var data = Data()
+
+        func appendString(_ value: String) {
+            data.append(contentsOf: value.utf8)
+        }
+
+        func appendUInt16LE(_ value: UInt16) {
+            var littleEndian = value.littleEndian
+            data.append(Data(bytes: &littleEndian, count: MemoryLayout<UInt16>.size))
+        }
+
+        func appendUInt32LE(_ value: UInt32) {
+            var littleEndian = value.littleEndian
+            data.append(Data(bytes: &littleEndian, count: MemoryLayout<UInt32>.size))
+        }
+
+        let byteRate = sampleRate * UInt32(channels) * UInt32(bitsPerSample) / 8
+        let blockAlign = channels * bitsPerSample / 8
+        let dataSize = UInt32(pcmData.count)
+
+        appendString("RIFF")
+        appendUInt32LE(36 + dataSize)
+        appendString("WAVE")
+        appendString("fmt ")
+        appendUInt32LE(16)
+        appendUInt16LE(1)
+        appendUInt16LE(channels)
+        appendUInt32LE(sampleRate)
+        appendUInt32LE(byteRate)
+        appendUInt16LE(blockAlign)
+        appendUInt16LE(bitsPerSample)
+        appendString("data")
+        appendUInt32LE(dataSize)
+        data.append(pcmData)
+        return data
     }
 
     private func remoteSpeechInput(_ text: String) -> String {
@@ -2435,6 +2713,13 @@ struct SettingsView: View {
                                     Text("tts-1-hd").tag("tts-1-hd")
                                 }
                                 .labelsHidden()
+                            } else if viewModel.snapshot.settings.openAITtsProviderPreset == .gemini {
+                                Picker("", selection: binding(\.openAITtsModel)) {
+                                    ForEach(GeminiTTSOptions.models, id: \.self) { model in
+                                        Text(model).tag(model)
+                                    }
+                                }
+                                .labelsHidden()
                             } else {
                                 VStack(alignment: .leading, spacing: 6) {
                                     HStack(spacing: 8) {
@@ -2493,6 +2778,13 @@ struct SettingsView: View {
                                         .labelsHidden()
                                     }
                                 }
+                            } else if viewModel.snapshot.settings.openAITtsProviderPreset == .gemini {
+                                Picker("", selection: binding(\.openAITtsVoice)) {
+                                    ForEach(GeminiTTSOptions.voices, id: \.self) { voice in
+                                        Text(voice).tag(voice)
+                                    }
+                                }
+                                .labelsHidden()
                             } else {
                                 Picker("", selection: binding(\.openAITtsVoice)) {
                                     Text("alloy").tag("alloy")
@@ -2505,7 +2797,7 @@ struct SettingsView: View {
                                 .labelsHidden()
                             }
                         }
-                        .help("OpenAI 使用 voice 名稱；ElevenLabs 使用 voice_id。")
+                        .help("OpenAI/Gemini 使用 voice 名稱；ElevenLabs 使用 voice_id。")
 
                         labeledRow("測試") {
                             Button {

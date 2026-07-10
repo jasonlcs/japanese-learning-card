@@ -151,6 +151,7 @@ public enum StructuredOutputMode: String, Codable, CaseIterable, Identifiable, S
 public enum TTSProviderPreset: String, Codable, CaseIterable, Identifiable, Sendable {
     case openAI
     case elevenLabs
+    case gemini
     case custom
 
     public var id: String { rawValue }
@@ -159,6 +160,7 @@ public enum TTSProviderPreset: String, Codable, CaseIterable, Identifiable, Send
         switch self {
         case .openAI: "OpenAI"
         case .elevenLabs: "ElevenLabs"
+        case .gemini: "Gemini"
         case .custom: "自定義 (Custom)"
         }
     }
@@ -167,6 +169,7 @@ public enum TTSProviderPreset: String, Codable, CaseIterable, Identifiable, Send
         switch self {
         case .openAI: "https://api.openai.com/v1"
         case .elevenLabs: "https://api.elevenlabs.io/v1"
+        case .gemini: "https://generativelanguage.googleapis.com/v1beta"
         case .custom: "https://api.openai.com/v1"
         }
     }
@@ -175,6 +178,7 @@ public enum TTSProviderPreset: String, Codable, CaseIterable, Identifiable, Send
         switch self {
         case .openAI: "tts-1"
         case .elevenLabs: "eleven_multilingual_v2"
+        case .gemini: "gemini-2.5-flash-preview-tts"
         case .custom: "tts-1"
         }
     }
@@ -183,6 +187,7 @@ public enum TTSProviderPreset: String, Codable, CaseIterable, Identifiable, Send
         switch self {
         case .openAI: "alloy"
         case .elevenLabs: ""
+        case .gemini: "Kore"
         case .custom: "alloy"
         }
     }
