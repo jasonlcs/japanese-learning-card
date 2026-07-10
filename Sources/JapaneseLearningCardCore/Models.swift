@@ -150,7 +150,7 @@ public enum StructuredOutputMode: String, Codable, CaseIterable, Identifiable, S
 
 public enum TTSProviderPreset: String, Codable, CaseIterable, Identifiable, Sendable {
     case openAI
-    case openRouter
+    case elevenLabs
     case custom
 
     public var id: String { rawValue }
@@ -158,7 +158,7 @@ public enum TTSProviderPreset: String, Codable, CaseIterable, Identifiable, Send
     public var displayName: String {
         switch self {
         case .openAI: "OpenAI"
-        case .openRouter: "OpenRouter"
+        case .elevenLabs: "ElevenLabs"
         case .custom: "自定義 (Custom)"
         }
     }
@@ -166,7 +166,7 @@ public enum TTSProviderPreset: String, Codable, CaseIterable, Identifiable, Send
     public var defaultBaseURL: String {
         switch self {
         case .openAI: "https://api.openai.com/v1"
-        case .openRouter: "https://openrouter.ai/api/v1"
+        case .elevenLabs: "https://api.elevenlabs.io/v1"
         case .custom: "https://api.openai.com/v1"
         }
     }
@@ -174,8 +174,16 @@ public enum TTSProviderPreset: String, Codable, CaseIterable, Identifiable, Send
     public var defaultModel: String {
         switch self {
         case .openAI: "tts-1"
-        case .openRouter: "openai/gpt-4o-mini-tts-2025-12-15"
+        case .elevenLabs: "eleven_multilingual_v2"
         case .custom: "tts-1"
+        }
+    }
+
+    public var defaultVoice: String {
+        switch self {
+        case .openAI: "alloy"
+        case .elevenLabs: ""
+        case .custom: "alloy"
         }
     }
 }
@@ -860,4 +868,3 @@ public enum VocabularySourceType: String, Codable, CaseIterable, Sendable {
     case recent = "最近加入的單字"
     case unfamiliar = "不熟的單字"
 }
-

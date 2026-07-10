@@ -66,6 +66,15 @@ enum ProviderKeyStatus: Equatable {
     }
 }
 
+struct TTSVoiceOption: Identifiable, Equatable {
+    var id: String
+    var name: String
+
+    var displayName: String {
+        name.isEmpty || name == id ? id : "\(name) (\(id))"
+    }
+}
+
 @MainActor
 public final class AppViewModel: ObservableObject {
     @Published var snapshot = AppSnapshot()
@@ -80,7 +89,9 @@ public final class AppViewModel: ObservableObject {
     @Published var isOpenAITtsKeySaved = false
     @Published var availableModels: [String] = ProviderPreset.openAI.fallbackModels
     @Published var availableTtsModels: [String] = []
+    @Published var availableTtsVoices: [TTSVoiceOption] = []
     @Published var isFetchingTtsModels = false
+    @Published var ttsStatusMessage = ""
     @Published var isValidatingProvider = false
     @Published private(set) var activeProviderKeyStatus: ProviderKeyStatus = .unknown
     @Published var newSourceURL = ""
@@ -951,6 +962,13 @@ public final class AppViewModel: ObservableObject {
         scheduleTimers()
     }
 
+    func setTTSMode(useAI: Bool) {
+        var settings = snapshot.settings
+        settings.openAITtsEnabled = useAI
+        updateSettings(settings)
+        statusMessage = useAI ? "已切換為 AI 發音" : "已切換為內建發音"
+    }
+
     var activeProviderProfile: ProviderProfile? {
         snapshot.settings.activeProviderProfile
     }
@@ -1193,9 +1211,11 @@ public final class AppViewModel: ObservableObject {
             try secretStore.saveAPIKey(trimmed, reference: "openai_tts_api_key")
             isOpenAITtsKeySaved = true
             openAITtsKeyInput = ""
-            statusMessage = "已儲存 OpenAI TTS API Key"
+            statusMessage = "已儲存 TTS API Key"
+            ttsStatusMessage = "已儲存 TTS API Key"
         } catch {
-            statusMessage = "儲存 OpenAI TTS API Key 失敗：\(error.localizedDescription)"
+            statusMessage = "儲存 TTS API Key 失敗：\(error.localizedDescription)"
+            ttsStatusMessage = statusMessage
         }
     }
 
@@ -1205,20 +1225,29 @@ public final class AppViewModel: ObservableObject {
             isOpenAITtsKeySaved = false
             openAITtsKeyInput = ""
             availableTtsModels = []
-            statusMessage = "已清除 OpenAI TTS API Key"
+            availableTtsVoices = []
+            statusMessage = "已清除 TTS API Key"
+            ttsStatusMessage = "已清除 TTS API Key"
         } catch {
-            statusMessage = "清除 OpenAI TTS API Key 失敗：\(error.localizedDescription)"
+            statusMessage = "清除 TTS API Key 失敗：\(error.localizedDescription)"
+            ttsStatusMessage = statusMessage
         }
     }
 
     func fetchAvailableTtsModels() {
-        let baseURL = snapshot.settings.openAITtsBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let baseURL = snapshot.settings.openAITtsProviderPreset == .openAI
+            ? TTSProviderPreset.openAI.defaultBaseURL
+            : snapshot.settings.openAITtsBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         
         isFetchingTtsModels = true
-        statusMessage = "正在獲取 TTS 可用模型..."
+        let loadingMessage = "正在獲取 TTS 可用模型..."
+        statusMessage = loadingMessage
+        ttsStatusMessage = loadingMessage
         
         guard let apiKey = try? secretStore.apiKey(reference: "openai_tts_api_key"), !apiKey.isEmpty else {
-            statusMessage = "請先儲存 API Key 才能獲取模型"
+            let message = "請先儲存 API Key 才能獲取模型"
+            statusMessage = message
+            ttsStatusMessage = message
             isFetchingTtsModels = false
             return
         }
@@ -1228,8 +1257,15 @@ public final class AppViewModel: ObservableObject {
             baseString.removeLast()
         }
         guard let url = URL(string: "\(baseString)/models") else {
-            statusMessage = "API Base URL 格式錯誤"
+            let message = "API Base URL 格式錯誤"
+            statusMessage = message
+            ttsStatusMessage = message
             isFetchingTtsModels = false
+            return
+        }
+
+        if snapshot.settings.openAITtsProviderPreset == .elevenLabs {
+            fetchElevenLabsTtsOptions(baseString: baseString, apiKey: apiKey)
             return
         }
 
@@ -1243,42 +1279,173 @@ public final class AppViewModel: ObservableObject {
                 self.isFetchingTtsModels = false
                 
                 if let error = error {
-                    self.statusMessage = "獲取模型失敗：\(error.localizedDescription)"
+                    let message = "獲取模型失敗：\(error.localizedDescription)"
+                    self.statusMessage = message
+                    self.ttsStatusMessage = message
                     return
                 }
                 guard let data = data else {
-                    self.statusMessage = "獲取模型失敗：伺服器未回傳資料"
+                    let message = "獲取模型失敗：伺服器未回傳資料"
+                    self.statusMessage = message
+                    self.ttsStatusMessage = message
                     return
-                }
-
-                struct OpenRouterModelsResponse: Decodable {
-                    struct ModelInfo: Decodable {
-                        let id: String
-                    }
-                    let data: [ModelInfo]
                 }
 
                 do {
                     let decoder = JSONDecoder()
-                    let result = try decoder.decode(OpenRouterModelsResponse.self, from: data)
-                    
-                    let ttsModels = result.data.map { $0.id }.filter { id in
-                        let lower = id.lowercased()
-                        return lower.contains("tts") || lower.contains("speech")
-                    }
+                    let result = try decoder.decode(ProviderModelsResponse.self, from: data)
+                    let ttsModels = result.ttsModelIDs
+                    let diagnostics = result.ttsDiagnostics
                     
                     if ttsModels.isEmpty {
-                        self.availableTtsModels = result.data.map { $0.id }.sorted()
-                        self.statusMessage = "已獲取 \(self.availableTtsModels.count) 個模型"
+                        self.availableTtsModels = []
+                        let message = "未從模型清單辨識到可用 TTS 模型。\(diagnostics.summary)"
+                        self.statusMessage = message
+                        self.ttsStatusMessage = message
                     } else {
-                        self.availableTtsModels = ttsModels.sorted()
-                        self.statusMessage = "已成功獲取 \(self.availableTtsModels.count) 個 TTS 模型"
+                        self.availableTtsModels = ttsModels
+                        if !ttsModels.contains(self.snapshot.settings.openAITtsModel),
+                           let firstModel = ttsModels.first {
+                            var settings = self.snapshot.settings
+                            settings.openAITtsModel = firstModel
+                            self.updateSettings(settings)
+                            let message = "已成功獲取 \(ttsModels.count) 個 TTS 模型，並切換到 \(firstModel)"
+                            self.statusMessage = message
+                            self.ttsStatusMessage = message
+                        } else {
+                            let message = "已成功獲取 \(self.availableTtsModels.count) 個 TTS 模型"
+                            self.statusMessage = message
+                            self.ttsStatusMessage = message
+                        }
                     }
                 } catch {
-                    self.statusMessage = "解析模型列表失敗：\(error.localizedDescription)"
+                    let message = "解析模型列表失敗：\(error.localizedDescription)"
+                    self.statusMessage = message
+                    self.ttsStatusMessage = message
                 }
             }
         }.resume()
+    }
+
+    private func fetchElevenLabsTtsOptions(baseString: String, apiKey: String) {
+        guard let modelsURL = URL(string: "\(baseString)/models"),
+              let voicesURL = URL(string: "\(Self.elevenLabsV2BaseURL(from: baseString))/voices?page_size=100") else {
+            let message = "ElevenLabs API Base URL 格式錯誤"
+            statusMessage = message
+            ttsStatusMessage = message
+            isFetchingTtsModels = false
+            return
+        }
+
+        var modelsRequest = URLRequest(url: modelsURL)
+        modelsRequest.httpMethod = "GET"
+        modelsRequest.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
+
+        var voicesRequest = URLRequest(url: voicesURL)
+        voicesRequest.httpMethod = "GET"
+        voicesRequest.setValue(apiKey, forHTTPHeaderField: "xi-api-key")
+        let voicesRequestToSend = voicesRequest
+
+        struct ElevenLabsModel: Decodable {
+            var modelID: String
+            var canDoTextToSpeech: Bool?
+
+            enum CodingKeys: String, CodingKey {
+                case modelID = "model_id"
+                case canDoTextToSpeech = "can_do_text_to_speech"
+            }
+        }
+
+        struct ElevenLabsVoiceResponse: Decodable {
+            struct Voice: Decodable {
+                var voiceID: String
+                var name: String?
+
+                enum CodingKeys: String, CodingKey {
+                    case voiceID = "voice_id"
+                    case name
+                }
+            }
+
+            var voices: [Voice]
+        }
+
+        URLSession.shared.dataTask(with: modelsRequest) { [weak self] modelsData, _, modelsError in
+            if let modelsError {
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.isFetchingTtsModels = false
+                    let message = "獲取 ElevenLabs 模型失敗：\(modelsError.localizedDescription)"
+                    self.statusMessage = message
+                    self.ttsStatusMessage = message
+                }
+                return
+            }
+
+            URLSession.shared.dataTask(with: voicesRequestToSend) { [weak self] voicesData, _, voicesError in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.isFetchingTtsModels = false
+
+                    if let voicesError {
+                        let message = "獲取 ElevenLabs voices 失敗：\(voicesError.localizedDescription)"
+                        self.statusMessage = message
+                        self.ttsStatusMessage = message
+                        return
+                    }
+
+                    do {
+                        let decoder = JSONDecoder()
+                        let models = try decoder.decode([ElevenLabsModel].self, from: modelsData ?? Data())
+                        let voices = try decoder.decode(ElevenLabsVoiceResponse.self, from: voicesData ?? Data())
+                        let ttsModels = models
+                            .filter { $0.canDoTextToSpeech ?? true }
+                            .map(\.modelID)
+                            .sorted()
+                        let voiceOptions = voices.voices
+                            .map { TTSVoiceOption(id: $0.voiceID, name: $0.name ?? $0.voiceID) }
+                            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+
+                        self.availableTtsModels = ttsModels
+                        self.availableTtsVoices = voiceOptions
+
+                        var settings = self.snapshot.settings
+                        var changes: [String] = []
+                        if !ttsModels.isEmpty,
+                           !ttsModels.contains(settings.openAITtsModel),
+                           let firstModel = ttsModels.first {
+                            settings.openAITtsModel = firstModel
+                            changes.append("模型 \(firstModel)")
+                        }
+                        if !voiceOptions.isEmpty,
+                           !voiceOptions.contains(where: { $0.id == settings.openAITtsVoice }),
+                           let firstVoice = voiceOptions.first {
+                            settings.openAITtsVoice = firstVoice.id
+                            changes.append("voice \(firstVoice.name)")
+                        }
+                        if !changes.isEmpty {
+                            self.updateSettings(settings)
+                        }
+
+                        let message = "已獲取 ElevenLabs：\(ttsModels.count) 個模型、\(voiceOptions.count) 個 voices" +
+                            (changes.isEmpty ? "" : "，並切換到 \(changes.joined(separator: "、"))")
+                        self.statusMessage = message
+                        self.ttsStatusMessage = message
+                    } catch {
+                        let message = "解析 ElevenLabs 清單失敗：\(error.localizedDescription)"
+                        self.statusMessage = message
+                        self.ttsStatusMessage = message
+                    }
+                }
+            }.resume()
+        }.resume()
+    }
+
+    private static func elevenLabsV2BaseURL(from v1BaseString: String) -> String {
+        if v1BaseString.hasSuffix("/v1") {
+            return String(v1BaseString.dropLast(3)) + "/v2"
+        }
+        return v1BaseString
     }
 
     private func updateActiveProviderProfile(resetVerification: Bool, _ mutate: (inout ProviderProfile) -> Void) {
