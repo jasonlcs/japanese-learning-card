@@ -47,20 +47,10 @@ public struct RootView: View {
 
     public var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Picker("", selection: $viewModel.selectedTab) {
-                    Label("卡片", systemImage: "rectangle.stack").tag(0)
-                    Label("考題", systemImage: "checklist").tag(2)
-                    // 造卡（AI 文章／短文／手動造卡）屬於內容產生，只在 macOS 提供；
-                    // iOS 專注學習與同步，卡片由 Mac 產生後經 CloudKit 同步過來。
-                    #if os(macOS)
-                    Label("造卡", systemImage: "sparkles.rectangle.stack").tag(1)
-                    #endif
-                    Label("設定", systemImage: "gearshape").tag(4)
-                    Label("歷史", systemImage: "clock").tag(5)
-                }
-                .pickerStyle(.segmented)
-
+            HStack(spacing: 12) {
+                DesignTabBar(selectedTab: $viewModel.selectedTab)
+                    .frame(maxWidth: .infinity)
+                Spacer(minLength: 0)
                 AutoDisplayPauseToggle(viewModel: viewModel)
                 #if os(macOS)
                 PresentationModeToggle(viewModel: viewModel)
@@ -69,9 +59,9 @@ public struct RootView: View {
                     QuickReviewControls(viewModel: viewModel)
                 }
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 16)
             .padding(.top, 10)
-            .padding(.bottom, 8)
+            .padding(.bottom, 9)
             .fixedSize(horizontal: false, vertical: true)
             .layoutPriority(1)
 
@@ -103,13 +93,13 @@ public struct RootView: View {
                             }
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(Color.platformWindowBackground)
+                        .background(Color.designCanvas)
                     }
                 }
         }
         #if os(macOS)
         .frame(minWidth: 520, minHeight: 550)
-        .background(Color.platformWindowBackground)
+        .background(Color.designCanvas)
         .scrollContentBackground(.hidden)
         .onHover { inside in
             if inside {
@@ -119,30 +109,114 @@ public struct RootView: View {
             }
         }
         #else
-        .background(Color.platformWindowBackground)
+        .background(Color.designCanvas)
         .scrollContentBackground(.hidden)
         #endif
+        .tint(.cardBlue)
         .environmentObject(viewModel)
     }
 }
 
-/// 暫停／繼續「依顯示頻率自動彈出單字卡」。純手動開關。
+/// Open Design 的緊湊分頁列：選取頁籤使用白色浮起面，其餘維持冷灰底。
+private struct DesignTabBar: View {
+    @Binding var selectedTab: Int
+
+    private let tabs: [(title: String, value: Int)] = [
+        ("卡片", 0),
+        ("考題", 2),
+        ("造卡", 1),
+        ("設定", 4),
+        ("歷史", 5)
+    ]
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(tabs, id: \.value) { tab in
+                #if os(iOS)
+                if tab.value != 1 {
+                    tabButton(tab)
+                }
+                #else
+                tabButton(tab)
+                #endif
+            }
+        }
+        .padding(3)
+        .background(Color.black.opacity(0.07), in: RoundedRectangle(cornerRadius: 11))
+        .overlay {
+            RoundedRectangle(cornerRadius: 11)
+                .stroke(Color.black.opacity(0.06), lineWidth: 1)
+        }
+    }
+
+    @ViewBuilder
+    private func tabButton(_ tab: (title: String, value: Int)) -> some View {
+        Button {
+            selectedTab = tab.value
+        } label: {
+            Text(tab.title)
+                .font(.system(size: 14, weight: selectedTab == tab.value ? .bold : .semibold))
+                .foregroundStyle(selectedTab == tab.value ? Color.primary : Color.secondary)
+                .frame(maxWidth: .infinity, minHeight: 31)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background {
+            if selectedTab == tab.value {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.designSurface)
+                    .shadow(color: Color.black.opacity(0.13), radius: 3, y: 1)
+            }
+        }
+        .accessibilityAddTraits(selectedTab == tab.value ? .isSelected : [])
+    }
+}
+
+/// 暫停／繼續「依顯示頻率自動彈出單字卡」。按一下開啟選單挑暫停多久。
 struct AutoDisplayPauseToggle: View {
     @ObservedObject var viewModel: AppViewModel
 
     var body: some View {
-        Button {
-            viewModel.autoDisplayPaused.toggle()
+        Menu {
+            if viewModel.autoDisplayPaused {
+                Button("繼續") { viewModel.resumeAutoDisplay() }
+                Divider()
+            }
+            Button("暫停 1 小時") { viewModel.pauseAutoDisplay(until: Date().addingTimeInterval(3600)) }
+            Button("暫停 4 小時") { viewModel.pauseAutoDisplay(until: Date().addingTimeInterval(4 * 3600)) }
+            Button("暫停到今天晚上 11:59") { viewModel.pauseAutoDisplay(until: Self.tonightElevenFiftyNine()) }
+            Button("一直暫停") { viewModel.pauseAutoDisplay(until: nil) }
         } label: {
             Image(systemName: viewModel.autoDisplayPaused ? "play.circle.fill" : "pause.circle")
                 .font(.system(size: 16))
                 .foregroundStyle(viewModel.autoDisplayPaused ? Color.cardOrange : .secondary)
         }
-        .buttonStyle(.borderless)
-        .help(viewModel.autoDisplayPaused
-            ? "已暫停自動顯示單字卡，點一下繼續"
-            : "暫停自動顯示單字卡")
+        #if os(macOS)
+        .menuStyle(.borderlessButton)
+        #endif
+        .fixedSize()
+        .help(helpText)
         .accessibilityLabel("暫停自動顯示")
+    }
+
+    private var helpText: String {
+        guard viewModel.autoDisplayPaused else { return "暫停自動顯示單字卡" }
+        if let until = viewModel.autoDisplayPauseUntil {
+            return "已暫停自動顯示單字卡到 \(until.formatted(date: .omitted, time: .shortened))"
+        }
+        return "已暫停自動顯示單字卡，點一下選擇繼續或改暫停時間"
+    }
+
+    private static func tonightElevenFiftyNine() -> Date {
+        let calendar = Calendar.current
+        let now = Date()
+        var components = calendar.dateComponents([.year, .month, .day], from: now)
+        components.hour = 23
+        components.minute = 59
+        components.second = 0
+        let tonight = calendar.date(from: components) ?? now
+        // 如果已經過了今晚 11:59（例如半夜使用），改成明天晚上 11:59。
+        return tonight > now ? tonight : (calendar.date(byAdding: .day, value: 1, to: tonight) ?? tonight)
     }
 }
 
@@ -359,12 +433,14 @@ struct DatabaseView: View {
 
 struct QuizView: View {
     @ObservedObject var viewModel: AppViewModel
+    @AppStorage("japaneseDisplayScale") private var japaneseDisplayScale = 1.18
 
     // 高度由卡片頁決定(見 RootView),考題內容比卡片高時改用捲動。
     var body: some View {
         ScrollView {
             quizContent
         }
+        .background(Color.designCanvas)
     }
 
     private var quizContent: some View {
@@ -402,7 +478,7 @@ struct QuizView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         Text(quiz.question)
-                            .font(.headline)
+                            .font(.system(size: 17 * japaneseDisplayScale, weight: .semibold))
                             .fixedSize(horizontal: false, vertical: true)
 
                         ForEach(Array(quiz.choices.enumerated()), id: \.offset) { index, choice in
@@ -420,7 +496,7 @@ struct QuizView: View {
                                         .clipShape(Circle())
                                     
                                     Text(choice)
-                                        .font(.body.weight(.semibold))
+                                        .font(.system(size: 15 * japaneseDisplayScale, weight: .semibold))
                                         .foregroundStyle(textColor(choice: choice, quiz: quiz))
                                         .frame(maxWidth: .infinity, alignment: .leading)
                                         .multilineTextAlignment(.leading)
@@ -643,7 +719,7 @@ struct CardView: View {
                 Spacer()
             }
         }
-        .padding(12)
+        .padding(16)
         .padding(.bottom, viewModel.currentCard == nil ? 0 : 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .overlay(alignment: .bottom) {
@@ -728,6 +804,7 @@ private struct StyledLearningCard: View {
     @State private var isMeaningShown = false
     @State private var isExampleTranslationShown = false
     @State private var cardLoadTime = Date()
+    @AppStorage("japaneseDisplayScale") private var japaneseDisplayScale = 1.18
 
     private var kind: LearningCardLayoutKind { LearningCardLayoutKind(card: card) }
     private var noteSections: CardNoteSections { CardNoteSections(note: card.grammarNoteZh) }
@@ -748,16 +825,17 @@ private struct StyledLearningCard: View {
 
             cardFooter
         }
-        .padding(10)
+        .padding(16)
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .background(
             RoundedRectangle(cornerRadius: 18)
-                .fill(Color.platformTextBackground)
+                .fill(Color.designSurface)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 18)
-                .stroke(Color.cardBlue.opacity(0.42), lineWidth: 2)
+                .stroke(Color.cardBlue.opacity(0.48), lineWidth: 2)
         )
+        .shadow(color: Color.black.opacity(0.08), radius: 8, y: 3)
         .task {
             cardLoadTime = Date()
             try? await Task.sleep(for: .seconds(5))
@@ -986,8 +1064,8 @@ private struct StyledLearningCard: View {
         let showRomanized = showReading && !romanized.isEmpty && romanized != trimmedReading
         let usesRuby = RubySupport.isUsable(card.wordRuby, for: trimmedWord)
         let wordLength = trimmedWord.count
-        let baseSize = Self.wordFontSize(forLength: wordLength, isGrammar: kind == .grammar)
-        let rubySize = Self.rubyFontSize(forLength: wordLength)
+        let baseSize = Self.wordFontSize(forLength: wordLength, isGrammar: kind == .grammar) * japaneseDisplayScale
+        let rubySize = Self.rubyFontSize(forLength: wordLength) * japaneseDisplayScale
         return VStack(spacing: 6) {
             if usesRuby {
                 RubyText(
@@ -1094,6 +1172,7 @@ private struct StyledLearningCard: View {
             }
             .keyboardShortcut(.defaultAction)
             .buttonStyle(.borderedProminent)
+            .tint(.cardGreen)
             .controlSize(.regular)
         }
         .padding(.top, 2)
@@ -1139,11 +1218,11 @@ private struct StyledLearningCard: View {
             VStack(alignment: .leading, spacing: 8) {
                 if RubySupport.isUsable(card.exampleRuby, for: card.exampleJa) {
                     ZStack(alignment: .topTrailing) {
-                        RubyText(
-                            segments: card.exampleRuby,
-                            fallback: card.exampleJa,
-                            baseFont: .headline,
-                            rubyFont: .caption2,
+                            RubyText(
+                                segments: card.exampleRuby,
+                                fallback: card.exampleJa,
+                                baseFont: .system(size: 18 * japaneseDisplayScale, weight: .semibold),
+                                rubyFont: .system(size: 12 * japaneseDisplayScale, weight: .medium),
                             baseColor: .primary,
                             rubyColor: .secondary,
                             horizontalSpacing: 1,
@@ -1160,14 +1239,18 @@ private struct StyledLearningCard: View {
                 } else {
                     CopyableTextRow(
                         text: card.exampleJa,
-                        font: .headline,
+                        font: .system(size: 18 * japaneseDisplayScale, weight: .semibold),
                         copyText: clipboardText(base: card.exampleJa, reading: card.exampleReading),
                         showSpeakButton: true
                     )
                     .lineLimit(3)
                 }
                 if !card.exampleReading.isEmpty && !RubySupport.isUsable(card.exampleRuby, for: card.exampleJa) {
-                    CopyableTextRow(text: card.exampleReading, font: .subheadline, color: .secondary)
+                    CopyableTextRow(
+                        text: card.exampleReading,
+                        font: .system(size: 14 * japaneseDisplayScale, weight: .medium),
+                        color: .secondary
+                    )
                         .lineLimit(2)
                 } else if card.exampleReading.isEmpty && !RubySupport.isUsable(card.exampleRuby, for: card.exampleJa) {
                     Button {
@@ -1307,9 +1390,9 @@ private struct CardInfoPanel<Content: View>: View {
         }
         .padding(9)
         .frame(maxWidth: .infinity, alignment: .topLeading)
-        .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+        .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
         .overlay(
-            RoundedRectangle(cornerRadius: 10)
+            RoundedRectangle(cornerRadius: 12)
                 .stroke(tint.opacity(0.22), lineWidth: 1)
         )
     }
@@ -1395,10 +1478,15 @@ struct CardBadge: View {
 }
 
 private extension Color {
-    static let cardBlue = Color(red: 0.05, green: 0.34, blue: 0.68)
-    static let cardOrange = Color(red: 0.96, green: 0.61, blue: 0.05)
-    static let cardPink = Color(red: 0.93, green: 0.27, blue: 0.45)
-    static let cardGreen = Color(red: 0.25, green: 0.68, blue: 0.28)
+    // Open Design brand tokens: cool blue chrome, white content surfaces,
+    // and semantic accents reserved for learning states.
+    static let designCanvas = Color(red: 0.843, green: 0.871, blue: 0.91)
+    static let designSurface = Color.white
+    static let designBorder = Color(red: 0.62, green: 0.75, blue: 0.91)
+    static let cardBlue = Color(red: 0.071, green: 0.369, blue: 0.710)
+    static let cardOrange = Color(red: 0.94, green: 0.58, blue: 0.05)
+    static let cardPink = Color(red: 0.93, green: 0.25, blue: 0.43)
+    static let cardGreen = Color(red: 0.35, green: 0.68, blue: 0.16)
 
     static let quizCorrect = Color(red: 0.18, green: 0.80, blue: 0.44)
     static let quizIncorrect = Color(red: 0.91, green: 0.30, blue: 0.24)
@@ -2294,6 +2382,7 @@ private final class SpeechSynthesizerManager {
 struct SettingsView: View {
     @ObservedObject var viewModel: AppViewModel
     @AppStorage(UpdateChecker.autoCheckDefaultsKey) private var autoCheckUpdates = false
+    @AppStorage("japaneseDisplayScale") private var japaneseDisplayScale = 1.18
     @FocusState private var isSourceURLFocused: Bool
     @FocusState private var focusedSettingsField: SettingsField?
     @State private var profileNameDraft = ""
@@ -2399,6 +2488,7 @@ struct SettingsView: View {
                 commitSourceURL(source)
             }
         }
+        .background(Color.designCanvas)
     }
 
     @ViewBuilder
@@ -2416,10 +2506,10 @@ struct SettingsView: View {
                         .scrollContentBackground(.hidden)
                         .padding(6)
                         .frame(minHeight: 96)
-                        .background(Color.platformTextBackground)
+                        .background(Color.designSurface)
                         .overlay(
                             RoundedRectangle(cornerRadius: 6)
-                                .stroke(Color.platformSeparator, lineWidth: 1)
+                                .stroke(Color.designBorder.opacity(0.7), lineWidth: 1)
                         )
                         .clipShape(RoundedRectangle(cornerRadius: 6))
                     }
@@ -2527,6 +2617,19 @@ struct SettingsView: View {
     @ViewBuilder
     private var displaySection: some View {
                 settingsBox("顯示") {
+                    VStack(alignment: .leading, spacing: 7) {
+                        Picker("日文顯示大小", selection: $japaneseDisplayScale) {
+                            Text("標準").tag(1.0)
+                            Text("大字").tag(1.18)
+                            Text("特大").tag(1.35)
+                        }
+                        .pickerStyle(.segmented)
+
+                        Text("會同步放大單字、片假名、讀音、例句與考題文字。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
                     Stepper("顯示頻率：\(viewModel.snapshot.settings.displayIntervalMinutes) 分鐘", value: binding(\.displayIntervalMinutes), in: 1...1440)
                     Stepper("停留秒數：\(viewModel.snapshot.settings.visibleDurationSeconds) 秒", value: binding(\.visibleDurationSeconds), in: 3...300)
                     Stepper("快速複習時間：\(viewModel.snapshot.settings.quickReviewDurationMinutes) 分鐘", value: binding(\.quickReviewDurationMinutes), in: 1...30)
@@ -3400,8 +3503,15 @@ struct SettingsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         } label: {
             Text(title)
+                .font(.headline.weight(.semibold))
         }
+        .padding(13)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.designSurface, in: RoundedRectangle(cornerRadius: 13))
+        .overlay {
+            RoundedRectangle(cornerRadius: 13)
+                .stroke(Color.designBorder.opacity(0.7), lineWidth: 1)
+        }
     }
 
     private func labeledRow<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
@@ -3864,6 +3974,7 @@ struct HistoryView: View {
         .sheet(item: $selectedArticle) { article in
             AIArticleDetailView(article: article, viewModel: viewModel)
         }
+        .background(Color.designCanvas)
     }
 
     private var articleList: some View {
@@ -3926,6 +4037,8 @@ struct HistoryView: View {
                 ContentUnavailableView("還沒有 AI 文章與短文", systemImage: "doc.text")
             }
         }
+        .scrollContentBackground(.hidden)
+        .background(Color.designCanvas)
     }
 
     private var cardList: some View {
@@ -3952,6 +4065,8 @@ struct HistoryView: View {
                 ContentUnavailableView("還沒有複習紀錄", systemImage: "clock")
             }
         }
+        .scrollContentBackground(.hidden)
+        .background(Color.designCanvas)
     }
 
     private var quizList: some View {
@@ -4013,6 +4128,8 @@ struct HistoryView: View {
                 ContentUnavailableView("還沒有考試紀錄", systemImage: "checkmark.seal")
             }
         }
+        .scrollContentBackground(.hidden)
+        .background(Color.designCanvas)
     }
 
     private func quizResultText(_ quiz: QuizQuestion) -> String {
@@ -4111,6 +4228,29 @@ struct CardMakerView: View {
                 ManualCardView(viewModel: viewModel)
             }
         }
+        .background(Color.designCanvas)
+        .groupBoxStyle(OpenDesignGroupBoxStyle())
+    }
+}
+
+/// 造卡頁專用的柔和內容卡片，避免 macOS 預設 GroupBox 的深灰底堆在一起。
+private struct OpenDesignGroupBoxStyle: GroupBoxStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        VStack(alignment: .leading, spacing: 11) {
+            configuration.label
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Color.cardBlue)
+
+            configuration.content
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(14)
+        .background(Color.designSurface, in: RoundedRectangle(cornerRadius: 13))
+        .overlay {
+            RoundedRectangle(cornerRadius: 13)
+                .stroke(Color.designBorder.opacity(0.58), lineWidth: 1)
+        }
+        .shadow(color: Color.black.opacity(0.035), radius: 3, y: 1)
     }
 }
 
@@ -4162,7 +4302,11 @@ struct AIEssayView: View {
                                             .font(.caption)
                                             .padding(.horizontal, 8)
                                             .padding(.vertical, 4)
-                                            .background(Color.secondary.opacity(0.15))
+                                    .background(Color.cardBlue.opacity(0.10))
+                                    .overlay {
+                                        Capsule()
+                                            .stroke(Color.cardBlue.opacity(0.18), lineWidth: 1)
+                                    }
                                             .clipShape(Capsule())
                                     }
                                 }
@@ -4649,11 +4793,11 @@ struct LevelChip: View {
                 .font(.caption.weight(.semibold))
                 .padding(.horizontal, 10)
                 .padding(.vertical, 4)
-                .background(isSelected ? Color.accentColor.opacity(0.2) : Color.gray.opacity(0.12))
-                .foregroundColor(isSelected ? .accentColor : .primary)
+                .background(isSelected ? Color.cardBlue.opacity(0.14) : Color.designCanvas)
+                .foregroundColor(isSelected ? Color.cardBlue : .primary)
                 .clipShape(Capsule())
                 .overlay(
-                    Capsule().stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 1)
+                    Capsule().stroke(isSelected ? Color.cardBlue.opacity(0.65) : Color.clear, lineWidth: 1)
                 )
         }
         .buttonStyle(.plain)
@@ -4671,11 +4815,11 @@ struct WeekdayChip: View {
                 .font(.caption.weight(.semibold))
                 .padding(.horizontal, 10)
                 .padding(.vertical, 4)
-                .background(isSelected ? Color.accentColor.opacity(0.2) : Color.gray.opacity(0.12))
-                .foregroundColor(isSelected ? .accentColor : .primary)
+                .background(isSelected ? Color.cardBlue.opacity(0.14) : Color.designCanvas)
+                .foregroundColor(isSelected ? Color.cardBlue : .primary)
                 .clipShape(Capsule())
                 .overlay(
-                    Capsule().stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 1)
+                    Capsule().stroke(isSelected ? Color.cardBlue.opacity(0.65) : Color.clear, lineWidth: 1)
                 )
         }
         .buttonStyle(.plain)

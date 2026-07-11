@@ -171,11 +171,25 @@ public final class AppViewModel: ObservableObject {
     #if os(macOS)
     private let presentationDetector = PresentationDetector()
     #endif
-    /// 開著就一直暫停，直到自己按繼續。
-    @Published var autoDisplayPaused = UserDefaults.standard.bool(forKey: AppViewModel.autoDisplayPausedKey) {
+    /// 開著就暫停，直到自己按繼續或到了 autoDisplayPauseUntil。
+    @Published private(set) var autoDisplayPaused = UserDefaults.standard.bool(forKey: AppViewModel.autoDisplayPausedKey) {
         didSet { UserDefaults.standard.set(autoDisplayPaused, forKey: Self.autoDisplayPausedKey) }
     }
     static let autoDisplayPausedKey = "autoDisplayPaused"
+
+    /// 定時暫停的到期時間；nil 表示一直暫停（手動恢復）。跨重開機保留，
+    /// 所以「暫停 4 小時」在這期間關掉 App 再打開也還算數。
+    @Published private(set) var autoDisplayPauseUntil: Date? = UserDefaults.standard.object(forKey: AppViewModel.autoDisplayPauseUntilKey) as? Date {
+        didSet {
+            if let autoDisplayPauseUntil {
+                UserDefaults.standard.set(autoDisplayPauseUntil, forKey: Self.autoDisplayPauseUntilKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: Self.autoDisplayPauseUntilKey)
+            }
+        }
+    }
+    static let autoDisplayPauseUntilKey = "autoDisplayPauseUntil"
+    private var autoDisplayResumeTimer: Timer?
 
     /// 簡報情境是否暫停中：手動簡報開關或自動偵測任一成立（給簡報按鈕顯示用）。
     var isPresentationPaused: Bool { presentationModeEnabled || presentationAutoDetected }
@@ -289,6 +303,7 @@ public final class AppViewModel: ObservableObject {
         }
         presentationDetector.start()
         #endif
+        scheduleAutoDisplayResumeTimer()
         Task {
             await reload()
             await store.ensureAISentinelSource(extractionPrompt: AISource.sentinelExtractionPrompt)
@@ -2045,6 +2060,36 @@ public final class AppViewModel: ObservableObject {
             endDate: quickReviewSessionEndDate,
             pausedRemainingSeconds: quickReviewSessionEndDate == nil ? quickReviewSessionRemainingSeconds : nil
         )
+    }
+
+    /// 暫停「自動彈出單字卡」。`until` 為 nil 表示一直暫停，直到呼叫 resumeAutoDisplay()；
+    /// 給定時間則到了那個時間點自動恢復。
+    func pauseAutoDisplay(until date: Date?) {
+        autoDisplayPaused = true
+        autoDisplayPauseUntil = date
+        scheduleAutoDisplayResumeTimer()
+    }
+
+    func resumeAutoDisplay() {
+        autoDisplayPaused = false
+        autoDisplayPauseUntil = nil
+        autoDisplayResumeTimer?.invalidate()
+        autoDisplayResumeTimer = nil
+    }
+
+    /// 根據 autoDisplayPauseUntil 排下一次自動恢復；App 剛啟動時如果到期時間已過，直接恢復。
+    private func scheduleAutoDisplayResumeTimer() {
+        autoDisplayResumeTimer?.invalidate()
+        autoDisplayResumeTimer = nil
+        guard let date = autoDisplayPauseUntil else { return }
+        let interval = date.timeIntervalSinceNow
+        guard interval > 0 else {
+            resumeAutoDisplay()
+            return
+        }
+        autoDisplayResumeTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.resumeAutoDisplay() }
+        }
     }
 
     func pauseAutoCloseForInteraction() {
