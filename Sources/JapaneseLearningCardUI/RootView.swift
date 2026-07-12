@@ -680,15 +680,20 @@ struct CardView: View {
                     StyledLearningCard(
                         card: card,
                         isGeneratingExampleReading: viewModel.isGeneratingExampleReading,
-                        fillExampleReading: viewModel.fillCurrentExampleReading,
-                        skipCard: { viewModel.markCurrentCard(.skipped) },
-                        learnCard: { viewModel.markCurrentCard(.learned) },
-                        nextCard: viewModel.showNextCard
+                        fillExampleReading: viewModel.fillCurrentExampleReading
                     )
                     .id(card.id)
                 }
                 .scrollBounceBehavior(.basedOnSize)
                 .scrollIndicators(.hidden)
+
+                // 操作列放在 ScrollView 外面，讓較長的單字／文法內容捲動時仍可操作。
+                CardActionBar(
+                    card: card,
+                    skipCard: { viewModel.markCurrentCard(.skipped) },
+                    learnCard: { viewModel.markCurrentCard(.learned) },
+                    nextCard: viewModel.showNextCard
+                )
             } else {
                 #if os(macOS)
                 ContentUnavailableView(
@@ -797,9 +802,6 @@ private struct StyledLearningCard: View {
     var card: LearningCard
     var isGeneratingExampleReading: Bool
     var fillExampleReading: () -> Void
-    var skipCard: () -> Void
-    var learnCard: () -> Void
-    var nextCard: () -> Void
 
     @State private var isMeaningShown = false
     @State private var isExampleTranslationShown = false
@@ -813,7 +815,7 @@ private struct StyledLearningCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: 6) {
             cardHeader
 
             switch kind {
@@ -822,10 +824,8 @@ private struct StyledLearningCard: View {
             case .grammar:
                 grammarLayout
             }
-
-            cardFooter
         }
-        .padding(16)
+        .padding(12)
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .background(
             RoundedRectangle(cornerRadius: 18)
@@ -900,15 +900,15 @@ private struct StyledLearningCard: View {
     }
 
     private var vocabularyLayout: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .center, spacing: 10) {
                 wordHero
-                    .frame(maxWidth: .infinity, minHeight: 96)
+                    .frame(maxWidth: .infinity, minHeight: 80)
 
                 Divider()
-                    .frame(height: 92)
+                    .frame(height: 76)
 
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 6) {
                     CardInfoPanel(title: "意味", systemImage: "lightbulb", tint: .cardOrange) {
                         ZStack(alignment: .leading) {
                             Text(card.meaningZh)
@@ -947,11 +947,12 @@ private struct StyledLearningCard: View {
                         }
                     }
 
-                    CardInfoPanel(title: "品詞", systemImage: "tag.fill", tint: .cardGreen) {
-                        Text(card.partOfSpeech.isEmpty ? "未分類" : card.partOfSpeech)
-                            .font(.body.weight(.semibold))
-                            .lineLimit(1)
-                    }
+                    CardMetadataRow(
+                        title: "品詞",
+                        systemImage: "tag.fill",
+                        tint: .cardGreen,
+                        value: card.partOfSpeech.isEmpty ? "未分類" : card.partOfSpeech
+                    )
                 }
                 .frame(maxWidth: .infinity)
             }
@@ -977,10 +978,10 @@ private struct StyledLearningCard: View {
     }
 
     private var grammarLayout: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .center, spacing: 10) {
                 wordHero
-                    .frame(maxWidth: .infinity, minHeight: 94)
+                    .frame(maxWidth: .infinity, minHeight: 80)
 
                 CardInfoPanel(title: "意味", systemImage: "lightbulb", tint: .cardOrange) {
                     ZStack(alignment: .leading) {
@@ -1016,7 +1017,7 @@ private struct StyledLearningCard: View {
                 .frame(maxWidth: .infinity)
             }
 
-            VStack(alignment: .leading, spacing: 7) {
+            VStack(alignment: .leading, spacing: 6) {
                 CardInfoPanel(title: "接続", systemImage: "gearshape.fill", tint: .cardPink) {
                     Text(connectionText)
                         .font(.body.weight(.semibold))
@@ -1133,7 +1134,16 @@ private struct StyledLearningCard: View {
         }
     }
 
-    private var cardFooter: some View {
+}
+
+/// 卡片內容可捲動，但學習操作永遠留在頁面底部。
+private struct CardActionBar: View {
+    var card: LearningCard
+    var skipCard: () -> Void
+    var learnCard: () -> Void
+    var nextCard: () -> Void
+
+    var body: some View {
         HStack(spacing: 8) {
             Link(destination: card.sourceUrl) {
                 Label(card.sourceUrl.host() ?? card.sourceUrl.absoluteString, systemImage: "link")
@@ -1166,19 +1176,21 @@ private struct StyledLearningCard: View {
                 nextCard()
             } label: {
                 Label("下一張", systemImage: "arrow.right")
-                    .font(.callout.weight(.semibold))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
+                    .font(.caption.weight(.semibold))
+                    .padding(.horizontal, 4)
+                    // 小尺寸按鈕的高度提高約 12%，仍維持操作列的緊湊感。
+                    .padding(.vertical, 1.25)
             }
             .keyboardShortcut(.defaultAction)
             .buttonStyle(.borderedProminent)
             .tint(.cardGreen)
-            .controlSize(.regular)
+            .controlSize(.small)
         }
-        .padding(.top, 2)
-        .padding(.bottom, 12)
+        .padding(.vertical, 2)
     }
+}
 
+private extension StyledLearningCard {
     private var connectionText: String {
         if let connection = noteSections.connection {
             return connection
@@ -1215,7 +1227,7 @@ private struct StyledLearningCard: View {
 
     private func examplePanel(tint: Color, title: String) -> some View {
         CardInfoPanel(title: title, systemImage: "pencil", tint: tint) {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 6) {
                 if RubySupport.isUsable(card.exampleRuby, for: card.exampleJa) {
                     ZStack(alignment: .topTrailing) {
                             RubyText(
@@ -1377,22 +1389,52 @@ private struct CardInfoPanel<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
             Label(title, systemImage: systemImage)
                 .font(.caption.weight(.bold))
                 .foregroundStyle(.white)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 4)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
                 .background(tint.gradient, in: Capsule())
 
             content
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(9)
+        .padding(7)
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
         .overlay(
             RoundedRectangle(cornerRadius: 12)
+                .stroke(tint.opacity(0.22), lineWidth: 1)
+        )
+    }
+}
+
+/// 適合短欄位的單行資訊列，例如「品詞　副詞」。
+private struct CardMetadataRow: View {
+    var title: String
+    var systemImage: String
+    var tint: Color
+    var value: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Label(title, systemImage: systemImage)
+                .font(.caption.weight(.bold))
+                .foregroundStyle(tint)
+
+            Text(value)
+                .font(.callout.weight(.semibold))
+                .lineLimit(1)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
                 .stroke(tint.opacity(0.22), lineWidth: 1)
         )
     }
@@ -1405,7 +1447,7 @@ private struct UsageLine: View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Circle()
                 .fill(Color.cardBlue)
-                .frame(width: 5, height: 5)
+                .frame(width: 4, height: 4)
             Text(text)
                 .font(.callout.weight(.medium))
                 .lineLimit(2)
