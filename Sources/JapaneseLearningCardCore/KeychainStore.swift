@@ -29,7 +29,7 @@ public extension SecretStore {
 }
 
 public struct KeychainStore: SecretStore {
-    private let service = "JapaneseLearningCard.OpenAICompatibleAPI"
+    private static let service = "JapaneseLearningCard.OpenAICompatibleAPI"
 
     public init() {}
 
@@ -87,11 +87,16 @@ public struct KeychainStore: SecretStore {
         }
     }
 
-    private func baseQuery(reference: String) -> [String: Any] {
+    static func makeBaseQuery(reference: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: reference
+            kSecAttrService as String: Self.service,
+            kSecAttrAccount as String: reference,
+            kSecUseDataProtectionKeychain as String: true
         ]
+    }
+
+    private func baseQuery(reference: String) -> [String: Any] {
+        Self.makeBaseQuery(reference: reference)
     }
 }
