@@ -177,7 +177,17 @@ Log 檔案格式是 JSONL，一行代表一次 AI/API 呼叫。常見欄位：
 
 如果看到 `The request timed out.`，代表 Provider 在 timeout 時間內沒有完成回應，不一定是 API key 錯誤。API key 錯誤通常會看到 401 或 403 類型的 HTTP 錯誤。
 
-## 11. 資料儲存位置
+## 11. 登入時自動啟動
+
+如果希望登入 macOS 後自動啟動程式：
+
+1. 打開「設定」分頁。
+2. 切換到「系統」區塊。
+3. 開啟「登入時自動啟動」。
+
+程式會在登入後以選單列 App 啟動，不會顯示 Dock 主視窗。也可以到 macOS 系統設定的登入項目中停用。
+
+## 12. 資料儲存位置
 
 > **iCloud 同步需要用 Developer ID 簽名的正式版本**(見 [DEVELOPMENT.md](./DEVELOPMENT.md) 的 iCloud 設定)。ad-hoc、`swift run`，或 `LOCAL_BUILD=1` 的本機 UI 驗證版本會停用 iCloud / CloudKit 同步，避免測試畫面時影響雲端資料。
 
