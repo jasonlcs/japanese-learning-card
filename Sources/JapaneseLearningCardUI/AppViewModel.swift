@@ -294,8 +294,8 @@ public final class AppViewModel: ObservableObject {
     private var isSuspended = false
     private let accountChecker = CloudKitAccountChecker()
     private let conflictStore = ConflictStore(storeURL: ConflictStore.defaultURL())
-    private let syncedBase = SyncedBaseStore(url: SyncedBaseStore.defaultURL())
-    private var syncCoordinator: SyncCoordinator?
+    private let cloudKitV2State = CloudKitV2SyncStateStore(url: CloudKitV2SyncStateStore.defaultURL())
+    private var syncCoordinator: SyncCoordinatorV2?
     private var syncPollTimer: Timer?
     private var pushDebounceTask: Task<Void, Never>?
     private var isRubyMigrationRunning = false
@@ -375,12 +375,13 @@ public final class AppViewModel: ObservableObject {
             return
         }
 
-        let transport = CloudKitTransport(backing: CKContainerBacking())
-        self.syncCoordinator = SyncCoordinator(
+        let transport = CloudKitV2Transport(backing: CKContainerV2Backing())
+        self.syncCoordinator = SyncCoordinatorV2(
             transport: transport,
             store: store,
-            syncedBase: syncedBase,
-            conflictStore: conflictStore
+            stateStore: cloudKitV2State,
+            conflictStore: conflictStore,
+            legacyTransport: CloudKitTransport(backing: CKContainerBacking())
         )
 
         // 註冊 silent push 訂閱 (失敗也不影響 pull, log 一下)
@@ -433,7 +434,7 @@ public final class AppViewModel: ObservableObject {
                     iCloudLastPullAt = Date()
                     iCloudConflicts = await conflictStore.records
                     await reload()
-                } catch SyncCoordinator.SyncError.pullFailed(let msg) {
+                } catch SyncCoordinatorV2.SyncError.pullFailed(let msg) {
                     print("pull failed: \(msg)")
                 }
             }

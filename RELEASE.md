@@ -15,6 +15,13 @@ xcrun stapler staple ".build/app/JapaneseLearningCard.app"
 xcrun stapler staple ".build/app/JapaneseLearningCard.dmg"
 ```
 
+正式發佈會自動產出 universal binary，同時支援 Apple Silicon 與 Intel Mac。
+本機需要建立相同的通用版本時：
+
+```bash
+ARCHS="arm64 x86_64" SIGNING_IDENTITY="Developer ID Application: WAFERLOCK Corp. (QXYXY39U4Q)" ./build-app.sh
+```
+
 ## 需求檔案
 
 以下檔案**不要 commit 進 repo**（已在 `.gitignore` 中）：

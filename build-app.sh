@@ -12,6 +12,20 @@ ENTITLEMENTS_ADHOC="$SRC/$PRODUCT.entitlements.ad-hoc"
 DMG_NAME="$PRODUCT.dmg"
 DMG_FINAL="$BUILD_DIR/$DMG_NAME"
 
+# 可用 ARCHS 指定輸出架構，例如：
+#   ARCHS=x86_64 ./build-app.sh          # 僅供 Intel Mac 使用
+#   ARCHS="arm64 x86_64" ./build-app.sh  # Universal app
+# 未指定時維持既有行為，只編譯目前執行建置的 Mac 架構。
+ARCHS="${ARCHS:-$(uname -m)}"
+read -r -a ARCH_LIST <<< "$ARCHS"
+SWIFT_ARCH_FLAGS=()
+for arch in "${ARCH_LIST[@]}"; do
+    case "$arch" in
+        arm64|x86_64) SWIFT_ARCH_FLAGS+=("--arch" "$arch") ;;
+        *) echo "錯誤：不支援的 macOS 架構：$arch（可用：arm64、x86_64）" >&2; exit 1 ;;
+    esac
+done
+
 echo "▸ 編譯 release binary..."
 # 預設本機 ad-hoc build 是 UI 驗證版:
 # - 停用 Sparkle 版本檢查
@@ -35,14 +49,15 @@ elif [ -n "$SIGNING_IDENTITY" ]; then
     SWIFT_FLAGS+=("-Xswiftc" "-DICLOUD_ENABLED")
     echo "▸ 正式簽名 build：啟用 iCloud 同步"
 fi
-swift build -c release --product "$PRODUCT" "${SWIFT_FLAGS[@]}"
+echo "▸ 目標架構：${ARCH_LIST[*]}"
+swift build -c release --product "$PRODUCT" "${SWIFT_ARCH_FLAGS[@]}" "${SWIFT_FLAGS[@]}"
 
 echo "▸ 建立 .app bundle..."
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 
-BIN_PATH="$(swift build -c release --show-bin-path)"
+BIN_PATH="$(swift build -c release --show-bin-path "${SWIFT_ARCH_FLAGS[@]}" "${SWIFT_FLAGS[@]}")"
 BINARY="$BIN_PATH/$PRODUCT"
 cp "$BINARY" "$APP_BUNDLE/Contents/MacOS/$PRODUCT"
 cp "$SRC/Info.plist" "$APP_BUNDLE/Contents/Info.plist"

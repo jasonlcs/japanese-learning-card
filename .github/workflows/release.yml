@@ -100,7 +100,7 @@ jobs:
       - name: Build .app and DMG
         run: |
           chmod +x build-app.sh
-          ./build-app.sh
+          ARCHS="arm64 x86_64" ./build-app.sh
 
       - name: Notarize and staple DMG
         if: ${{ env.SIGNING_IDENTITY != '' }}
