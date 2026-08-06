@@ -17,6 +17,18 @@ chmod +x build-app.sh
 ./build-app.sh
 ```
 
+若要給 Intel CPU 的 Mac 使用，指定 `x86_64` 架構：
+
+```bash
+ARCHS=x86_64 ./build-app.sh
+```
+
+若要只發佈一個同時支援 Intel 與 Apple Silicon 的 universal 版本：
+
+```bash
+ARCHS="arm64 x86_64" ./build-app.sh
+```
+
 Outputs:
 
 - `.build/app/JapaneseLearningCard.app`
