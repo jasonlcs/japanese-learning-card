@@ -3266,8 +3266,22 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var systemSection: some View {
-                // AI Log 只記錄內容產生的請求，iOS 版不做產生所以不顯示。
                 #if os(macOS)
+                settingsBox("啟動") {
+                    Toggle(
+                        "登入時自動啟動",
+                        isOn: Binding(
+                            get: { viewModel.launchAtLoginEnabled },
+                            set: { viewModel.updateLaunchAtLogin($0) }
+                        )
+                    )
+                    .help("登入 macOS 後自動啟動 Japanese Learning Card，並顯示在選單列。")
+                    Text("啟用後，登入 macOS 時會自動啟動選單列 App。也可以在系統設定的登入項目中停用。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                // AI Log 只記錄內容產生的請求，iOS 版不做產生所以不顯示。
                 settingsBox("AI Log") {
                     Button {
                         viewModel.openAIRequestLog()

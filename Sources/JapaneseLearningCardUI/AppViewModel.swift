@@ -138,6 +138,13 @@ public final class AppViewModel: ObservableObject {
     @Published public var isAnnotatingArticleRuby = false
     @Published public var essayCurrentStep: EssayGenerationStep? = nil
     private var essayGenerationTask: Task<Void, Never>?
+#if os(macOS)
+    /// Whether macOS currently has this app registered as a login item.
+    @Published public private(set) var launchAtLoginEnabled = false
+    /// Provided by the macOS app target so this shared UI target does not need
+    /// to depend on ServiceManagement (and remains buildable for iOS).
+    public var setLaunchAtLogin: ((Bool) -> Result<Bool, Error>)?
+#endif
     @Published private(set) var visibleCardTimerState = VisibleCardTimerState(
         duration: 20,
         deadline: nil,
@@ -190,6 +197,33 @@ public final class AppViewModel: ObservableObject {
     }
     static let autoDisplayPauseUntilKey = "autoDisplayPauseUntil"
     private var autoDisplayResumeTimer: Timer?
+
+#if os(macOS)
+    public func configureLaunchAtLogin(
+        enabled: Bool,
+        setter: @escaping (Bool) -> Result<Bool, Error>
+    ) {
+        launchAtLoginEnabled = enabled
+        setLaunchAtLogin = setter
+    }
+
+    public func updateLaunchAtLogin(_ enabled: Bool) {
+        guard let setLaunchAtLogin else {
+            statusMessage = "無法更新登入時自動啟動設定"
+            return
+        }
+
+        switch setLaunchAtLogin(enabled) {
+        case .success(let actualEnabled):
+            launchAtLoginEnabled = actualEnabled
+            statusMessage = actualEnabled
+                ? ""
+                : "macOS 尚未允許登入時自動啟動，請到系統設定的登入項目確認。"
+        case .failure(let error):
+            statusMessage = "登入時自動啟動設定失敗：\(error.localizedDescription)"
+        }
+    }
+#endif
 
     /// 簡報情境是否暫停中：手動簡報開關或自動偵測任一成立（給簡報按鈕顯示用）。
     var isPresentationPaused: Bool { presentationModeEnabled || presentationAutoDetected }

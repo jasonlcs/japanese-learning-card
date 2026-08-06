@@ -44,6 +44,7 @@ enum AppMenuFactory {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuBarController: MenuBarController?
     private var updater: AppUpdaterController?
+    private var launchAtLoginManager: LaunchAtLoginManager?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Task { @MainActor in
@@ -52,6 +53,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let viewModel = AppViewModel(store: store, storageSettings: storageSettings)
             let controller = MenuBarController(viewModel: viewModel)
             self.menuBarController = controller
+
+            let launchAtLoginManager = LaunchAtLoginManager()
+            self.launchAtLoginManager = launchAtLoginManager
+            viewModel.configureLaunchAtLogin(
+                enabled: launchAtLoginManager.isEnabled,
+                setter: { [weak launchAtLoginManager] enabled in
+                    launchAtLoginManager?.setEnabled(enabled) ?? .failure(
+                        NSError(
+                            domain: "JapaneseLearningCard.LaunchAtLogin",
+                            code: 1,
+                            userInfo: [NSLocalizedDescriptionKey: "登入時自動啟動服務不可用"]
+                        )
+                    )
+                }
+            )
 
             // Sparkle：app 內直接下載／安裝更新。把檢查更新與自動檢查開關
             // 接到 viewModel 的 closure，讓設定頁可以觸發。
