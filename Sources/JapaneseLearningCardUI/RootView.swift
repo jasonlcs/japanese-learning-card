@@ -2680,6 +2680,39 @@ struct SettingsView: View {
                     Stepper("爬文頻率：\(viewModel.snapshot.settings.crawlIntervalHours) 小時", value: binding(\.crawlIntervalHours), in: 1...168)
                     #endif
                 }
+
+                #if os(macOS)
+                settingsBox("自動暫停") {
+                    Toggle(
+                        "滑鼠／鍵盤閒置時暫停自動彈出",
+                        isOn: Binding(
+                            get: { viewModel.idleAutoPauseEnabled },
+                            set: { viewModel.idleAutoPauseEnabled = $0 }
+                        )
+                    )
+                    .help("鍵盤／滑鼠一段時間沒動時，自動暫停卡片自動彈出；動一下之後的下一次排程恢復。")
+
+                    Stepper(
+                        "閒置門檻：\(viewModel.idleAutoPauseMinutes) 分鐘",
+                        value: Binding(
+                            get: { viewModel.idleAutoPauseMinutes },
+                            set: { viewModel.idleAutoPauseMinutes = $0 }
+                        ),
+                        in: 5...60
+                    )
+                    .disabled(!viewModel.idleAutoPauseEnabled)
+
+                    if viewModel.isIdleAutoPaused {
+                        Text("偵測到閒置，已暫停自動彈出（動一下滑鼠／鍵盤後恢復）。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else if viewModel.screenIsLocked {
+                        Text("螢幕已鎖定，已暫停自動彈出（解鎖後恢復）。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                #endif
     }
 
     @ViewBuilder

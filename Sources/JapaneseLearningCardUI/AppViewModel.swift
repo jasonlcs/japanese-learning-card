@@ -198,6 +198,33 @@ public final class AppViewModel: ObservableObject {
     static let autoDisplayPauseUntilKey = "autoDisplayPauseUntil"
     private var autoDisplayResumeTimer: Timer?
 
+    /// 滑鼠／鍵盤閒置時自動暫停自動彈出。預設開啟（UserDefaults 持久化）。
+    @Published var idleAutoPauseEnabled: Bool = UserDefaults.standard.object(forKey: AppViewModel.idleAutoPauseEnabledKey) as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(idleAutoPauseEnabled, forKey: Self.idleAutoPauseEnabledKey)
+            applyIdleAutoPauseSettings()
+        }
+    }
+    static let idleAutoPauseEnabledKey = "idleAutoPauseEnabled"
+
+    /// 閒置多久（分鐘）後判定為閒置。預設 15 分鐘。
+    @Published var idleAutoPauseMinutes: Int = UserDefaults.standard.object(forKey: AppViewModel.idleAutoPauseMinutesKey) as? Int ?? 15 {
+        didSet {
+            UserDefaults.standard.set(idleAutoPauseMinutes, forKey: Self.idleAutoPauseMinutesKey)
+            applyIdleAutoPauseSettings()
+        }
+    }
+    static let idleAutoPauseMinutesKey = "idleAutoPauseMinutes"
+
+    /// 是否偵測到使用者閒置（鍵盤／滑鼠一段時間沒動）。由 IdleDetector 更新。
+    @Published private(set) var userIsIdle = false
+
+    /// 螢幕是否鎖定中。由 DistributedNotificationCenter 更新（macOS）。
+    @Published private(set) var screenIsLocked = false
+
+    /// 閒置／鎖定是否正在暫停自動彈出（給設定頁狀態文字用）。
+    var isIdleAutoPaused: Bool { idleAutoPauseEnabled && userIsIdle }
+
 #if os(macOS)
     public func configureLaunchAtLogin(
         enabled: Bool,
@@ -228,8 +255,11 @@ public final class AppViewModel: ObservableObject {
     /// 簡報情境是否暫停中：手動簡報開關或自動偵測任一成立（給簡報按鈕顯示用）。
     var isPresentationPaused: Bool { presentationModeEnabled || presentationAutoDetected }
 
-    /// 目前是否該暫停自動彈出：手動暫停或簡報情境任一成立（自動彈出的總閘門）。
-    var isAutoDisplaySuppressed: Bool { autoDisplayPaused || isPresentationPaused }
+    /// 目前是否該暫停自動彈出：手動暫停、簡報情境、閒置或螢幕鎖定任一成立
+    /// （自動彈出的總閘門）。
+    var isAutoDisplaySuppressed: Bool {
+        autoDisplayPaused || isPresentationPaused || isIdleAutoPaused || screenIsLocked
+    }
 
     // iCloud 同步狀態 (給 settings 頁詳細面板用)
     @Published private(set) var iCloudStatus: CloudKitAccountChecker.Result = .unknown(underlying: "尚未檢查")
@@ -290,6 +320,8 @@ public final class AppViewModel: ObservableObject {
     }
     #if os(macOS)
     nonisolated(unsafe) private var sleepWakeObservers: [NSObjectProtocol] = []
+    nonisolated(unsafe) private var screenLockObservers: [NSObjectProtocol] = []
+    private let idleDetector = IdleDetector()
     #endif
     private var isSuspended = false
     private let accountChecker = CloudKitAccountChecker()
@@ -326,6 +358,9 @@ public final class AppViewModel: ObservableObject {
         for observer in sleepWakeObservers {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
+        for observer in screenLockObservers {
+            DistributedNotificationCenter.default().removeObserver(observer)
+        }
         #endif
     }
 
@@ -336,6 +371,11 @@ public final class AppViewModel: ObservableObject {
             self?.presentationAutoDetected = presenting
         }
         presentationDetector.start()
+        // 閒置偵測：使用者鍵盤／滑鼠一段時間沒動就暫停自動彈出。
+        idleDetector.onChange = { [weak self] idle in
+            self?.userIsIdle = idle
+        }
+        applyIdleAutoPauseSettings()
         #endif
         scheduleAutoDisplayResumeTimer()
         Task {
@@ -2234,8 +2274,42 @@ public final class AppViewModel: ObservableObject {
             }
             sleepWakeObservers.append(observer)
         }
+
+        // 螢幕鎖定／解鎖（loginwindow 發的 distributed notification）。
+        // 鎖定當下立即暫停自動彈出；解鎖後恢復（下一次排程到點才彈出）。
+        let lockCenter = DistributedNotificationCenter.default()
+        let lockEntries: [(Notification.Name, Bool)] = [
+            (Notification.Name("com.apple.screenIsLocked"), true),
+            (Notification.Name("com.apple.screenIsUnlocked"), false)
+        ]
+        for (name, locked) in lockEntries {
+            let observer = lockCenter.addObserver(
+                forName: name,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.screenIsLocked = locked }
+            }
+            screenLockObservers.append(observer)
+        }
         #endif
         // iOS: the OS suspends the process on sleep; no observers needed.
+    }
+
+    /// 依 idleAutoPauseEnabled / idleAutoPauseMinutes 啟動或停止閒置偵測器。
+    /// 停用時一併清除閒置狀態，避免被殘留的 userIsIdle 卡住自動彈出。
+    private func applyIdleAutoPauseSettings() {
+        #if os(macOS)
+        if idleAutoPauseEnabled {
+            idleDetector.threshold = TimeInterval(idleAutoPauseMinutes * 60)
+            idleDetector.start()
+        } else {
+            idleDetector.stop()
+            if userIsIdle {
+                userIsIdle = false
+            }
+        }
+        #endif
     }
 
     private func pauseTimers() {
