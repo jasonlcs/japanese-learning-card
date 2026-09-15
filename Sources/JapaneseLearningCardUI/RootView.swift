@@ -688,12 +688,19 @@ struct CardView: View {
                 .scrollIndicators(.hidden)
 
                 // 操作列放在 ScrollView 外面，讓較長的單字／文法內容捲動時仍可操作。
-                CardActionBar(
-                    card: card,
-                    skipCard: { viewModel.markCurrentCard(.skipped) },
-                    learnCard: { viewModel.markCurrentCard(.learned) },
-                    nextCard: viewModel.showNextCard
-                )
+                VStack(spacing: 4) {
+                    CardActionBar(
+                        card: card,
+                        skipCard: { viewModel.markCurrentCard(.skipped) },
+                        learnCard: { viewModel.markCurrentCard(.learned) },
+                        nextCard: viewModel.showNextCard
+                    )
+
+                    if viewModel.visibleCardTimerState.isActive {
+                        CardTimerLightBar(timerState: viewModel.visibleCardTimerState)
+                            .allowsHitTesting(false)
+                    }
+                }
             } else {
                 #if os(macOS)
                 ContentUnavailableView(
@@ -727,14 +734,6 @@ struct CardView: View {
         .padding(16)
         .padding(.bottom, viewModel.currentCard == nil ? 0 : 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .overlay(alignment: .bottom) {
-            if viewModel.currentCard != nil {
-                CardTimerLightBar(timerState: viewModel.visibleCardTimerState)
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 3)
-                    .allowsHitTesting(false)
-            }
-        }
     }
 }
 
@@ -803,6 +802,7 @@ private struct StyledLearningCard: View {
     var isGeneratingExampleReading: Bool
     var fillExampleReading: () -> Void
 
+    private static let revealDelay: TimeInterval = 5
     @State private var isMeaningShown = false
     @State private var isExampleTranslationShown = false
     @State private var cardLoadTime = Date()
@@ -838,9 +838,11 @@ private struct StyledLearningCard: View {
         .shadow(color: Color.black.opacity(0.08), radius: 8, y: 3)
         .task {
             cardLoadTime = Date()
-            try? await Task.sleep(for: .seconds(5))
+            try? await Task.sleep(for: .seconds(Self.revealDelay))
+            guard !Task.isCancelled else { return }
             withAnimation(.easeInOut(duration: 0.8)) {
                 isMeaningShown = true
+                isExampleTranslationShown = true
             }
         }
     }
@@ -919,22 +921,10 @@ private struct StyledLearningCard: View {
                                 .offset(y: isMeaningShown ? 0 : 2)
                             
                             if !isMeaningShown {
-                                TimelineView(.animation(minimumInterval: 0.03)) { context in
-                                    let elapsed = context.date.timeIntervalSince(cardLoadTime)
-                                    let remaining = max(0.0, 5.0 - elapsed)
-                                    
-                                    Button {
-                                        withAnimation(.easeInOut(duration: 0.8)) {
-                                            isMeaningShown = true
-                                        }
-                                    } label: {
-                                        SegmentedCountdownView(remaining: remaining)
-                                            .padding(.vertical, 6)
-                                            .padding(.trailing, 12)
-                                            .contentShape(Rectangle())
+                                revealCountdownButton(tint: .cardOrange) {
+                                    withAnimation(.easeInOut(duration: 0.8)) {
+                                        isMeaningShown = true
                                     }
-                                    .buttonStyle(.plain)
-                                    .transition(.opacity)
                                 }
                             }
                         }
@@ -994,22 +984,10 @@ private struct StyledLearningCard: View {
                             .offset(y: isMeaningShown ? 0 : 2)
                         
                         if !isMeaningShown {
-                            TimelineView(.animation(minimumInterval: 0.03)) { context in
-                                let elapsed = context.date.timeIntervalSince(cardLoadTime)
-                                let remaining = max(0.0, 5.0 - elapsed)
-                                
-                                Button {
-                                    withAnimation(.easeInOut(duration: 0.8)) {
-                                        isMeaningShown = true
-                                    }
-                                } label: {
-                                    SegmentedCountdownView(remaining: remaining)
-                                        .padding(.vertical, 6)
-                                        .padding(.trailing, 12)
-                                        .contentShape(Rectangle())
+                            revealCountdownButton(tint: .cardOrange) {
+                                withAnimation(.easeInOut(duration: 0.8)) {
+                                    isMeaningShown = true
                                 }
-                                .buttonStyle(.plain)
-                                .transition(.opacity)
                             }
                         }
                     }
@@ -1281,29 +1259,37 @@ private extension StyledLearningCard {
                         .opacity(isExampleTranslationShown ? 1.0 : 0.0)
 
                     if !isExampleTranslationShown {
-                        Button {
+                        revealCountdownButton(tint: tint) {
                             withAnimation(.easeInOut(duration: 0.8)) {
                                 isExampleTranslationShown = true
                             }
-                        } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: "eye.fill")
-                                Text("顯示中文翻譯")
-                            }
-                            .font(.caption)
-                            .foregroundStyle(tint)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .fill(tint.opacity(0.12))
-                            )
                         }
-                        .buttonStyle(.plain)
-                        .transition(.opacity)
                     }
                 }
             }
+        }
+    }
+
+    private func revealCountdownButton(tint: Color, action: @escaping () -> Void) -> some View {
+        TimelineView(.animation(minimumInterval: 0.03)) { context in
+            let elapsed = context.date.timeIntervalSince(cardLoadTime)
+            let remaining = max(0.0, Self.revealDelay - elapsed)
+            let seconds = max(1, Int(remaining.rounded(.up)))
+
+            Button(action: action) {
+                HStack(spacing: 8) {
+                    SegmentedCountdownView(remaining: remaining, color: tint)
+                    Text("\(seconds) 秒")
+                        .font(.caption.monospacedDigit().weight(.bold))
+                        .foregroundStyle(tint)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("倒數 \(seconds) 秒後顯示")
+            .transition(.opacity)
         }
     }
 
@@ -1460,29 +1446,69 @@ private struct CardTimerLightBar: View {
     var timerState: VisibleCardTimerState
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
-            GeometryReader { proxy in
-                let fraction = timerState.remainingFraction(at: context.date)
-                ZStack(alignment: .leading) {
-                    Capsule()
-                        .fill(Color.cardBlue.opacity(0.12))
-                    Capsule()
-                        .fill(
-                            LinearGradient(
-                                colors: [.cardGreen, .cardOrange, .cardPink],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                        .frame(width: proxy.size.width * fraction)
-                        .shadow(color: Color.cardOrange.opacity(timerState.isActive ? 0.45 : 0.15), radius: 5)
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let fraction = timerState.remainingFraction(at: context.date)
+            let remainingSeconds = max(0, Int((timerState.duration * fraction).rounded(.up)))
+            let isUrgent = timerState.isActive && remainingSeconds <= 5
+            let accent = isUrgent ? Color.cardPink : Color.cardOrange
+
+            HStack(spacing: 8) {
+                HStack(spacing: 5) {
+                    Image(systemName: isUrgent ? "exclamationmark.triangle.fill" : "timer")
+                    Text(timerText(remainingSeconds: remainingSeconds))
+                        .monospacedDigit()
                 }
+                .font(.caption.weight(.bold))
+                .foregroundStyle(accent)
+                .lineLimit(1)
+                .frame(minWidth: 92, alignment: .leading)
+
+                GeometryReader { proxy in
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(Color.cardBlue.opacity(0.16))
+                        Capsule()
+                            .fill(
+                                LinearGradient(
+                                    colors: isUrgent
+                                        ? [Color.cardPink, Color.cardOrange]
+                                        : [.cardGreen, .cardOrange, .cardPink],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                            )
+                            .frame(width: timerState.isActive ? max(4, proxy.size.width * fraction) : 0)
+                            .shadow(color: accent.opacity(timerState.isActive ? 0.55 : 0.15), radius: 5)
+                    }
+                }
+                .frame(height: 8)
             }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(accent.opacity(timerState.isActive ? 0.12 : 0.05))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 9)
+                    .stroke(accent.opacity(timerState.isActive ? 0.42 : 0.18), lineWidth: 1)
+            )
             .opacity(timerState.isActive ? 1 : 0.35)
-            .accessibilityLabel("卡片停留時間")
-            .accessibilityValue("\(Int(timerState.duration * timerState.remainingFraction(at: context.date))) 秒")
+            .accessibilityLabel("卡片關閉倒數")
+            .accessibilityValue(timerText(remainingSeconds: remainingSeconds))
         }
-        .frame(height: 5)
+        .frame(height: 30)
+    }
+
+    private func timerText(remainingSeconds: Int) -> String {
+        guard timerState.isActive else { return "自動關閉未啟用" }
+        if timerState.deadline == nil {
+            return "已暫停 · \(remainingSeconds) 秒"
+        }
+        if remainingSeconds <= 1 {
+            return "即將關閉"
+        }
+        return "\(remainingSeconds) 秒後關閉"
     }
 }
 
