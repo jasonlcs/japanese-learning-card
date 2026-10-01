@@ -1130,7 +1130,7 @@ private struct CardActionBar: View {
             }
             .foregroundStyle(.secondary)
 
-            Text("出現 \(card.shownCount) 次")
+            Text("出現 \(card.shownCount) 次 · \(card.formattedCreatedAt)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
