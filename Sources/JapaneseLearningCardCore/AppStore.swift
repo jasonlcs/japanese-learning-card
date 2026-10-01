@@ -115,6 +115,7 @@ public actor AppStore {
             }
             try open()
             try migrate()
+            try backfillCardDatesIfNeeded()
             let loaded = try loadSnapshot()
             if loaded == AppSnapshot(), let migrated = try? Self.loadLegacyJSON(near: databaseURL) {
                 snapshot = migrated
@@ -381,6 +382,7 @@ public actor AppStore {
         do {
             try open()
             try migrate()
+            try backfillCardDatesIfNeeded()
             snapshot = try loadSnapshot()
             lastDataVersion = currentDataVersion()
         } catch {
@@ -465,6 +467,56 @@ public actor AppStore {
             deletedQuizzes: try loadState(key: "deletedQuizzes") ?? [],
             deletedArticles: try loadState(key: "deletedArticles") ?? []
         )
+    }
+
+    @discardableResult
+    private func backfillCardDatesIfNeeded() throws -> Bool {
+        var statement: OpaquePointer?
+        try prepare("SELECT id, json FROM learning_cards;", statement: &statement)
+        defer { sqlite3_finalize(statement) }
+
+        var cardsToUpdate: [(String, String)] = []
+
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let idText = sqlite3_column_text(statement, 0),
+                  let jsonText = sqlite3_column_text(statement, 1) else { continue }
+            let id = String(cString: idText)
+            let jsonString = String(cString: jsonText)
+            guard let data = jsonString.data(using: .utf8) else { continue }
+
+            if let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                let hasValidDate: Bool
+                if let rawDate = dict["createdAt"] as? String {
+                    hasValidDate = !rawDate.hasPrefix("1970-01-01")
+                } else if let rawTimestamp = dict["createdAt"] as? Double {
+                    hasValidDate = rawTimestamp > 86400
+                } else {
+                    hasValidDate = false
+                }
+
+                if !hasValidDate {
+                    if var card = try? decoder.decode(LearningCard.self, from: data) {
+                        card.createdAt = Date()
+                        card.updatedAt = Date()
+                        let newJson = try encodeString(card)
+                        cardsToUpdate.append((id, newJson))
+                    }
+                }
+            }
+        }
+
+        if !cardsToUpdate.isEmpty {
+            for (id, newJson) in cardsToUpdate {
+                var updateStmt: OpaquePointer?
+                try prepare("UPDATE learning_cards SET json = ? WHERE id = ?;", statement: &updateStmt)
+                defer { sqlite3_finalize(updateStmt) }
+                sqlite3_bind_text(updateStmt, 1, newJson, -1, SQLITE_TRANSIENT)
+                sqlite3_bind_text(updateStmt, 2, id, -1, SQLITE_TRANSIENT)
+                try step(updateStmt)
+            }
+            return true
+        }
+        return false
     }
 
     private func persist() throws {
