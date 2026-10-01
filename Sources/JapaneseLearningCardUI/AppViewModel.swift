@@ -483,9 +483,29 @@ public final class AppViewModel: ObservableObject {
                 iCloudLastPushAt = Date()
             }
         } catch {
-            iCloudLastErrorMessage = String(describing: error)
+            iCloudLastErrorMessage = Self.userFriendlySyncErrorMessage(from: error)
             print("sync failed: \(error)")
         }
+    }
+
+    static func userFriendlySyncErrorMessage(from error: Error) -> String {
+        let desc = String(describing: error)
+        if desc.contains("serviceUnavailable") || desc.contains("Service Unavailable") || desc.contains("503") || desc.contains("zoneBusy") {
+            return "iCloud 伺服器暫時忙碌，稍後將自動重試"
+        }
+        if desc.contains("rateLimited") || desc.contains("Request Rate Limited") || desc.contains("rate limited") {
+            return "iCloud 請求頻率過高，稍後將自動重試"
+        }
+        if desc.contains("networkUnavailable") || desc.contains("networkFailure") || desc.contains("Network Unavailable") || desc.contains("Network Failure") {
+            return "網路連線中斷，恢復連線後將自動同步"
+        }
+        if desc.contains("notAuthenticated") || desc.contains("Not Authenticated") {
+            return "未登入 iCloud，請檢查系統設定中的 Apple 帳號"
+        }
+        if desc.contains("quotaExceeded") || desc.contains("Quota Exceeded") {
+            return "iCloud 儲存空間已滿"
+        }
+        return "同步暫時失敗：\(desc)"
     }
 
     /// User 在 UI 上手動選了「用 local / remote」解某個衝突:
@@ -514,7 +534,7 @@ public final class AppViewModel: ObservableObject {
         do {
             try await syncCoordinator?.pushIfNeeded()
         } catch {
-            iCloudLastErrorMessage = "推送衝突解決失敗: \(error)"
+            iCloudLastErrorMessage = "推送衝突解決失敗：\(Self.userFriendlySyncErrorMessage(from: error))"
         }
     }
 

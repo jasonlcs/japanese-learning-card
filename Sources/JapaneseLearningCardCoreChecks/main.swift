@@ -1280,7 +1280,9 @@ struct CoreChecks {
             exampleZh: "例",
             sourceUrl: URL(string: "https://example.com")!,
             status: status,
-            createdAt: Date(timeIntervalSince1970: 0),
+            // Keep merge fixtures valid and deterministic; epoch dates are
+            // repaired to the current time by LearningCard.
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000),
             lastShownAt: lastShownAt,
             updatedAt: updatedAt
         )

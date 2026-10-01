@@ -439,10 +439,26 @@ public struct LearningCard: Codable, Identifiable, Equatable, Sendable {
         self.exampleZh = exampleZh
         self.sourceUrl = sourceUrl
         self.status = status
-        self.createdAt = createdAt
+        self.createdAt = Self.isValidCreatedAt(createdAt) ? createdAt : Date()
         self.lastShownAt = lastShownAt
         self.shownCount = shownCount
         self.updatedAt = updatedAt
+    }
+
+    public static let createdDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        return formatter
+    }()
+
+    public static func isValidCreatedAt(_ date: Date) -> Bool {
+        date.timeIntervalSince1970 > 86400
+    }
+
+    public var formattedCreatedAt: String {
+        Self.createdDateFormatter.string(from: createdAt)
     }
 
     public init(from decoder: Decoder) throws {
@@ -462,7 +478,12 @@ public struct LearningCard: Codable, Identifiable, Equatable, Sendable {
         self.exampleZh = try container.decode(String.self, forKey: .exampleZh)
         self.sourceUrl = try container.decode(URL.self, forKey: .sourceUrl)
         self.status = try container.decodeIfPresent(CardStatus.self, forKey: .status) ?? .new
-        self.createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        let decodedCreatedAt = try container.decodeIfPresent(Date.self, forKey: .createdAt)
+        if let decodedCreatedAt, Self.isValidCreatedAt(decodedCreatedAt) {
+            self.createdAt = decodedCreatedAt
+        } else {
+            self.createdAt = Date()
+        }
         self.lastShownAt = try container.decodeIfPresent(Date.self, forKey: .lastShownAt)
         self.shownCount = try container.decodeIfPresent(Int.self, forKey: .shownCount) ?? 0
         self.updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()

@@ -18,168 +18,176 @@ public final class CKContainerV2Backing: CloudKitV2Backing, @unchecked Sendable 
     }
 
     public func ensureZone() async throws {
-        do {
-            let result = try await database.recordZones(for: [zoneID])[zoneID]
-            if case .success = result { return }
-            if case .failure(let error) = result,
-               let ckError = error as? CKError,
-               ckError.code != .zoneNotFound {
-                throw Self.translate(ckError)
+        try await Self.withRetry {
+            do {
+                let result = try await self.database.recordZones(for: [self.zoneID])[self.zoneID]
+                if case .success = result { return }
+                if case .failure(let error) = result,
+                   let ckError = error as? CKError,
+                   ckError.code != .zoneNotFound {
+                    throw Self.translate(ckError)
+                }
+            } catch let error as CloudKitV2BackingError {
+                throw error
+            } catch let error as CKError where error.code != .zoneNotFound {
+                throw Self.translate(error)
+            } catch {
+                // A missing custom zone is expected on the first V2 launch.
             }
-        } catch let error as CloudKitV2BackingError {
-            throw error
-        } catch let error as CKError where error.code != .zoneNotFound {
-            throw Self.translate(error)
-        } catch {
-            // A missing custom zone is expected on the first V2 launch.
-        }
 
-        do {
-            _ = try await database.modifyRecordZones(saving: [CKRecordZone(zoneID: zoneID)], deleting: [])
-        } catch let error as CKError where error.code == .serverRejectedRequest {
-            // Another device may have created it concurrently, or production
-            // CloudKit may report an existing zone as a rejected save.
-            return
-        } catch let error as CKError {
-            throw Self.translate(error)
-        } catch {
-            throw CloudKitV2BackingError.unknown(String(describing: error))
+            do {
+                _ = try await self.database.modifyRecordZones(saving: [CKRecordZone(zoneID: self.zoneID)], deleting: [])
+            } catch let error as CKError where error.code == .serverRejectedRequest {
+                // Another device may have created it concurrently, or production
+                // CloudKit may report an existing zone as a rejected save.
+                return
+            } catch let error as CKError {
+                throw Self.translate(error)
+            } catch {
+                throw CloudKitV2BackingError.unknown(String(describing: error))
+            }
         }
     }
 
     public func fetchChanges(since token: Data?) async throws -> CloudKitV2ChangeSet {
-        var serverToken = try Self.decodeToken(token)
-        var changedItems: [CloudKitV2Item] = []
-        var deletedRecordNames: [String] = []
-        var moreComing = true
+        try await Self.withRetry {
+            var serverToken = try Self.decodeToken(token)
+            var changedItems: [CloudKitV2Item] = []
+            var deletedRecordNames: [String] = []
+            var moreComing = true
 
-        while moreComing {
-            do {
-                let result = try await database.recordZoneChanges(
-                    inZoneWith: zoneID,
-                    since: serverToken,
-                    desiredKeys: nil,
-                    resultsLimit: 100
-                )
-                for modificationResult in result.modificationResultsByID.values {
-                    switch modificationResult {
-                    case .success(let modification):
-                        changedItems.append(try Self.item(from: modification.record))
-                    case .failure(let error):
-                        throw Self.translate(error)
+            while moreComing {
+                do {
+                    let result = try await self.database.recordZoneChanges(
+                        inZoneWith: self.zoneID,
+                        since: serverToken,
+                        desiredKeys: nil,
+                        resultsLimit: 100
+                    )
+                    for modificationResult in result.modificationResultsByID.values {
+                        switch modificationResult {
+                        case .success(let modification):
+                            changedItems.append(try Self.item(from: modification.record))
+                        case .failure(let error):
+                            throw Self.translate(error)
+                        }
                     }
+                    deletedRecordNames.append(contentsOf: result.deletions.map { $0.recordID.recordName })
+                    serverToken = result.changeToken
+                    moreComing = result.moreComing
+                } catch let error as CloudKitV2BackingError {
+                    throw error
+                } catch let error as CKError {
+                    throw Self.translate(error)
+                } catch {
+                    throw CloudKitV2BackingError.unknown(String(describing: error))
                 }
-                deletedRecordNames.append(contentsOf: result.deletions.map { $0.recordID.recordName })
-                serverToken = result.changeToken
-                moreComing = result.moreComing
-            } catch let error as CloudKitV2BackingError {
-                throw error
-            } catch let error as CKError {
-                throw Self.translate(error)
-            } catch {
-                throw CloudKitV2BackingError.unknown(String(describing: error))
             }
-        }
 
-        return CloudKitV2ChangeSet(
-            changedItems: changedItems,
-            deletedRecordNames: deletedRecordNames,
-            serverChangeToken: try Self.encodeToken(serverToken)
-        )
+            return CloudKitV2ChangeSet(
+                changedItems: changedItems,
+                deletedRecordNames: deletedRecordNames,
+                serverChangeToken: try Self.encodeToken(serverToken)
+            )
+        }
     }
 
     public func save(items: [CloudKitV2Item]) async throws {
         for batch in strideBatches(items, size: maxItemsPerBatch) {
-            var temporaryFiles: [URL] = []
-            defer {
-                for fileURL in temporaryFiles {
-                    try? FileManager.default.removeItem(at: fileURL)
-                }
-            }
-            do {
-                let records = try batch.map { item -> CKRecord in
-                    if let payload = item.payload, payload.count > CloudKitV2Item.maxInlinePayloadBytes {
-                        throw CloudKitV2BackingError.recordTooLarge
+            try await Self.withRetry {
+                var temporaryFiles: [URL] = []
+                defer {
+                    for fileURL in temporaryFiles {
+                        try? FileManager.default.removeItem(at: fileURL)
                     }
-                    let record = CKRecord(
-                        recordType: CloudKitV2Schema.recordType,
-                        recordID: CKRecord.ID(recordName: item.id, zoneID: zoneID)
+                }
+                do {
+                    let records = try batch.map { item -> CKRecord in
+                        if let payload = item.payload, payload.count > CloudKitV2Item.maxInlinePayloadBytes {
+                            throw CloudKitV2BackingError.recordTooLarge
+                        }
+                        let record = CKRecord(
+                            recordType: CloudKitV2Schema.recordType,
+                            recordID: CKRecord.ID(recordName: item.id, zoneID: self.zoneID)
+                        )
+                        record[CloudKitV2Schema.Field.kind.rawValue] = item.kind.rawValue as NSString
+                        record[CloudKitV2Schema.Field.entityID.rawValue] = item.entityID as NSString
+                        record[CloudKitV2Schema.Field.schemaVersion.rawValue] = NSNumber(value: item.schemaVersion)
+                        record[CloudKitV2Schema.Field.updatedAt.rawValue] = item.updatedAt as NSDate
+                        record[CloudKitV2Schema.Field.isDeleted.rawValue] = NSNumber(value: item.isDeleted)
+
+                        if let payload = item.payload {
+                            record[CloudKitV2Schema.Field.payload.rawValue] = payload as NSData
+                        } else {
+                            record[CloudKitV2Schema.Field.payload.rawValue] = nil
+                        }
+
+                        if let assetData = item.assetData {
+                            let fileURL = FileManager.default.temporaryDirectory
+                                .appendingPathComponent("jlc-v2-\(UUID().uuidString).asset")
+                            try assetData.write(to: fileURL, options: [.atomic])
+                            temporaryFiles.append(fileURL)
+                            record[CloudKitV2Schema.Field.contentAsset.rawValue] = CKAsset(fileURL: fileURL)
+                        } else {
+                            record[CloudKitV2Schema.Field.contentAsset.rawValue] = nil
+                        }
+                        return record
+                    }
+
+                    let result = try await self.database.modifyRecords(
+                        saving: records,
+                        deleting: [],
+                        savePolicy: .changedKeys,
+                        atomically: false
                     )
-                    record[CloudKitV2Schema.Field.kind.rawValue] = item.kind.rawValue as NSString
-                    record[CloudKitV2Schema.Field.entityID.rawValue] = item.entityID as NSString
-                    record[CloudKitV2Schema.Field.schemaVersion.rawValue] = NSNumber(value: item.schemaVersion)
-                    record[CloudKitV2Schema.Field.updatedAt.rawValue] = item.updatedAt as NSDate
-                    record[CloudKitV2Schema.Field.isDeleted.rawValue] = NSNumber(value: item.isDeleted)
-
-                    if let payload = item.payload {
-                        record[CloudKitV2Schema.Field.payload.rawValue] = payload as NSData
-                    } else {
-                        record[CloudKitV2Schema.Field.payload.rawValue] = nil
+                    let failures = result.saveResults.compactMap { id, saveResult -> String? in
+                        if case .failure(let error) = saveResult {
+                            return "\(id.recordName): \(error)"
+                        }
+                        return nil
                     }
-
-                    if let assetData = item.assetData {
-                        let fileURL = FileManager.default.temporaryDirectory
-                            .appendingPathComponent("jlc-v2-\(UUID().uuidString).asset")
-                        try assetData.write(to: fileURL, options: [.atomic])
-                        temporaryFiles.append(fileURL)
-                        record[CloudKitV2Schema.Field.contentAsset.rawValue] = CKAsset(fileURL: fileURL)
-                    } else {
-                        record[CloudKitV2Schema.Field.contentAsset.rawValue] = nil
+                    if !failures.isEmpty {
+                        throw CloudKitV2BackingError.partialBatchFailure(failures.joined(separator: "; "))
                     }
-                    return record
+                } catch let error as CloudKitV2BackingError {
+                    throw error
+                } catch let error as CKError {
+                    throw Self.translate(error)
+                } catch {
+                    throw CloudKitV2BackingError.unknown(String(describing: error))
                 }
-
-                let result = try await database.modifyRecords(
-                    saving: records,
-                    deleting: [],
-                    savePolicy: .changedKeys,
-                    atomically: false
-                )
-                let failures = result.saveResults.compactMap { id, saveResult -> String? in
-                    if case .failure(let error) = saveResult {
-                        return "\(id.recordName): \(error)"
-                    }
-                    return nil
-                }
-                if !failures.isEmpty {
-                    throw CloudKitV2BackingError.partialBatchFailure(failures.joined(separator: "; "))
-                }
-            } catch let error as CloudKitV2BackingError {
-                throw error
-            } catch let error as CKError {
-                throw Self.translate(error)
-            } catch {
-                throw CloudKitV2BackingError.unknown(String(describing: error))
             }
         }
     }
 
     public func registerSubscription() async throws {
-        do {
-            _ = try await database.subscription(for: CloudKitV2Schema.subscriptionID)
-            return
-        } catch let error as CKError where error.code != .unknownItem {
-            throw Self.translate(error)
-        } catch {
-            // Missing subscription: create it below.
-        }
+        try await Self.withRetry {
+            do {
+                _ = try await self.database.subscription(for: CloudKitV2Schema.subscriptionID)
+                return
+            } catch let error as CKError where error.code != .unknownItem {
+                throw Self.translate(error)
+            } catch {
+                // Missing subscription: create it below.
+            }
 
-        let subscription = CKRecordZoneSubscription(
-            zoneID: zoneID,
-            subscriptionID: CloudKitV2Schema.subscriptionID
-        )
-        let info = CKSubscription.NotificationInfo()
-        info.shouldSendContentAvailable = true
-        subscription.notificationInfo = info
+            let subscription = CKRecordZoneSubscription(
+                zoneID: self.zoneID,
+                subscriptionID: CloudKitV2Schema.subscriptionID
+            )
+            let info = CKSubscription.NotificationInfo()
+            info.shouldSendContentAvailable = true
+            subscription.notificationInfo = info
 
-        do {
-            _ = try await database.save(subscription)
-        } catch let error as CKError where error.code == .serverRejectedRequest || error.code == .invalidArguments {
-            return
-        } catch let error as CKError {
-            throw Self.translate(error)
-        } catch {
-            throw CloudKitV2BackingError.unknown(String(describing: error))
+            do {
+                _ = try await self.database.save(subscription)
+            } catch let error as CKError where error.code == .serverRejectedRequest || error.code == .invalidArguments {
+                return
+            } catch let error as CKError {
+                throw Self.translate(error)
+            } catch {
+                throw CloudKitV2BackingError.unknown(String(describing: error))
+            }
         }
     }
 
@@ -219,10 +227,11 @@ public final class CKContainerV2Backing: CloudKitV2Backing, @unchecked Sendable 
         return try NSKeyedUnarchiver.unarchivedObject(ofClass: CKServerChangeToken.self, from: data)
     }
 
-    private static func translate(_ error: Error) -> CloudKitV2BackingError {
+    static func translate(_ error: Error) -> CloudKitV2BackingError {
         guard let error = error as? CKError else {
             return .unknown(String(describing: error))
         }
+        let retryAfter = error.retryAfterSeconds ?? (error.userInfo[CKErrorRetryAfterKey] as? NSNumber)?.doubleValue
         switch error.code {
         case .networkUnavailable, .networkFailure:
             return .networkUnavailable
@@ -234,8 +243,66 @@ public final class CKContainerV2Backing: CloudKitV2Backing, @unchecked Sendable 
             return .recordTooLarge
         case .changeTokenExpired:
             return .changeTokenExpired
+        case .serviceUnavailable:
+            return .serviceUnavailable(retryAfter: retryAfter)
+        case .requestRateLimited:
+            return .rateLimited(retryAfter: retryAfter)
+        case .zoneBusy:
+            return .zoneBusy
         default:
             return .unknown(String(describing: error))
+        }
+    }
+
+    static func retryDelay(for error: CloudKitV2BackingError, attempt: Int) -> TimeInterval {
+        let baseDelay: TimeInterval
+        switch error {
+        case .serviceUnavailable(let retryAfter):
+            baseDelay = retryAfter ?? (Double(attempt) * 2.0)
+        case .rateLimited(let retryAfter):
+            baseDelay = retryAfter ?? (Double(attempt) * 3.0)
+        case .zoneBusy:
+            baseDelay = Double(attempt) * 2.0
+        default:
+            return 0
+        }
+        let jitter = Double.random(in: 0.1...0.4)
+        return max(baseDelay + jitter, 0.2)
+    }
+
+    static func withRetry<T: Sendable>(
+        maxAttempts: Int = 3,
+        sleeper: (@Sendable (UInt64) async throws -> Void)? = nil,
+        operation: @Sendable () async throws -> T
+    ) async throws -> T {
+        var attempt = 1
+        while true {
+            do {
+                return try await operation()
+            } catch let error as CloudKitV2BackingError {
+                guard attempt < maxAttempts else { throw error }
+                let delay = retryDelay(for: error, attempt: attempt)
+                guard delay > 0 else { throw error }
+                if let sleeper {
+                    try await sleeper(UInt64(delay * 1_000_000_000))
+                } else {
+                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                }
+                attempt += 1
+            } catch let error as CKError {
+                let translated = translate(error)
+                guard attempt < maxAttempts else { throw translated }
+                let delay = retryDelay(for: translated, attempt: attempt)
+                guard delay > 0 else { throw translated }
+                if let sleeper {
+                    try await sleeper(UInt64(delay * 1_000_000_000))
+                } else {
+                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                }
+                attempt += 1
+            } catch {
+                throw translate(error)
+            }
         }
     }
 
