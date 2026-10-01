@@ -3,6 +3,14 @@
     <channel>
         <title>JapaneseLearningCard</title>
         <item>
+            <title>0.2.61</title>
+            <pubDate>Thu, 01 Oct 2026 21:25:24 +0000</pubDate>
+            <sparkle:version>2061</sparkle:version>
+            <sparkle:shortVersionString>0.2.61</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/jasonlcs/japanese-learning-card/releases/download/v0.2.61/JapaneseLearningCard.dmg" length="7678072" type="application/octet-stream" sparkle:edSignature="sgj3AZfkNbwjlu3MKyo9q9rcaXfdR7G2pCAswd8OhSk8ThPTPir4lL7N3SDechmZBUs0OVkp51l7iZigq4SdBA=="/>
+        </item>
+        <item>
             <title>0.2.60</title>
             <pubDate>Tue, 15 Sep 2026 07:43:41 +0000</pubDate>
             <sparkle:version>2060</sparkle:version>
@@ -17,14 +25,6 @@
             <sparkle:shortVersionString>0.2.59</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <enclosure url="https://github.com/jasonlcs/japanese-learning-card/releases/download/v0.2.59/JapaneseLearningCard.dmg" length="7655802" type="application/octet-stream" sparkle:edSignature="ZtnLop9mDpSPPG2cMNgqQ187XwVXSfbP25n7oSix74/+P0EzhqPtom5G+n5bp0zbltqdRCQnTa1vIZOGQ0VxAA=="/>
-        </item>
-        <item>
-            <title>0.2.58</title>
-            <pubDate>Thu, 06 Aug 2026 06:40:28 +0000</pubDate>
-            <sparkle:version>2058</sparkle:version>
-            <sparkle:shortVersionString>0.2.58</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/jasonlcs/japanese-learning-card/releases/download/v0.2.58/JapaneseLearningCard.dmg" length="7644175" type="application/octet-stream" sparkle:edSignature="QT7MKmU3p7wDJmiEPbzuLCTTfrr8t6DO7OVo2h8z87DeeuMT9TpZy9CW6FrKURzSyyNNbxa2NTDbfhkzVxGzBA=="/>
         </item>
         <item>
             <title>0.2.57</title>
