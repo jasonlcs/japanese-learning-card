@@ -92,6 +92,9 @@ public enum CloudKitV2BackingError: Error, Sendable, Equatable {
     case notAuthenticated
     case recordTooLarge
     case changeTokenExpired
+    case serviceUnavailable(retryAfter: TimeInterval?)
+    case rateLimited(retryAfter: TimeInterval?)
+    case zoneBusy
     case partialBatchFailure(String)
     case unknown(String)
 }
